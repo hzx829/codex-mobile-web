@@ -16,6 +16,7 @@
     "test": "tsx --test test/*.test.ts",
     "check": "tsc --noEmit && npm test",
     "test:native": "tsx scripts/native-check.ts",
+    "test:portable": "tsx scripts/portable-check.ts",
     "package:windows": "npm run build && tsx scripts/package-windows.ts"
   },
   "dependencies": {

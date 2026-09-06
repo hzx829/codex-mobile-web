@@ -6,7 +6,7 @@
 
 本机配置已生成在 `.local/config.json`，项目根为 `C:\Users\NINGMEI\Documents\delegate`。中继地址为 `http://192.168.1.248:3340`。
 
-1. 双击项目根目录的 `start.cmd`。它会后台启动中继与连接器，并打开连接二维码。
+1. 双击项目根目录的 `start.cmd`。它会后台启动中继与连接器，并打开电脑状态与连接二维码。
 2. 手机连接同一 Wi-Fi，扫描二维码打开网页。不需要安装 App。
 3. 在 Remote 首页选择项目或最近会话；底部可搜索聊天、开始新聊天。先用不重要的会话测试补充、停止和请求回应。
 4. 关闭全部服务用 `stop.cmd`。这会结束连接器自己管理的 Codex；独立官方桌面保持运行。
@@ -27,13 +27,17 @@
 
 ## 新电脑用便携包
 
-在 `release/` 找到本次生成的文件夹或 ZIP。解压后双击 `start.cmd`，第一次填写项目目录和中继地址。包内带 Node 运行时和已构建程序；电脑需已有可用 Codex，不用安装本项目的开发依赖。
+在 `release/` 找到本次生成的 ZIP。解压后双击 `start.cmd`，第一次会打开配置窗口：选择项目文件夹，选择“本机中继”或“连接自己的中继”，填写地址。公网模式填写服务器的 Token，本机模式首次可留空。包内带 Node 运行时和已构建程序；电脑需已有可用 Codex，不用安装本项目的开发依赖。
 
-初次填写自己的公网中继地址时，先运行下方配置命令，让手机、电脑与服务器使用同一 Token，再双击 `connector-only.cmd`。`start.cmd` 同时启动本地中继，适合先验证局域网。
+配置窗口支持多个项目目录，也可以选择原有 `codex.exe` 和 Codex 配置目录；留空时自动识别。保存后 `start.cmd` 会记住连接方式，公网模式只启动连接器。状态页显示连接、当前模型和官方桌面是否在线，检查过程不会创建任务。
+
+日后修改配置：先完成任务，双击 `stop.cmd`，再打开 `configure.cmd`。配置窗口不会在后台任务运行时直接替换连接配置。Token 通过本地输入流传递给配置程序，不作为窗口启动命令参数传递。配置文件损坏时会报错，不自动重置凭证。
+
+需要脚本配置时仍可使用：
 
 ```powershell
 # 源码目录；便携包将 node 换为 .\runtime\node.exe
-node build/setup.mjs --yes --root "D:\my-project" --relay "https://codex.example.com" --token "你的实例Token"
+node build/setup.mjs --yes --mode connector --root "D:\my-project" --relay "https://codex.example.com" --token "你的实例Token"
 ```
 
 只修改本项目的 `.local/config.json`，可以添加多个 `roots`。需要指定原有 Codex 环境时，可设置 `codexBin`（真实可执行文件）、`codexHome`；未填写时沿用当前用户的环境。当前验证的 CLI 0.146.0 不允许 app-server 使用命名 profile；设置 `profile` 或 `CODEX_PROFILE` 会明确报错，不会静默换模型。已在桌面启动的会话使用桌面自身设置，连接器管理的新会话使用默认配置。模型 Key 继续由本机 Codex 配置或环境变量提供，连接器不采集 Key，也不把配置正文发往中继。
@@ -47,11 +51,11 @@ node build/setup.mjs --yes --root "D:\my-project" --relay "https://codex.example
 1. 将 `.env.example` 复制为 `.env`，填写至少 24 位随机 Token。可使用本机配置生成的 Token。
 2. 在服务器运行 `docker compose up -d --build`。
 3. 参考 `Caddyfile.example`，用现有反向代理将自己的 HTTPS 域名转到 `127.0.0.1:3340`。
-4. 电脑用 `setup` 保存 HTTPS 地址和相同 Token，再启动 `connector-only.cmd`。
+4. 电脑打开 `configure.cmd`，选择“连接自己的中继”，保存 HTTPS 地址和相同 Token，再运行 `start.cmd`。
 
 容器不挂载业务数据卷，根文件系统只读；中继只保留内存路由。聊天、文件和模型请求内容不会写入中继数据库或日志。自托管服务器的外部代理日志配置由部署者管理；连接 Token 放在二维码链接的 fragment 和 WebSocket 首帧，不放请求查询参数。
 
-更换 Token：电脑执行 `node build/setup.mjs --yes --rotate`，把新 Token 同步到服务器 `.env`，重启中继与连接器，再重新扫码。中继重启会断开旧客户端；同一连接器保持运行时，手机与中继断线不会终止本机任务。Docker 与公网证书部署尚未在本环境实测。
+更换 Token：先完成任务并停止连接器，在配置窗口粘贴新 Token（至少 24 位），同步到服务器 `.env`，重启中继与连接器，再重新扫码。脚本也可以用 `node build/setup.mjs --yes --rotate` 生成新 Token。中继重启会断开旧客户端；同一连接器保持运行时，手机与中继断线不会终止本机任务。Docker 与公网证书部署尚未在本环境实测。
 
 ## 第一次人工验证
 
@@ -74,6 +78,7 @@ npm run check          # 类型检查与必要协议/故障测试
 npm run test:native    # 真实 Codex + 本地模拟模型；不使用模型账户
 npm run build          # 手机网页与可独立运行的 Node 程序
 npm run package:windows
+npm run test:portable  # 隔离目录检查便携包启动、模型配置、重连和 Token 轮换
 ```
 
 `npm run probe` 只读核对安装、有效模型与桌面握手。设置 `PROBE_THREAD_ID` 可额外观察指定桌面会话，不发送消息或停止任务。
@@ -81,7 +86,7 @@ npm run package:windows
 登录自启为可选项，默认不启用：
 
 ```powershell
-# 公网中继用户启动连接器；本地中继加 -Mode all
+# 默认沿用配置窗口保存的连接方式
 powershell -ExecutionPolicy Bypass -File scripts/windows/autostart.ps1
 # 取消
 powershell -ExecutionPolicy Bypass -File scripts/windows/autostart.ps1 -Disable
@@ -90,5 +95,9 @@ powershell -ExecutionPolicy Bypass -File scripts/windows/autostart.ps1 -Disable
 连接器记录位于 `.local/operations.sqlite`，保存操作 ID、载荷摘要和结果关联，启动时清理超过 7 天的记录；不复制完整聊天。未知且超过 5 分钟的旧操作不会重新执行。手机本地保留草稿与待核实操作，图片附件只放内存，刷新后需重新选择。
 
 卸载：先取消本项目自启、停止服务，再删除本项目或便携包目录。保留 `.local/` 可保留连接配置和去重记录；不需要改动原生 Codex 会话、模型配置或项目文件。
+
+升级与回退：等当前任务结束，停止旧版本；将新包解压到新目录，把旧目录的 `.local/` 复制到新目录，再启动。旧版本保留作为回退；同一电脑不要同时运行两个版本。若已设置登录自启，在新目录重新运行自启脚本，快捷方式会改指新目录。升级原生 Codex 后，先在测试会话核对发送、补充、停止和审批，再继续重要任务。
+
+包内 `VERSION.txt` 记录源码提交、Node 版本及协议检查组合，ZIP 旁的 `.sha256` 可用于核对下载完整性。首次配置窗口、扫码和真实手机操作按 [人工验收](ACCEPTANCE.md) 执行。
 
 已知限制：尚无 macOS 安装验收；不支持独立 CLI 活动任务接管；每次最多显示最近 100 轮，大输出会截断；不提供大文件下载、后台推送、音频上传、嵌套 MCP 表单或外部 OAuth 授权页面。手机听写使用系统键盘。以上不影响继续完成核心场景验收，但暂不宣传完整移动端功能对齐。

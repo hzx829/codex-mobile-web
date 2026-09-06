@@ -1,4 +1,4 @@
-param([switch]$Disable,[ValidateSet('all','connector')][string]$Mode='connector')
+param([switch]$Disable,[ValidateSet('auto','all','connector')][string]$Mode='auto')
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $shortcutPath=Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Mobile Web.lnk'
