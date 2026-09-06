@@ -1,0 +1,2 @@
+import {build} from 'esbuild';
+await build({entryPoints:{relay:'src/server/main.ts',connector:'src/connector/main.ts',setup:'scripts/setup.ts'},outdir:'build',outExtension:{'.js':'.mjs'},bundle:true,platform:'node',target:'node22',format:'esm',banner:{js:"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);"},external:['bufferutil','utf-8-validate'],legalComments:'linked',logLevel:'info'});
