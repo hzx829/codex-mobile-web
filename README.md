@@ -1,95 +1,123 @@
-# Codex Mobile Web 项目说明
+# Codex Mobile Web
 
-状态：0.1.3 Windows 验证版已实现，待完整应用验收。更新日期：2026-09-17。
+English | [简体中文](README.zh-CN.md)
 
-先看 [启动与验收说明](QUICKSTART.md)。源码目录双击 `start.cmd`；便携包位于 `release/`。
+Continue using Codex on your computer from your phone, through a relay you host.
 
-让已经在电脑上使用 Codex 的用户，通过自己托管的中继，在手机网页查看进度、继续指挥、停止任务和处理审批。沿用电脑上的模型与开发环境，包括 DeepSeek 等已兼容 Codex 的第三方模型。
+Browse projects and conversations, send instructions, steer or stop a running task, and respond to Codex approvals from a mobile browser. Execution stays on your computer, with its existing workspace, model configuration, and tools. No mobile app or project-operated account service is required.
 
-`Codex Mobile Web` 是工作名称。本项目为独立第三方方案。
+## Features
 
-## 文档入口
+- Discover existing projects and conversations, including archived conversations.
+- Start or continue tasks, follow progress, add instructions, stop a turn, and answer supported approvals or questions.
+- View Markdown, code, task diffs, and small text/image files. Attach images when the runtime confirms model support.
+- Reconnect after a browser disconnect, retain text drafts, and check uncertain operations without automatically resending them.
 
-| 文档 | 用途 |
+Closing the phone page does not stop Codex. The computer must remain on and connected. The relay is not a backup service and cannot execute tasks or supply stored conversation history while the computer is offline.
+
+## Privacy
+
+- You choose and operate the relay. The bridge has no built-in analytics, advertising, or telemetry endpoint operated by this project.
+- The relay application does not persist conversation history or project files, but it can read forwarded content. There is no end-to-end encryption; use a trusted relay with HTTPS/WSS for public access.
+- Model requests go from your computer to your configured provider. The bridge does not deliberately upload model credentials, but secrets in messages, tool output, or file previews travel with that content.
+- The shared Token grants access to projects and conversations on connected computers, without per-device or per-project permissions. File previews use the connector's OS permissions and can read outside the selected project, subject to preview format and size limits.
+
+See [Privacy details](PRIVACY.md#english) for data storage, Token revocation, and removal.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Phone["Phone browser"] <-->|"HTTPS / WSS"| Proxy
+    subgraph Server["Your relay server"]
+        Proxy["HTTPS reverse proxy"] <-->|"Internal HTTP / WS"| Relay["Web assets + Token authentication + routing"]
+    end
+    Connector["Computer connector"] <-->|"Outbound WSS connection"| Proxy
+    Connector <-->|"Local IPC"| Desktop["Codex desktop sessions"]
+    Connector <-->|"Local stdio"| Runtime["Connector-managed Codex app-server"]
+    Desktop --> Local["Local workspace and Codex state"]
+    Runtime --> Local
+    Desktop --> Provider["Your model provider and configured tools"]
+    Runtime --> Provider
+```
+
+This shows the recommended public HTTPS deployment. TLS ends at the reverse proxy. The proxy-to-relay connection stays on the same host or private container network; both are trusted components.
+
+The connector uses local desktop IPC for existing desktop sessions, and a Codex app-server child process for sessions it creates or resumes. If a live owner cannot be reached, it shows history and asks you to confirm that the original task has ended before resuming it here. Active standalone CLI sessions cannot be taken over.
+
+The relay keeps connection routes in memory; the connector stores operation IDs and receipts in local SQLite. After reconnecting, the browser fetches current state and checks earlier operations. Uncertain results remain pending rather than triggering an automatic retry. Restarting the connector may interrupt its own app-server tasks; its stop script does not stop the separate Codex desktop process.
+
+Implementation: [web/](web/), [relay.ts](src/server/relay.ts), [control.ts](src/connector/control.ts), [desktop.ts](src/connector/desktop.ts), and [ledger.ts](src/connector/ledger.ts). More detail is in [DESIGN.md](DESIGN.md) (Chinese).
+
+## Getting started
+
+You need Windows with working Codex, a phone browser, and a relay reachable by both. Keep Codex desktop running under the same OS user as the connector to control existing desktop sessions.
+
+### Windows connector
+
+Download the Windows ZIP from [Releases](https://github.com/hzx829/codex-mobile-web/releases), extract it and run `start.cmd`. Node and the built application are included; Codex must already be installed separately.
+
+From a source checkout, install Node 24 and run in the repository directory:
+
+```powershell
+npm ci
+npm run build
+.\start.cmd
+```
+
+The first launch opens setup. For a local trial, select “本机中继” (local relay), join the same trusted Wi-Fi on your phone, and scan the QR code. Local mode uses unencrypted HTTP. For public use, deploy the HTTPS relay below, then select “连接自己的中继” (your own relay), enter its HTTPS URL and shared Token, and start the connector. Projects are discovered automatically.
+
+### Public relay
+
+On Linux with Docker Engine and Compose v2, use a source checkout or an extracted relay package from [Releases](https://github.com/hzx829/codex-mobile-web/releases). Point a domain at the server and allow TCP 80/443. In that directory:
+
+```sh
+cp .env.example .env
+chmod 600 .env
+openssl rand -hex 32
+```
+
+Edit `.env`: set `DOMAIN` to your hostname without `https://`, and `BRIDGE_TOKEN` to the generated value. Then run:
+
+```sh
+docker compose -f compose.yaml -f compose.https.yaml config --quiet
+docker compose -f compose.yaml -f compose.https.yaml up -d --build
+curl --fail https://your-domain.example/health
+```
+
+Replace `your-domain.example` with your hostname. The supplied Caddy configuration provides HTTPS; port 3340 is published only on server loopback. The computer connects outbound, so no router port forwarding to it is needed. Source builds download npm dependencies; prebuilt relay packages only need the base container images.
+
+See [DEPLOY.md](DEPLOY.md) (Chinese) for existing proxies, upgrades, rollback, and troubleshooting.
+
+### Connect and manage
+
+Scan the connector's QR code or open your relay URL and enter the same Token. The browser remembers it for that site. Treat the QR code like a password. Once connected, select a project, open a conversation, or start a new task.
+
+Use `configure.cmd` to change settings after stopping this installation. `stop.cmd` stops the connector and its Codex child process, so finish connector-managed tasks first. Setup, optional login startup, and uninstall instructions are in [QUICKSTART.md](QUICKSTART.md) (Chinese).
+
+## Compatibility and limits
+
+| Component | Version |
 | --- | --- |
-| [项目说明](README.md) | 用户场景、范围、产品行为和当前决策 |
-| [设计方案](DESIGN.md) | 界面、系统结构、模型配置、会话控制与恢复 |
-| [实施计划](IMPLEMENTATION.md) | 按依赖拆分的开发任务、验证方法和完成条件 |
-| [公网部署](DEPLOY.md) | Linux 预构建中继包、自动 HTTPS、电脑接入、升级与回退 |
-| [启动与验收](QUICKSTART.md) | Windows 入口、自托管、手机验证与已知限制 |
-| [来源与版本](SOURCES.md) | 上游提交、协议与许可基线 |
+| Computer | Windows x64; portable package includes Node 24.11.1 |
+| Codex CLI | 0.146.0 |
+| Codex desktop | 26.901.6511.0 IPC adaptation; desktop upgrades may require changes |
 
-## 目标用户与使用过程
+Models use your existing local Codex configuration. The connector is currently available for Windows; macOS and Linux connectors are not supported.
 
-目标用户已经在 Windows 或 macOS 电脑上使用 Codex 开发，希望离开电脑后仍能从手机继续工作。用户可能使用 OpenAI，也可能已经配置 DeepSeek 或其他兼容模型服务。
+Current limits: latest 100 turns per conversation view, truncated large output, file previews up to 2 MiB, and at most two supported images of 2 MiB each. No background push, audio upload, large-file download, or active standalone CLI takeover. Named Codex profiles are rejected for connector-managed app-server sessions on the tested CLI baseline.
 
-目标使用过程：
+## Development and provenance
 
-1. 用户部署自己的中继，取得访问地址与连接 Token。
-2. 电脑启动连接器并填入中继信息，自动识别现有 Codex、模型配置和项目。
-3. 手机扫码打开 Web，保存连接信息即可使用，无需注册或逐设备批准。
-4. 手机选项目、打开会话、发送任务；电脑继续执行文件操作、命令和本地工具。
-5. 手机锁屏、换网或关闭网页后，电脑上的任务继续；重新打开时恢复可核实的状态。
+```sh
+npm run check
+npm run build
+npm run package:windows  # run on Windows
+npm run package:relay
+```
 
-首版按单用户自托管设计：每位用户管理自己的中继，自己的手机与电脑连接该实例。提供简单部署方式，不建设项目方集中托管的多人服务。手机不需要安装 App，可以将网页添加到主屏幕。
+Packages go to `release/`; local configuration and operation records go to `.local/`. Both are excluded by `.gitignore`.
 
-中继只负责连接和转发，不托管聊天历史、代码、文件或模型凭据。中继仅保存连接配置和必要运行日志；历史与执行状态来自电脑，手机保留连接信息和草稿。
+Independently implemented in TypeScript, with architectural research from **Codex Anywhere** and **Remodex**. Fixed references and attribution are in [SOURCES.md](SOURCES.md). Their pairing and encryption implementations are not included.
 
-## 核心交互约定
-
-| 用户动作 | 预期行为 |
-| --- | --- |
-| 打开正在运行的会话 | 显示实时进度，保持原任务运行 |
-| 在空闲会话发送消息 | 在该会话开始下一轮任务 |
-| 在运行中发送消息 | 优先补充当前任务；目标运行环境仅支持排队时，明确显示已排队 |
-| 点击停止 | 请求停止对应任务，收到运行端确认后更新结果 |
-| 处理审批或回答问题 | 回应当前真实请求，两端同步处理结果 |
-| 断线后回来 | 恢复输出、任务状态和仍有效的待处理请求；不盲目重复发送 |
-| 打开文件或修改差异 | 显示该会话对应项目和工作目录中的结果 |
-
-产品要求只有一条：手机打开电脑上的会话，可以实时查看、继续指挥、停止和审批，换端不影响任务运行。接口和并发问题由实现处理，不要求用户理解进程归属。
-
-## 首版范围
-
-首版以日常远程开发闭环为准，不将“接近官方移动端”解释成全功能复制。
-
-| 范围 | 首版内容 |
-| --- | --- |
-| 接入 | Windows 优先验证，自托管中继、扫码连接、自动重连 |
-| 项目与会话 | 项目选择、最近会话、分页历史、新建与继续、实时状态 |
-| 指挥任务 | 文字输入、运行中补充、停止、审批、回答问题 |
-| 模型 | 沿用本机有效配置，显示实际模型与支持能力，不强制 OpenAI 登录 |
-| 开发结果 | Markdown、文本、代码、图片和会话修改差异预览；受控下载 |
-| 手机体验 | 输入草稿保留、系统键盘语音听写、触控布局、前台待处理提示 |
-| 恢复 | 锁屏、换网和中继重启后的恢复；发送结果可核实 |
-| 安装与部署 | 简单部署中继；电脑安装包隐藏开发依赖；提供地址与 Token 配置 |
-
-后续再补 macOS 安装体验、浏览器推送、应用内录音转写和开发网页预览。macOS 若更容易验证关键控制链路，可提前成为首验平台。
-
-首版不做原生手机 App、云端运行代码、模型转售、模型协议转换网关、多人协作编辑、完整远程终端或电脑损坏后的任务迁移。账号、邀请制、租户空间、角色权限、逐设备授权与审计平台均不在首版范围。
-
-## 已确定的方向
-
-- Web 为主要产品入口，Windows 首验，macOS 保留且允许调整顺序。
-- 单用户自托管优先，默认信任持有连接 Token 的自己的客户端；连接后自动显示这台电脑 Codex 的全部项目和会话，不逐功能授权。
-- 中继不新增审批层。Codex 权限沿用用户已有设置，已放开的能力直接使用；运行端仍发出的审批与问题可以在手机处理。
-- 优先服务“电脑上的 Codex 已经可用”的用户；接入后继续使用其现有模型与项目配置。
-- 模型请求由电脑发往用户选择的模型服务，模型凭据留在电脑。
-- 常驻连接器将手机连接与电脑任务的生命周期分开。
-- 公开 app-server 用于连接器管理的任务；官方桌面正在运行的会话需验证对应控制接口，保持同一套用户体验。
-- 已检查 Codex Anywhere 与 Remodex 的固定提交，选择小型独立 TypeScript 实现；桌面 IPC 单独适配，取舍见 SOURCES。
-- 应用实际操作与截图验收由人类完成；LLM 负责实现、协议验证、必要自动化测试和可复现说明。
-
-## 当前实施状态
-
-已实现 Web 会话、文字与图片输入、补充与停止、请求回应、文件与任务差异预览、Token 中继、电脑连接器、操作去重、断线恢复和 Windows 便携构建。中继与连接器已在本机启动。
-
-类型检查、21 项必要自动化测试、前后端构建通过。真实 Codex CLI 0.146.0 已与隔离的本地 Responses 夹具完成模型和环境凭据继承、发送、流式回复、补充、中断测试；通过运行中的中继读取到了官方桌面当前会话。
-
-待验收：官方桌面的真实发送/停止/审批、手机锁屏与换网、DeepSeek 实际服务、Docker 公网部署及新电脑便携安装。macOS 尚未测试。更大文件下载、嵌套 MCP 表单等缺口见 QUICKSTART；不把开发完成等同于发布验收通过。
-
-手机 UX 已按用户提供的 Codex 移动端截图调整：Remote 首页、项目与最近会话、底部搜索、胶囊导航、悬浮输入、新聊天项目选择及底部菜单。刷新网页查看，软键盘和实际操作待人工验收。
-
-Windows 首次配置已改为本机窗口，支持本机/公网中继、Token 和现有 Codex 路径，不再配置项目范围；状态页显示连接和模型。便携包包含版本记录与校验文件，人工验收入口见 [ACCEPTANCE.md](ACCEPTANCE.md)。
-
-公网中继的预构建包通过 `npm run package:relay` 生成，部署步骤见 [公网部署](DEPLOY.md)。局域网优先使用 Wi-Fi 地址，不依赖 Tailscale。
+The project license is not yet selected. Packages include third-party dependency licenses and, on Windows, the bundled Node license.

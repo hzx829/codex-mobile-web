@@ -1,6 +1,8 @@
 # 先在 Windows 上验证
 
-当前交付是 0.1 验证版：代码、网页、中继、连接器和便携包构建已经具备。官方桌面的发送、停止、审批与真实手机体验仍须人工验收，不能当成稳定发布版。
+当前交付为 0.1.3 早期版本。维护者已确认 Windows 连接器 + Linux 公网中继使用正常；审批、锁屏/换网、新电脑安装等场景仍需逐项记录，不据整体反馈标记全部通过。
+
+项目介绍见 [中文 README](README.zh-CN.md)；安装前请读 [隐私与信任边界](PRIVACY.md#简体中文)，了解共享 Token、文件访问范围及浏览器保存的数据。
 
 ## 这台电脑
 
@@ -52,7 +54,7 @@ node build/setup.mjs --yes --mode connector --relay "https://codex.example.com" 
 
 部署包不含 Codex、模型凭据或本机连接配置；服务器不需要 npm 编译。电脑打开 `configure.cmd`，选择“连接自己的中继”，填入 HTTPS 地址和服务器 Token，再运行 `start.cmd`。公网模式只启动电脑连接器。
 
-没有服务器时先保留部署包。当前本机的 Docker Linux 引擎未运行，Linux 容器、证书签发及手机跨网操作需在真实服务器上完成验收。
+已跑通的公网实例使用 Node 24 + systemd、IP 直连 HTTP/WS，传输未加密。Docker + Caddy HTTPS 仍需真实部署验收；公网使用按 DEPLOY 配置 HTTPS，不能将现有 HTTP 实测等同于 HTTPS 验收。
 
 ## 第一次人工验证
 
