@@ -53,7 +53,7 @@ export class AppServer extends EventEmitter {
     });
     child.on('error', e => { if(this.child===child)this.disconnected(e); });
     child.on('exit', () => { if(this.child===child)this.disconnected(new BridgeError('offline','Codex 运行进程已退出',true)); });
-    await this.rpc('initialize', { clientInfo: { name: 'codex_mobile_web', title: 'Codex Mobile Web', version: '0.1.1' }, capabilities: { experimentalApi: true } });
+    await this.rpc('initialize', { clientInfo: { name: 'codex_mobile_web', title: 'Codex Mobile Web', version: '0.1.2' }, capabilities: { experimentalApi: true } });
     this.write({ method: 'initialized' });
   }
   private receive(m: Json) {

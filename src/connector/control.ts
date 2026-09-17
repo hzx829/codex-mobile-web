@@ -46,7 +46,10 @@ export class Control extends EventEmitter {
     }
     if(req.action==='sessions.list') {
       const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
-      const r=await this.runtime.rpc('thread/list',{limit:30,cursor:p.cursor||null,modelProviders:[],cwd,archived:Boolean(p.archived),searchTerm:p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined,sortKey:'updated_at',sourceKinds:['cli','vscode','appServer','exec','subAgent','subAgentReview','subAgentCompact','subAgentThreadSpawn','subAgentOther','unknown']});
+      const params={limit:30,cursor:p.cursor||null,modelProviders:[],cwd,archived:Boolean(p.archived),searchTerm:p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined,sortKey:'updated_at',sourceKinds:['cli','vscode','appServer','exec','subAgent','subAgentReview','subAgentCompact','subAgentThreadSpawn','subAgentOther','unknown']};
+      // Only explicit refresh scans history; return indexed ordering/cursors for every page.
+      if(p.refresh===true)await this.runtime.rpc('thread/list',{...params,useStateDbOnly:false});
+      const r=await this.runtime.rpc('thread/list',{...params,useStateDbOnly:true});
       const data=(r.data||[]).map((t:Json)=>({id:t.id,title:t.name||t.preview?.slice(0,100)||'新会话',cwd:t.cwd||'',model:t.model||'',provider:t.modelProvider,status:t.status,updatedAt:t.updatedAt}));
       return {data,nextCursor:r.nextCursor};
     }

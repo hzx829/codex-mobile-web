@@ -4,6 +4,7 @@ import {Client,operationId} from './client';
 import {Icon,type IconName} from './icons';
 import {SafeMarkdown,RequestCard} from './content';
 import {createFirstTurn} from './new-chat';
+import {SessionListLoader} from './session-list-loader';
 import type {Json,SessionView,RequestAction} from '../src/shared/types';
 import './style.css';
 
@@ -29,7 +30,7 @@ function App(){
   const [draft,setDraft]=useState(''),[images,setImages]=useState<string[]>([]),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[newCwd,setNewCwd]=useState('');
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
   const [preview,setPreview]=useState<Json|null>(null),[filePath,setFilePath]=useState('');
-  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,limit,searchQuery,archived}),sequence=useRef(0),listSequence=useRef(0),infoSequence=useRef(0);
+  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,limit,searchQuery,archived}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null);
   const scrollAnchor=useRef<{height:number;top:number;limit:number;ready:boolean}|null>(null);
   current.current={machine,selected,project,newChat,limit,searchQuery,archived};
@@ -58,14 +59,20 @@ function App(){
     finally{refreshing.current=false;if(again.current){again.current=false;void refreshSession();}}
   }
   function scheduleRefresh(){if(refreshTimer.current)return;refreshTimer.current=setTimeout(()=>{refreshTimer.current=undefined;void refreshSession();},250);}
-  async function list(append=false){
-    const c={...current.current},seq=++listSequence.current;setListBusy(true);
-    try{
-      const r=await call('sessions.list',{cwd:c.project||undefined,search:c.searchQuery||undefined,archived:c.archived,cursor:append?cursor:undefined},c.machine);
-      if(seq!==listSequence.current||c.machine!==current.current.machine||c.project!==current.current.project||c.searchQuery!==current.current.searchQuery||c.archived!==current.current.archived)return;
-      setSessions(old=>append?[...old,...r.data.filter((n:Json)=>!old.some(s=>s.id===n.id))]:r.data);setCursor(r.nextCursor);
-      setProjects(old=>[...new Set<string>([...old,...r.data.map((s:Json)=>s.cwd).filter(Boolean)])]);
-    }catch(e){if(seq===listSequence.current)fail(e);}finally{if(seq===listSequence.current)setListBusy(false);}
+  async function list(append=false,refresh=false){
+    const c={...current.current};
+    const key=(value:typeof c)=>JSON.stringify([value.machine,value.project,value.searchQuery,value.archived]);
+    const here=()=>key(c)===key(current.current);
+    await listLoader.current.load(key(c),()=>call('sessions.list',{cwd:c.project||undefined,search:c.searchQuery||undefined,archived:c.archived,cursor:append?cursor:undefined,refresh},c.machine),{
+      start:()=>setListBusy(true),
+      result:r=>{
+        if(!here())return;
+        setSessions(old=>append?[...old,...r.data.filter((n:Json)=>!old.some(s=>s.id===n.id))]:r.data);setCursor(r.nextCursor);
+        setProjects(old=>[...new Set<string>([...old,...r.data.map((s:Json)=>s.cwd).filter(Boolean)])]);
+      },
+      error:e=>{if(here())fail(e);},
+      finish:()=>setListBusy(false),
+    });
   }
   const effectiveCwd=newChat?newCwd:view?.cwd||project;
   function refreshInfo(){
@@ -161,7 +168,7 @@ function App(){
       try{results.push(await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(Error('图片读取失败'));reader.readAsDataURL(file);}));}catch(e){fail(e);return;}
     }if(stillHere()&&current.current.newChat===newChat){setImages(results);setSheet(null);}
   }
-  function changeMachine(id:string){setSheet(null);if(id===machine)return;infoSequence.current++;listSequence.current++;setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');setMachine(id);setRoute(home);}
+  function changeMachine(id:string){setSheet(null);if(id===machine)return;infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');setMachine(id);setRoute(home);}
   function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);changeMachine('');}
   const projectName=(path:string)=>info?.projects?.find((p:Json)=>p.path===path)?.name||name(path);
   const selectedModel=model||view?.model||info?.model;
@@ -211,7 +218,7 @@ function App(){
     </>}</main>
 
     {sheet&&<SheetPanel title={({home:'选项',thread:'聊天选项',computer:'电脑',projects:'选择项目',model:'模型与思考',add:'添加与选项',file:'查看项目文件'} as const)[sheet]} close={()=>setSheet(null)}>
-      {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);refreshInfo();void list();}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
+      {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
       {sheet==='thread'&&<><MenuItem icon="settings" onClick={()=>setSheet('model')}>模型与思考<span className="menu-detail">{selectedModel||'沿用电脑配置'}</span></MenuItem><MenuItem icon="file" disabled={!selected} onClick={()=>setSheet('file')}>查看项目文件</MenuItem><MenuItem icon="refresh" disabled={!selected||!connected} onClick={()=>{setSheet(null);void refreshSession();}}>刷新会话</MenuItem><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem></>}
       {sheet==='computer'&&<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>}
       {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
