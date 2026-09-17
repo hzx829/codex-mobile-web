@@ -62,9 +62,9 @@ try {
   const bind=createServer();bind.listen(0,'127.0.0.1');await once(bind,'listening');const port=(bind.address() as any).port;await new Promise<void>(r=>bind.close(()=>r()));
   await writeFile(join(codexHome,'config.toml'),'model = "portable-fixture"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "No external model calls"\nbase_url = "http://127.0.0.1:1/v1"\nwire_api = "responses"\n');
   const token=randomUUID()+randomUUID();
-  const output=await setup({roots:[project],relayUrl:`http://127.0.0.1:${port}`,token,mode:'all',codexBin:resolveCodex(),codexHome});
+  const output=await setup({relayUrl:`http://127.0.0.1:${port}`,token,mode:'all',codexBin:resolveCodex(),codexHome});
   assert.ok(!output.includes(token));
-  const config=JSON.parse(await readFile(configPath,'utf8'));assert.deepEqual(config.roots,[project]);assert.equal(config.codexHome,codexHome);
+  const config=JSON.parse(await readFile(configPath,'utf8'));assert.equal(config.roots,undefined);assert.equal(config.codexHome,codexHome);
   console.log('Checking packaged startup...');await ps('start.ps1',['-NoOpen']);const initial=await online(config);
   assert.equal(initial.provider,'fixture');assert.equal(initial.model,'portable-fixture');
   assert.equal((await fetch(config.relayUrl)).status,200);

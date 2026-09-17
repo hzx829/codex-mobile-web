@@ -21,12 +21,9 @@ try {
       input=JSON.parse(json.replace(/^\uFEFF/,''));
     } else {
       input={relayUrl:value('--relay'),token:value('--token'),rotate:args.includes('--rotate'),mode:value('--mode')};
-      if(value('--root'))input.roots=[value('--root')];
       if(!args.includes('--yes')&&!args.includes('--refresh-page')) {
         const prompt=createInterface({input:stdin,output:stdout});
         try {
-          const root=await prompt.question(`项目目录 [${old.roots?.[0]||process.cwd()}]: `);
-          input.roots=root?[root]:old.roots||[process.cwd()];
           input.relayUrl=await prompt.question(`手机可访问的中继地址 [${input.relayUrl||old.relayUrl||defaultRelay()}]: `)||input.relayUrl;
         } finally {prompt.close();}
       }

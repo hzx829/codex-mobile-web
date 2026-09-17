@@ -29,16 +29,8 @@ export async function prepareSettings(input:any,old:any={}) {
   if(!token&&mode==='connector'&&!(input.rotate&&old.token))throw new Error('请填写自托管中继使用的 Token');
   token=token||randomBytes(32).toString('base64url');
   if(typeof token!=='string'||token.length<24||/\s/.test(token))throw new Error('Token 至少需要 24 位，且不能包含空白');
-  const roots:string[]=[];
-  if(!Array.isArray(input.roots??old.roots??[]))throw new Error('项目目录必须是列表');
-  for(const root of input.roots??old.roots??[]) {
-    if(typeof root!=='string'||!root.trim())throw new Error('项目目录无效');
-    const canonical=await realpath(resolve(root.trim()));
-    if(!(await stat(canonical)).isDirectory())throw new Error('项目目录必须是文件夹');
-    if(!roots.includes(canonical))roots.push(canonical);
-  }
-  if(mode!=='relay'&&!roots.length)throw new Error('请选择至少一个项目目录');
-  const config:any={...old,token,mode,relayUrl:url.origin,port:old.port||3340,host:old.host||'0.0.0.0',machineId:old.machineId||randomUUID(),machineName:old.machineName||hostname(),roots};
+  const config:any={...old,token,mode,relayUrl:url.origin,port:old.port||3340,host:old.host||'0.0.0.0',machineId:old.machineId||randomUUID(),machineName:old.machineName||hostname()};
+  delete config.roots; // Legacy project allowlists no longer restrict this computer.
   // An explicit blank removes an override; omitted fields retain the user's settings.
   for(const key of ['codexBin','codexHome'] as const) {
     if(input[key]===undefined)continue;

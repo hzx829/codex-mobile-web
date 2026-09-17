@@ -1,12 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { stat } from 'node:fs/promises';
 import { AppServer } from './app-server.js';
 import { Desktop } from './desktop.js';
 import { Ledger } from './ledger.js';
 import { normalizeSession } from './normalize.js';
 import { approvalResult } from './approvals.js';
-import { projectPath, readProjectFile } from './project.js';
+import { projectDirectory, readProjectFile } from './project.js';
+import { nativeProjects } from './projects.js';
 import { BridgeError, textRequired, type Json, type BridgeRequest, type SessionView } from '../shared/types.js';
 
 export class Control extends EventEmitter {
@@ -16,7 +16,7 @@ export class Control extends EventEmitter {
   private diffs=new Map<string,string>();
   private starting=new Map<string,string>();
   private locks=new Map<string,Promise<unknown>>();
-  constructor(public roots:string[],public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop()) {
+  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects) {
     super();
     runtime.on('event',(e:Json)=>{
       if(e.method==='turn/diff/updated')this.diffs.set(e.params.turnId,e.params.diff);
@@ -37,23 +37,21 @@ export class Control extends EventEmitter {
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,()=>this.mutate(req.action,p)));
     }
     if(req.action==='info') {
-      const cwd=p.cwd?await projectPath(this.roots,textRequired(p.cwd,'目录')):this.roots[0];
+      const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
       const config=await this.runtime.rpc('config/read',{includeLayers:false,cwd});
       const models=await this.runtime.rpc('model/list',{}).catch(()=>({data:[]}));
       const c=config.config||{};
-      return {roots:this.roots,desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',models:models.data||[],generation:this.generation};
+      const projects=await this.projects(c);
+      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',models:models.data||[],generation:this.generation};
     }
     if(req.action==='sessions.list') {
-      const cwd=p.cwd?await projectPath(this.roots,textRequired(p.cwd,'目录')):undefined;
-      const r=await this.runtime.rpc('thread/list',{limit:30,cursor:p.cursor||null,modelProviders:[],cwd,searchTerm:p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined,sortKey:'updated_at',sourceKinds:['cli','vscode','appServer','exec','unknown']});
-      const data=[];
-      for(const t of r.data||[]) {
-        try {await projectPath(this.roots,t.cwd);data.push({id:t.id,title:t.name||t.preview?.slice(0,100)||'新会话',cwd:t.cwd,model:t.model||'',provider:t.modelProvider,status:t.status,updatedAt:t.updatedAt});}catch{}
-      }
+      const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
+      const r=await this.runtime.rpc('thread/list',{limit:30,cursor:p.cursor||null,modelProviders:[],cwd,archived:Boolean(p.archived),searchTerm:p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined,sortKey:'updated_at',sourceKinds:['cli','vscode','appServer','exec','subAgent','subAgentReview','subAgentCompact','subAgentThreadSpawn','subAgentOther','unknown']});
+      const data=(r.data||[]).map((t:Json)=>({id:t.id,title:t.name||t.preview?.slice(0,100)||'新会话',cwd:t.cwd||'',model:t.model||'',provider:t.modelProvider,status:t.status,updatedAt:t.updatedAt}));
       return {data,nextCursor:r.nextCursor};
     }
     if(req.action==='session.read')return this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(5,Number(p.limit)||20)));
-    if(req.action==='file.read') {const session=await this.read(textRequired(p.threadId,'会话'),5);return readProjectFile(this.roots,session.cwd,textRequired(p.path,'文件路径'));}
+    if(req.action==='file.read') {const session=await this.read(textRequired(p.threadId,'会话'),5);return readProjectFile(session.cwd,textRequired(p.path,'文件路径'));}
     throw new BridgeError('unsupported','此操作暂不支持');
   }
   async read(id:string,limit=20):Promise<SessionView> {
@@ -80,13 +78,11 @@ export class Control extends EventEmitter {
         view.notice='当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。';
       }
     }
-    await projectPath(this.roots,view.cwd);
     view.generation=this.generation;return view;
   }
   private async mutate(action:string,p:Json):Promise<Json> {
     if(action==='session.create') {
-      const cwd=await projectPath(this.roots,textRequired(p.cwd,'项目目录'));
-      if(!(await stat(cwd)).isDirectory())throw new BridgeError('invalid','项目目录无效');
+      const cwd=await projectDirectory(textRequired(p.cwd,'项目目录'));
       const options:Json={cwd};if(p.model)options.model=textRequired(p.model,'模型',200);
       const r=await this.runtime.rpc('thread/start',options);
       this.loaded.add(r.thread.id);this.ledger.claim(r.thread.id);this.settings.set(r.thread.id,{model:r.model,modelProvider:r.modelProvider});

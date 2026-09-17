@@ -29,7 +29,7 @@ const api=createServer(async(req,res)=>{
 api.listen(0,'127.0.0.1');await once(api,'listening');const port=(api.address() as any).port;
 await writeFile(join(home,'config.toml'),`model = "mobile-fixture"\nmodel_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n[model_providers.fixture]\nname = "Local test fixture"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nenv_key = "CMW_TEST_KEY"\n[projects.${JSON.stringify(project)}]\ntrust_level = "trusted"\n`);
 const runtime=new AppServer(resolveCodex(),{...process.env,CODEX_HOME:home,CMW_TEST_KEY:fixtureKey,CODEX_PROFILE:''});
-const control=new Control([project],new Ledger(':memory:'),runtime);
+const control=new Control(new Ledger(':memory:'),runtime);
 function event(method:string,predicate:(p:Json)=>boolean=()=>true):Promise<Json>{return new Promise((resolve,reject)=>{
   const timer=setTimeout(()=>{runtime.off('event',listener);reject(new Error(`Native event timeout: ${method}`));},20_000);
   const listener=(e:Json)=>{if(e.method===method&&predicate(e.params)){clearTimeout(timer);runtime.off('event',listener);resolve(e.params);}};runtime.on('event',listener);

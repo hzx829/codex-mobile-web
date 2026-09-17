@@ -4,7 +4,7 @@
 
 ## 这台电脑
 
-本机配置已生成在 `.local/config.json`，项目根为 `C:\Users\NINGMEI\Documents\delegate`。中继地址为 `http://192.168.1.248:3340`。
+本机配置已生成在 `.local/config.json`，默认显示当前电脑 Codex 的全部项目与会话。中继地址为 `http://192.168.1.248:3340`。
 
 1. 双击项目根目录的 `start.cmd`。它会后台启动中继与连接器，并打开电脑状态与连接二维码。
 2. 手机连接同一 Wi-Fi，扫描二维码打开网页。不需要安装 App。
@@ -27,9 +27,9 @@
 
 ## 新电脑用便携包
 
-在 `release/` 找到本次生成的 ZIP。解压后双击 `start.cmd`，第一次会打开配置窗口：选择项目文件夹，选择“本机中继”或“连接自己的中继”，填写地址。公网模式填写服务器的 Token，本机模式首次可留空。包内带 Node 运行时和已构建程序；电脑需已有可用 Codex，不用安装本项目的开发依赖。
+在 `release/` 找到本次生成的 ZIP。解压后双击 `start.cmd`，第一次会打开配置窗口：选择“本机中继”或“连接自己的中继”，填写地址。公网模式填写服务器的 Token，本机模式首次可留空。包内带 Node 运行时和已构建程序；电脑需已有可用 Codex，不用安装本项目的开发依赖。
 
-配置窗口支持多个项目目录，也可以选择原有 `codex.exe` 和 Codex 配置目录；留空时自动识别。保存后 `start.cmd` 会记住连接方式，公网模式只启动连接器。状态页显示连接、当前模型和官方桌面是否在线，检查过程不会创建任务。
+不需要填写项目目录；项目与会话自动读取，名称沿用 Codex。可以选择原有 `codex.exe` 和 Codex 配置目录；留空时自动识别。保存后 `start.cmd` 会记住连接方式，公网模式只启动连接器。状态页显示连接、当前模型和官方桌面是否在线，检查过程不会创建任务。
 
 日后修改配置：先完成任务，双击 `stop.cmd`，再打开 `configure.cmd`。配置窗口不会在后台任务运行时直接替换连接配置。Token 通过本地输入流传递给配置程序，不作为窗口启动命令参数传递。配置文件损坏时会报错，不自动重置凭证。
 
@@ -37,10 +37,10 @@
 
 ```powershell
 # 源码目录；便携包将 node 换为 .\runtime\node.exe
-node build/setup.mjs --yes --mode connector --root "D:\my-project" --relay "https://codex.example.com" --token "你的实例Token"
+node build/setup.mjs --yes --mode connector --relay "https://codex.example.com" --token "你的实例Token"
 ```
 
-只修改本项目的 `.local/config.json`，可以添加多个 `roots`。需要指定原有 Codex 环境时，可设置 `codexBin`（真实可执行文件）、`codexHome`；未填写时沿用当前用户的环境。当前验证的 CLI 0.146.0 不允许 app-server 使用命名 profile；设置 `profile` 或 `CODEX_PROFILE` 会明确报错，不会静默换模型。已在桌面启动的会话使用桌面自身设置，连接器管理的新会话使用默认配置。模型 Key 继续由本机 Codex 配置或环境变量提供，连接器不采集 Key，也不把配置正文发往中继。
+旧配置中的 `roots` 自动忽略，重新保存时移除，不再限制可见项目。首页“更多”可以切换归档会话。需要指定原有 Codex 环境时，可设置 `codexBin`（真实可执行文件）、`codexHome`；未填写时沿用当前用户的环境。当前验证的 CLI 0.146.0 不允许 app-server 使用命名 profile；设置 `profile` 或 `CODEX_PROFILE` 会明确报错，不会静默换模型。已在桌面启动的会话使用桌面自身设置，连接器管理的新会话使用默认配置。模型 Key 继续由本机 Codex 配置或环境变量提供，连接器不采集 Key，也不把配置正文发往中继。
 
 本机已能运行 DeepSeek 的用户直接沿用已有配置。启动方式需要能读取原有 Key；若 Key 只在某个终端会话临时设置，须从同一环境启动连接器，或在电脑设置持久环境后重新启动。当前只完成了第三方 Responses 接口夹具验证，尚未连接真实 DeepSeek 服务。
 

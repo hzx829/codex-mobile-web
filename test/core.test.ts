@@ -71,13 +71,13 @@ test('approval responders preserve native IDs, decisions and permission scope',(
   assert.throws(()=>approvalResult({method:'unknown',params:{}},{}),/电脑端/);
   assert.throws(()=>approvalResult({method:'item/tool/requestUserInput',params:{questions:[{id:'q'}]}},{answers:{}}));
 });
-test('file preview rejects traversal, junction escape and large files; HTML is inert text',async()=>{
+test('file preview follows the selected session across directories; large files and active HTML are handled',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'cmw-files-')),root=join(dir,'project'),outside=join(dir,'outside');await mkdir(root);await mkdir(outside);
   try{await writeFile(join(root,'index.html'),'<script>active()</script>');await writeFile(join(outside,'secret.txt'),'private');
-    assert.equal((await readProjectFile([root],root,'index.html')).mime,'text/plain');
-    await assert.rejects(readProjectFile([root],root,'../outside/secret.txt'),/不在/);
+    assert.equal((await readProjectFile(root,'index.html')).mime,'text/plain');
+    assert.equal((await readProjectFile(root,'../outside/secret.txt')).text,'private');
     await symlink(outside,join(root,'link'),process.platform==='win32'?'junction':'dir');
-    await assert.rejects(readProjectFile([root],root,'link/secret.txt'),/不在/);
-    await writeFile(join(root,'large.txt'),Buffer.alloc(2*1024*1024+1));await assert.rejects(readProjectFile([root],root,'large.txt'),/2 MiB/);
+    assert.equal((await readProjectFile(root,'link/secret.txt')).text,'private');
+    await writeFile(join(root,'large.txt'),Buffer.alloc(2*1024*1024+1));await assert.rejects(readProjectFile(root,'large.txt'),/2 MiB/);
   }finally{await removeTestTemp(dir);}
 });

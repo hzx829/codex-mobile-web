@@ -24,15 +24,15 @@ function App(){
   const [route,setRoute]=useState<Route>(home),[sheet,setSheet]=useState<Sheet>(null);
   const {thread:selected,project,newChat}=route,showThread=Boolean(selected||newChat);
   const [info,setInfo]=useState<Json|null>(null),[projects,setProjects]=useState<string[]>([]),[sessions,setSessions]=useState<Json[]>([]);
-  const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false);
+  const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
   const [view,setView]=useState<SessionView|null>(null),[limit,setLimit]=useState(20),[loading,setLoading]=useState(false);
   const [draft,setDraft]=useState(''),[images,setImages]=useState<string[]>([]),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[newCwd,setNewCwd]=useState('');
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
   const [preview,setPreview]=useState<Json|null>(null),[filePath,setFilePath]=useState('');
-  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,limit,searchQuery}),sequence=useRef(0),listSequence=useRef(0),infoSequence=useRef(0);
+  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,limit,searchQuery,archived}),sequence=useRef(0),listSequence=useRef(0),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null);
   const scrollAnchor=useRef<{height:number;top:number;limit:number;ready:boolean}|null>(null);
-  current.current={machine,selected,project,newChat,limit,searchQuery};
+  current.current={machine,selected,project,newChat,limit,searchQuery,archived};
   const connected=status==='online'&&machines.some(m=>m.id===machine),machineName=machines.find(m=>m.id===machine)?.name||'电脑';
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
   const call=(action:RequestAction,payload:Json={},target=machine)=>client.current!.request(action,payload,target);
@@ -61,19 +61,20 @@ function App(){
   async function list(append=false){
     const c={...current.current},seq=++listSequence.current;setListBusy(true);
     try{
-      const r=await call('sessions.list',{cwd:c.project||undefined,search:c.searchQuery||undefined,cursor:append?cursor:undefined},c.machine);
-      if(seq!==listSequence.current||c.machine!==current.current.machine||c.project!==current.current.project||c.searchQuery!==current.current.searchQuery)return;
+      const r=await call('sessions.list',{cwd:c.project||undefined,search:c.searchQuery||undefined,archived:c.archived,cursor:append?cursor:undefined},c.machine);
+      if(seq!==listSequence.current||c.machine!==current.current.machine||c.project!==current.current.project||c.searchQuery!==current.current.searchQuery||c.archived!==current.current.archived)return;
       setSessions(old=>append?[...old,...r.data.filter((n:Json)=>!old.some(s=>s.id===n.id))]:r.data);setCursor(r.nextCursor);
-      setProjects(old=>[...new Set<string>([...old,...r.data.map((s:Json)=>s.cwd)])]);
+      setProjects(old=>[...new Set<string>([...old,...r.data.map((s:Json)=>s.cwd).filter(Boolean)])]);
     }catch(e){if(seq===listSequence.current)fail(e);}finally{if(seq===listSequence.current)setListBusy(false);}
   }
   const effectiveCwd=newChat?newCwd:view?.cwd||project;
-  useEffect(()=>{
+  function refreshInfo(){
     if(!connected)return;const seq=++infoSequence.current;
     call('info',{cwd:effectiveCwd||undefined}).then(r=>{if(seq!==infoSequence.current)return;setInfo(r);setProjects(old=>[...new Set<string>([...r.roots,...old])]);setNewCwd(old=>old||r.roots[0]||'');}).catch(e=>{if(seq===infoSequence.current)fail(e);});
-  },[connected,machine,effectiveCwd]);
+  }
+  useEffect(refreshInfo,[connected,machine,effectiveCwd]);
   useEffect(()=>{const timer=setTimeout(()=>setSearchQuery(search.trim()),250);return()=>clearTimeout(timer);},[search]);
-  useEffect(()=>{if(connected)void list();},[connected,machine,project,searchQuery]);
+  useEffect(()=>{if(connected)void list();},[connected,machine,project,searchQuery,archived]);
   useEffect(()=>{
     if(!token)return;
     const c=new Client(token,m=>{
@@ -101,7 +102,7 @@ function App(){
     const foreground=()=>{if(document.visibilityState!=='visible')return;if(current.current.selected)void refreshSession();else void list();};
     const timer=setInterval(foreground,5000);document.addEventListener('visibilitychange',foreground);
     return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',foreground);};
-  },[connected,project,searchQuery]);
+  },[connected,project,searchQuery,archived]);
   useEffect(()=>{if(connected&&pending&&!busy)void checkPending();},[connected,pending?.opId,busy]);
   useEffect(()=>{if(!notice||pending)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice,pending]);
   function editDraft(value:string){setDraft(value);save(draftKey,value);}
@@ -160,8 +161,9 @@ function App(){
       try{results.push(await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(Error('图片读取失败'));reader.readAsDataURL(file);}));}catch(e){fail(e);return;}
     }if(stillHere()&&current.current.newChat===newChat){setImages(results);setSheet(null);}
   }
-  function changeMachine(id:string){setSheet(null);if(id===machine)return;infoSequence.current++;listSequence.current++;setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setNewCwd('');setMachine(id);setRoute(home);}
+  function changeMachine(id:string){setSheet(null);if(id===machine)return;infoSequence.current++;listSequence.current++;setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');setMachine(id);setRoute(home);}
   function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);changeMachine('');}
+  const projectName=(path:string)=>info?.projects?.find((p:Json)=>p.path===path)?.name||name(path);
   const selectedModel=model||view?.model||info?.model;
   const availableModels=(info?.models||[]).filter((m:Json)=>(view?.provider||info?.provider)==='openai'||m.model===(view?.model||info?.model));
   const modelInfo=availableModels.find((m:Json)=>m.model===selectedModel),canImage=modelInfo?.inputModalities?.includes('image');
@@ -172,11 +174,11 @@ function App(){
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>在手机上继续使用 Codex。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   return <div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||preview)}>
-      <header className="home-header"><IconButton icon={project?'back':'computer'} label={project?'返回全部项目':'选择电脑'} className="round" disabled={busy} onClick={()=>project?back():setSheet('computer')}/><h1>{project?name(project):'Remote'}</h1><IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
+      <header className="home-header"><IconButton icon={project?'back':'computer'} label={project?'返回全部项目':'选择电脑'} className="round" disabled={busy} onClick={()=>project?back():setSheet('computer')}/><h1>{project?projectName(project):'Remote'}</h1><IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
       <button className="machine-row" onClick={()=>setSheet('computer')}><i className={connected?'dot online':'dot'}/><Icon name="computer" size={19}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</button>
       <div className="home-content">
-        {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{name(p)}</span></button>)}</section>}
-        <section className="recent-section"><h2>{searchQuery?'搜索结果':'最近'}</h2><nav aria-label="最近会话">{sessions.map(s=><button className={`session-row ${s.id===selected?'selected':''}`} key={s.id} disabled={busy} onClick={()=>navigate({...route,thread:s.id,newChat:false})}><span className="session-name">{s.status?.type==='active'&&<i className="dot online"/>}{s.title}</span><time>{relativeTime(s.updatedAt)}</time></button>)}</nav>
+        {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
+        <section className="recent-section"><h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2><nav aria-label={archived?'归档会话':'最近会话'}>{sessions.map(s=><button className={`session-row ${s.id===selected?'selected':''}`} key={s.id} disabled={busy} onClick={()=>navigate({...route,thread:s.id,newChat:false})}><span className="session-name">{s.status?.type==='active'&&<i className="dot online"/>}{s.title}</span><time>{relativeTime(s.updatedAt)}</time></button>)}</nav>
           {listBusy&&!sessions.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!sessions.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}
           {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
         </section>
@@ -184,14 +186,14 @@ function App(){
       <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><label className="search-pill"><Icon name="search"/><input aria-label="搜索聊天" placeholder="搜索聊天…" value={search} maxLength={200} onChange={e=>setSearch(e.target.value)}/>{search&&<IconButton icon="close" label="清除搜索" onClick={()=>setSearch('')}/>}</label><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={startNew}/></div></div>
     </aside>
 
-    <main className="thread-panel" inert={Boolean(sheet||preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{name(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
-      <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={back}/><button className="thread-title" onClick={()=>setSheet(newChat?'projects':'thread')}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{name(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><IconButton icon="computer" label="电脑与连接状态" onClick={()=>setSheet('computer')}/><IconButton icon="more" label="聊天选项" onClick={()=>setSheet('thread')}/></div></header>
+    <main className="thread-panel" inert={Boolean(sheet||preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
+      <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={back}/><button className="thread-title" onClick={()=>setSheet(newChat?'projects':'thread')}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><IconButton icon="computer" label="电脑与连接状态" onClick={()=>setSheet('computer')}/><IconButton icon="more" label="聊天选项" onClick={()=>setSheet('thread')}/></div></header>
       {!connected&&<div className="banner">连接已断开，电脑上的任务会继续。</div>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
       <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!;sticky.current=el.scrollHeight-el.scrollTop-el.clientHeight<100;}}>
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={limit>=100} onClick={()=>{sticky.current=false;const el=timeline.current;if(el)scrollAnchor.current={height:el.scrollHeight,top:el.scrollTop,limit:Math.min(100,limit+20),ready:false};setLimit(n=>Math.min(100,n+20));}}>查看更早内容{limit>=100?'（最近 100 轮）':''}</button>}
-        {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{name(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:view?.turns.map(turn=><section className="turn" key={turn.id}>
+        {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:view?.turns.map(turn=><section className="turn" key={turn.id}>
           {turn.items.map(item=>item.role==='activity'?<details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>:<article className={`message ${item.role}`} key={item.id}><SafeMarkdown text={item.text} openFile={openFile}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</article>)}
           <div className="turn-status">{turn.status!=='completed'&&(statusLabel[turn.status]||turn.status)}{turn.diff&&<button onClick={()=>setPreview({path:'本轮任务差异',text:turn.diff,mime:'text/plain'})}><Icon name="file" size={14}/>查看修改</button>}</div>{turn.error&&<p className="error">{turn.error}</p>}
         </section>)}
@@ -209,10 +211,10 @@ function App(){
     </>}</main>
 
     {sheet&&<SheetPanel title={({home:'选项',thread:'聊天选项',computer:'电脑',projects:'选择项目',model:'模型与思考',add:'添加与选项',file:'查看项目文件'} as const)[sheet]} close={()=>setSheet(null)}>
-      {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);void list();}}>刷新会话</MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
+      {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);refreshInfo();void list();}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
       {sheet==='thread'&&<><MenuItem icon="settings" onClick={()=>setSheet('model')}>模型与思考<span className="menu-detail">{selectedModel||'沿用电脑配置'}</span></MenuItem><MenuItem icon="file" disabled={!selected} onClick={()=>setSheet('file')}>查看项目文件</MenuItem><MenuItem icon="refresh" disabled={!selected||!connected} onClick={()=>{setSheet(null);void refreshSession();}}>刷新会话</MenuItem><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem></>}
       {sheet==='computer'&&<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>}
-      {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setSheet(null);}}><span>{name(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>已接入根目录内的路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
+      {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
       {sheet==='model'&&<><p className="muted">{view?.activeTurnId?'当前任务沿用正在使用的模型，结束后可以更换。':'默认沿用电脑配置，也可以填写同一提供商的模型 ID。'}</p><label>模型<input list="models" disabled={Boolean(view?.activeTurnId)||busy} value={model} onChange={e=>setModel(e.target.value)} placeholder={selectedModel||'沿用配置'}/></label><datalist id="models">{availableModels.map((m:Json)=><option key={m.id||m.model} value={m.model}>{m.displayName}</option>)}</datalist><label>思考程度<select disabled={Boolean(view?.activeTurnId)||busy} value={effort} onChange={e=>setEffort(e.target.value)}><option value="">沿用电脑设置</option>{modelInfo?.supportedReasoningEfforts?.map((r:Json)=><option key={r.reasoningEffort} value={r.reasoningEffort}>{({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'更多',max:'最多'} as Json)[r.reasoningEffort]||r.reasoningEffort}</option>)}</select></label><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}
       {sheet==='add'&&<>{canImage&&<MenuItem icon="image" disabled={busy} onClick={()=>fileInput.current?.click()}>添加图片</MenuItem>}<MenuItem icon="settings" onClick={()=>setSheet('model')}>模型与思考<span className="menu-detail">{selectedModel}</span></MenuItem>{selected&&<MenuItem icon="file" onClick={()=>setSheet('file')}>查看项目文件</MenuItem>}{newChat&&<MenuItem icon="folder" disabled={busy} onClick={()=>setSheet('projects')}>选择项目</MenuItem>}</>}
       {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 src/app.ts"/></label><button className="primary">打开文件</button></form>}

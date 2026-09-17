@@ -49,8 +49,8 @@ catch {[void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'Codex
 
 $form=New-Object System.Windows.Forms.Form
 $form.Text='Codex 随行 · 连接配置'
-$form.ClientSize=New-Object System.Drawing.Size(640,660)
-$form.MinimumSize=New-Object System.Drawing.Size(600,660)
+$form.ClientSize=New-Object System.Drawing.Size(640,580)
+$form.MinimumSize=New-Object System.Drawing.Size(600,580)
 $form.StartPosition='CenterScreen'
 $form.AutoScaleMode='Dpi'
 $form.Font=New-Object System.Drawing.Font('Microsoft YaHei UI',10)
@@ -63,14 +63,13 @@ function Add-Label([string]$Text) {
   $label.Text=$Text;$label.AutoSize=$true;$label.Margin=New-Object System.Windows.Forms.Padding(0,10,0,5)
   $layout.Controls.Add($label)
 }
-function Add-Path([bool]$Directory,[bool]$Multi=$false) {
+function Add-Path([bool]$Directory) {
   $row=New-Object System.Windows.Forms.TableLayoutPanel
   $row.ColumnCount=2;$row.AutoSize=$true;$row.Dock='Top'
   [void]$row.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent',100)))
   [void]$row.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute',80)))
   $field=New-Object System.Windows.Forms.TextBox
-  $field.Dock='Fill';$field.Multiline=$Multi
-  if($Multi){$field.Height=76;$field.ScrollBars='Vertical';$field.AcceptsReturn=$true}
+  $field.Dock='Fill'
   $button=New-Object System.Windows.Forms.Button
   $button.Text='选择…';$button.Dock='Top';$button.Height=32
   $button.Add_Click({
@@ -78,7 +77,7 @@ function Add-Path([bool]$Directory,[bool]$Multi=$false) {
     else {$dialog=New-Object System.Windows.Forms.OpenFileDialog;$dialog.Filter='Codex 可执行文件 (codex.exe)|codex.exe|可执行文件 (*.exe)|*.exe'}
     try {if($dialog.ShowDialog() -eq 'OK'){
       $path=if($Directory){$dialog.SelectedPath}else{$dialog.FileName}
-      if($Multi -and $field.Text.Trim()){$field.AppendText([Environment]::NewLine+$path)}else{$field.Text=$path}
+      $field.Text=$path
     }} finally {$dialog.Dispose()}
   }.GetNewClosure())
   $row.Controls.Add($field,0,0);$row.Controls.Add($button,1,0);$layout.Controls.Add($row)
@@ -93,8 +92,7 @@ $modeBox.DropDownStyle='DropDownList';$modeBox.Dock='Top'
 $selectedMode=if($Mode -eq 'auto'){$settings.mode}else{$Mode}
 $modeBox.SelectedIndex=if($selectedMode -eq 'connector'){1}else{0}
 $layout.Controls.Add($modeBox)
-Add-Label '项目目录（可填写多个，每行一个）'
-$roots=Add-Path $true $true;$roots.Text=@($settings.roots) -join [Environment]::NewLine
+Add-Label '自动显示这台电脑 Codex 的全部项目和会话，无需选择目录。'
 Add-Label '手机可访问的中继地址'
 $relay=New-Object System.Windows.Forms.TextBox;$relay.Dock='Top';$relay.Text=$settings.relayUrl;$layout.Controls.Add($relay)
 Add-Label '连接 Token（本机首次留空自动生成；公网填写服务器的 Token）'
@@ -109,7 +107,7 @@ $save.Add_Click({
   $save.Enabled=$false;$form.UseWaitCursor=$true
   try {
     Assert-Stopped
-    $payload=@{mode=$(if($modeBox.SelectedIndex -eq 1){'connector'}else{'all'});roots=@($roots.Lines | Where-Object {$_.Trim()});relayUrl=$relay.Text.Trim();token=$token.Text.Trim();codexBin=$bin.Text.Trim();codexHome=$codexDirectory.Text.Trim()} | ConvertTo-Json -Depth 5 -Compress
+    $payload=@{mode=$(if($modeBox.SelectedIndex -eq 1){'connector'}else{'all'});relayUrl=$relay.Text.Trim();token=$token.Text.Trim();codexBin=$bin.Text.Trim();codexHome=$codexDirectory.Text.Trim()} | ConvertTo-Json -Depth 5 -Compress
     $null=Invoke-Setup '--settings-stdin' $payload
     $form.DialogResult='OK';$form.Close()
   } catch {[void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'配置未保存')}

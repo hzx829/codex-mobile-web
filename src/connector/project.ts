@@ -1,17 +1,16 @@
 import { realpath, stat, readFile } from 'node:fs/promises';
-import { resolve, relative, isAbsolute, extname } from 'node:path';
+import { resolve, isAbsolute, extname } from 'node:path';
 import { BridgeError } from '../shared/types.js';
 
-export function within(root:string,path:string) { const rel=relative(root,path);return rel===''||(!rel.startsWith('..'+(process.platform==='win32'?'\\':'/'))&&rel!=='..'&&!isAbsolute(rel)); }
-export async function projectPath(roots:string[],path:string) {
-  const canonical=await realpath(resolve(path));
-  for(const root of roots)if(within(await realpath(root),canonical))return canonical;
-  throw new BridgeError('outside_project','该路径不在已连接项目中');
+export async function projectDirectory(path:string) {
+  if(!isAbsolute(path))throw new BridgeError('invalid','请使用电脑上的完整项目路径');
+  const canonical=await realpath(path);
+  if(!(await stat(canonical)).isDirectory())throw new BridgeError('invalid','项目目录无效');
+  return canonical;
 }
-export async function readProjectFile(roots:string[],cwd:string,path:string) {
-  const base=await projectPath(roots,cwd);
-  const target=await projectPath(roots,resolve(base,path));
-  if(!within(base,target))throw new BridgeError('outside_project','文件不在当前会话目录中');
+export async function readProjectFile(cwd:string,path:string) {
+  if(!isAbsolute(path)&&!isAbsolute(cwd))throw new BridgeError('invalid','该会话没有工作目录，请填写电脑上的完整文件路径');
+  const target=await realpath(isAbsolute(path)?path:resolve(cwd,path));
   const info=await stat(target);
   if(!info.isFile())throw new BridgeError('invalid','请选择文件');
   if(info.size>2*1024*1024)throw new BridgeError('too_large','文件超过 2 MiB，请在电脑查看');

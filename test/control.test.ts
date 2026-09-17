@@ -13,7 +13,7 @@ test('desktop writes use the original owner, expected turn and correct approval 
   const cwd=await mkdtemp(join(tmpdir(),'cmw-control-'));const ledger=new Ledger(':memory:');
   class Runtime extends EventEmitter{calls:any[]=[];requests=new Map();rpc(method:string){this.calls.push(method);throw Error('must not create a shadow runtime');}close(){}}
   class Desktop extends EventEmitter{clientId='desktop';states=new Map([['s',{hostId:'local'}]]);calls:any[]=[];state={id:'s',cwd,turns:[{turnId:'active',status:'inProgress',items:[]}],requests:[{id:123,method:'item/permissions/requestApproval',params:{permissions:{network:{enabled:true}}}}]};async follow(){return this.state;}async request(method:string,params:any){this.calls.push({method,params});return {};}close(){}}
-  const runtime=new Runtime(),desktop=new Desktop(),control=new Control([cwd],ledger,runtime as any,desktop as any);
+  const runtime=new Runtime(),desktop=new Desktop(),control=new Control(ledger,runtime as any,desktop as any);
   try{
     const base={threadId:'s',source:'desktop',generation:control.generation,expectedTurnId:'active'};
     const request=(action:any,payload:any)=>control.handle({id:randomUUID(),action,payload:{...base,...payload,opId:`${Date.now()}:${randomUUID()}`}});
