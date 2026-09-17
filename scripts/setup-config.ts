@@ -14,8 +14,10 @@ export async function savedSettings(file:string):Promise<any> {
     throw new Error('连接配置无法读取，请先修复或备份 .local/config.json；未覆盖原配置。');
   }
 }
-export function defaultRelay() {
-  const lan=Object.values(networkInterfaces()).flat().find(i=>i?.family==='IPv4'&&!i.internal&&!i.address.startsWith('169.254.'))?.address||'127.0.0.1';
+export function defaultRelay(interfaces=networkInterfaces()) {
+  const physical=Object.entries(interfaces).filter(([name])=>!/tailscale|wireguard|vpn|vEthernet|vmware|virtualbox|docker|wsl|\btun\d*\b|\btap\d*\b/i.test(name));
+  physical.sort(([a],[b])=>Number(/wi-?fi|wlan|无线/i.test(b))-Number(/wi-?fi|wlan|无线/i.test(a)));
+  const lan=physical.flatMap(([,addresses])=>addresses||[]).find(i=>i.family==='IPv4'&&!i.internal&&/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(i.address))?.address||'127.0.0.1';
   return `http://${lan}:3340`;
 }
 export async function prepareSettings(input:any,old:any={}) {

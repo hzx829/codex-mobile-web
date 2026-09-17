@@ -3,9 +3,18 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {prepareSettings,savedSettings} from '../scripts/setup-config.js';
+import {defaultRelay,prepareSettings,savedSettings} from '../scripts/setup-config.js';
 import {connectionPage} from '../scripts/connection-page.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
+
+test('local setup prefers Wi-Fi and never automatically picks a VPN or virtual adapter',()=>{
+  const ipv4=(address:string)=>[{address,family:'IPv4' as const,internal:false,netmask:'255.255.255.0',mac:'00:00:00:00:00:00',cidr:null}];
+  const virtual={Tailscale:ipv4('100.102.214.125'),'vEthernet (WSL)':ipv4('172.23.176.1')};
+  assert.equal(defaultRelay({...virtual,Ethernet:ipv4('10.0.0.2'),WLAN:ipv4('192.168.1.248')}),'http://192.168.1.248:3340');
+  assert.equal(defaultRelay(virtual),'http://127.0.0.1:3340');
+  assert.equal(defaultRelay({en0:ipv4('192.168.1.50')}),'http://192.168.1.50:3340');
+  assert.equal(defaultRelay({unknown:ipv4('100.100.100.1')}),'http://127.0.0.1:3340');
+});
 
 test('configuration preserves identity and Codex settings, matches local port, and requires remote credentials',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'cmw-setup-'));

@@ -4,7 +4,7 @@
 
 ## 这台电脑
 
-本机配置已生成在 `.local/config.json`，默认显示当前电脑 Codex 的全部项目与会话。中继地址为 `http://192.168.1.248:3340`。
+本机配置位于 `.local/config.json`，默认显示当前电脑 Codex 的全部项目与会话。局域网优先选 Wi-Fi 地址，不自动选择 VPN 或虚拟网卡；具体地址以配置窗口为准。
 
 1. 双击项目根目录的 `start.cmd`。它会后台启动中继与连接器，并打开电脑状态与连接二维码。
 2. 手机连接同一 Wi-Fi，扫描二维码打开网页。不需要安装 App。
@@ -25,7 +25,7 @@
 - 手机键盘弹起时检查输入框、消息滚动与按钮能否正常操作；麦克风入口使用系统键盘听写。
 - 查看更早记录和文件后，确认回到原阅读位置；弱网失败时确认文字保留，必要时重选图片。
 
-界面操作与截图验证由人类完成，本轮未运行浏览器截图巡检。
+用户已确认同 Wi-Fi 访问可用；growth 项目列表已由浏览器复测。其余手机交互按上述步骤继续验收。
 
 ## 新电脑用便携包
 
@@ -48,16 +48,11 @@ node build/setup.mjs --yes --mode connector --relay "https://codex.example.com" 
 
 ## 自己部署公网中继
 
-服务器只需要本项目中继，Codex 和连接器留在开发电脑。
+使用 `release/codex-mobile-relay-*.tar.gz` 预构建部署包。服务器只需 Docker Engine、Compose v2 和一个解析到服务器的域名；包内 Caddy 负责 HTTPS，电脑和手机都连接该域名，不依赖 Tailscale。完整步骤、升级与回退见 [公网部署](DEPLOY.md)。
 
-1. 将 `.env.example` 复制为 `.env`，填写至少 24 位随机 Token。可使用本机配置生成的 Token。
-2. 在服务器运行 `docker compose up -d --build`。
-3. 参考 `Caddyfile.example`，用现有反向代理将自己的 HTTPS 域名转到 `127.0.0.1:3340`。
-4. 电脑打开 `configure.cmd`，选择“连接自己的中继”，保存 HTTPS 地址和相同 Token，再运行 `start.cmd`。
+部署包不含 Codex、模型凭据或本机连接配置；服务器不需要 npm 编译。电脑打开 `configure.cmd`，选择“连接自己的中继”，填入 HTTPS 地址和服务器 Token，再运行 `start.cmd`。公网模式只启动电脑连接器。
 
-容器不挂载业务数据卷，根文件系统只读；中继只保留内存路由。聊天、文件和模型请求内容不会写入中继数据库或日志。自托管服务器的外部代理日志配置由部署者管理；连接 Token 放在二维码链接的 fragment 和 WebSocket 首帧，不放请求查询参数。
-
-更换 Token：先完成任务并停止连接器，在配置窗口粘贴新 Token（至少 24 位），同步到服务器 `.env`，重启中继与连接器，再重新扫码。脚本也可以用 `node build/setup.mjs --yes --rotate` 生成新 Token。中继重启会断开旧客户端；同一连接器保持运行时，手机与中继断线不会终止本机任务。Docker 与公网证书部署尚未在本环境实测。
+没有服务器时先保留部署包。当前本机的 Docker Linux 引擎未运行，Linux 容器、证书签发及手机跨网操作需在真实服务器上完成验收。
 
 ## 第一次人工验证
 
@@ -80,6 +75,8 @@ npm run check          # 类型检查与必要协议/故障测试
 npm run test:native    # 真实 Codex + 本地模拟模型；不使用模型账户
 npm run build          # 手机网页与可独立运行的 Node 程序
 npm run package:windows
+npm run package:relay   # Linux 公网中继预构建包
+npm run test:relay-package # 解压并检查最近一次中继包
 npm run test:portable  # 隔离目录检查便携包启动、模型配置、重连和 Token 轮换
 ```
 

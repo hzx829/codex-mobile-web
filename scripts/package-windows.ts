@@ -1,12 +1,13 @@
-import {mkdir,cp,copyFile,readFile,writeFile,readdir,stat} from 'node:fs/promises';
+import {mkdir,cp,copyFile,readFile,writeFile} from 'node:fs/promises';
 import {resolve,join,dirname} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
+import {writeBundleLicenses} from './bundle-licenses.js';
 if(process.platform!=='win32')throw new Error('Windows 便携包请在 Windows 构建');
 const pkg=JSON.parse(await readFile('package.json','utf8'));
 const target=resolve('release',`codex-mobile-web-${pkg.version}-${Date.now()}`);await mkdir(join(target,'runtime'),{recursive:true});
 for(const name of ['build','dist','scripts/windows'])await cp(resolve(name),join(target,name),{recursive:true});
-for(const name of ['start.cmd','stop.cmd','configure.cmd','connector-only.cmd','QUICKSTART.md','ACCEPTANCE.md','SOURCES.md'])await copyFile(name,join(target,name));
+for(const name of ['start.cmd','stop.cmd','configure.cmd','connector-only.cmd','QUICKSTART.md','DEPLOY.md','ACCEPTANCE.md','SOURCES.md'])await copyFile(name,join(target,name));
 await copyFile(process.execPath,join(target,'runtime','node.exe'));
 const licenseCache=resolve('.local','licenses',`node-${process.version}-LICENSE.txt`);
 let nodeLicense='';
@@ -18,9 +19,7 @@ if(!nodeLicense.includes('Node.js is licensed for use as follows')||nodeLicense.
 await mkdir(dirname(licenseCache),{recursive:true});await writeFile(licenseCache,nodeLicense);
 await writeFile(join(target,'runtime','NODE-LICENSE.txt'),nodeLicense);
 // Include licenses of installed packages used in the bundle without shipping credentials or research copies.
-const licenses:string[]=[];
-async function scan(folder:string){for(const name of await readdir(folder)){if(name.startsWith('.'))continue;const path=join(folder,name);if(!(await stat(path)).isDirectory())continue;if(name.startsWith('@')){await scan(path);continue;}try{const pkg=JSON.parse(await readFile(join(path,'package.json'),'utf8'));const entries=await readdir(path);const file=entries.find(n=>/^licen[cs]e(\.|$)/i.test(n));if(file)licenses.push(`===== ${pkg.name}@${pkg.version} =====\n${await readFile(join(path,file),'utf8')}`);}catch{}}}
-await scan(resolve('node_modules'));await writeFile(join(target,'THIRD-PARTY-LICENSES.txt'),licenses.join('\n\n'));
+await writeBundleLicenses(target);
 let revision='untracked';try{revision=execFileSync('git',['rev-parse','--short','HEAD'],{encoding:'utf8'}).trim();if(execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim())revision+=' (uncommitted changes)';}catch{}
 await writeFile(join(target,'VERSION.txt'),`Codex Mobile Web ${pkg.version}\nSource ${revision}\nNode ${process.version}\nWindows ${process.arch}\nProtocol checked: Codex CLI 0.146.0 / Desktop 26.901.6511.0\nDesktop writes, phone UX and live third-party models require manual acceptance.\n`);
 const quote=(value:string)=>"'"+value.replace(/'/g,"''")+"'",archive=target+'.zip';
