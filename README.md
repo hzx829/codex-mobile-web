@@ -120,4 +120,4 @@ Packages go to `release/`; local configuration and operation records go to `.loc
 
 Independently implemented in TypeScript, with architectural research from **Codex Anywhere** and **Remodex**. Fixed references and attribution are in [SOURCES.md](SOURCES.md). Their pairing and encryption implementations are not included.
 
-The project license is not yet selected. Packages include third-party dependency licenses and, on Windows, the bundled Node license.
+Licensed under [MIT](LICENSE). Packages include third-party dependency licenses and, on Windows, the bundled Node license.

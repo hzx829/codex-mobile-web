@@ -9,7 +9,7 @@ const target=resolve('release',`codex-mobile-relay-${pkg.version}-${Date.now()}`
 await mkdir(join(target,'build'),{recursive:true});
 await copyFile('build/relay.mjs',join(target,'build/relay.mjs'));
 await cp('dist',join(target,'dist'),{recursive:true});
-for(const name of ['compose.yaml','compose.https.yaml','Caddyfile','.env.example','README.md','README.zh-CN.md','PRIVACY.md','DEPLOY.md','SOURCES.md'])await copyFile(name,join(target,name));
+for(const name of ['compose.yaml','compose.https.yaml','Caddyfile','.env.example','README.md','README.zh-CN.md','PRIVACY.md','LICENSE','DEPLOY.md','SOURCES.md'])await copyFile(name,join(target,name));
 await copyFile('deploy/Dockerfile',join(target,'Dockerfile'));
 await copyFile('deploy/.dockerignore',join(target,'.dockerignore'));
 await writeBundleLicenses(target);

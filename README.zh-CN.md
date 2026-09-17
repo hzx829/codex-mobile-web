@@ -120,4 +120,4 @@ npm run package:relay
 
 项目使用 TypeScript 独立实现，设计研究参考了 **Codex Anywhere** 与 **Remodex**。固定版本和来源说明见 [SOURCES.md](SOURCES.md)。本项目未引入它们的设备配对和加密实现。
 
-项目许可证待定。发布包附带第三方依赖许可证，Windows 包另附 Node 许可证。
+采用 [MIT 许可证](LICENSE)。发布包附带第三方依赖许可证，Windows 包另附 Node 许可证。

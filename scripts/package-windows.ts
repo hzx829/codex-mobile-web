@@ -7,7 +7,7 @@ if(process.platform!=='win32')throw new Error('Windows 便携包请在 Windows �
 const pkg=JSON.parse(await readFile('package.json','utf8'));
 const target=resolve('release',`codex-mobile-web-${pkg.version}-${Date.now()}`);await mkdir(join(target,'runtime'),{recursive:true});
 for(const name of ['build','dist','scripts/windows'])await cp(resolve(name),join(target,name),{recursive:true});
-for(const name of ['start.cmd','stop.cmd','configure.cmd','connector-only.cmd','README.md','README.zh-CN.md','PRIVACY.md','QUICKSTART.md','DEPLOY.md','ACCEPTANCE.md','SOURCES.md'])await copyFile(name,join(target,name));
+for(const name of ['start.cmd','stop.cmd','configure.cmd','connector-only.cmd','README.md','README.zh-CN.md','PRIVACY.md','LICENSE','QUICKSTART.md','DEPLOY.md','ACCEPTANCE.md','SOURCES.md'])await copyFile(name,join(target,name));
 await copyFile(process.execPath,join(target,'runtime','node.exe'));
 const licenseCache=resolve('.local','licenses',`node-${process.version}-LICENSE.txt`);
 let nodeLicense='';

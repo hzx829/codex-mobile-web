@@ -1,6 +1,12 @@
 {
   "name": "codex-mobile-web",
   "version": "0.1.3",
+  "description": "Use Codex from your phone through a self-hosted relay.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hzx829/codex-mobile-web.git"
+  },
   "private": true,
   "type": "module",
   "engines": {
