@@ -60,12 +60,10 @@ export class Control extends EventEmitter {
   async read(id:string,limit=20):Promise<SessionView> {
     let view:SessionView;
     if(this.loaded.has(id)) {
-      const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:true}).catch(e=>{
-        if(e instanceof BridgeError&&/not materialized yet/.test(e.message))return this.runtime.rpc('thread/read',{threadId:id,includeTurns:false});
-        throw e;
-      });
-      const raw={...r.thread,...this.settings.get(id)};
+      const {raw,hasMore}=await this.runtimeThread(id,limit);
+      Object.assign(raw,this.settings.get(id));
       view=normalizeSession(raw,'connector',[...this.runtime.requests.values()].filter(r=>r.params?.threadId===id),limit);
+      view.hasMore=hasMore||view.hasMore;
       let starting=this.starting.get(id);
       if(starting&&raw.turns?.some((t:Json)=>t.id===starting&&t.status!=='inProgress')){this.starting.delete(id);starting=undefined;}
       if(starting&&!view.activeTurnId){view.activeTurnId=starting;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
@@ -76,12 +74,33 @@ export class Control extends EventEmitter {
         const raw=await this.desktop.follow(id);
         view=normalizeSession(raw,'desktop',raw.requests||[],limit);
       } catch(e) {
-        const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:true});
-        view=normalizeSession(r.thread,'history',[],limit);
+        const {raw,hasMore}=await this.runtimeThread(id,limit);
+        view=normalizeSession(raw,'history',[],limit);
+        view.hasMore=hasMore||view.hasMore;
         view.notice='当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。';
       }
     }
     view.generation=this.generation;return view;
+  }
+  private async runtimeThread(id:string,limit:number):Promise<{raw:Json;hasMore:boolean}> {
+    try {
+      const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:true});
+      return {raw:r.thread,hasMore:false};
+    } catch(e) {
+      if(!(e instanceof BridgeError)||!/paginated[_\s]threads?.*(?:do not support|is not supported)/i.test(e.message)) {
+        if(e instanceof BridgeError&&/not materialized yet/.test(e.message)) {
+          const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:false});
+          return {raw:r.thread,hasMore:false};
+        }
+        throw e;
+      }
+      const [thread,page]=await Promise.all([
+        this.runtime.rpc('thread/read',{threadId:id,includeTurns:false}),
+        this.runtime.rpc('thread/turns/list',{threadId:id,limit,sortDirection:'desc'}),
+      ]);
+      const turns=page.data||page.turns||page.items||[];
+      return {raw:{...thread.thread,turns:[...turns].reverse()},hasMore:Boolean(page.nextCursor)};
+    }
   }
   private async mutate(action:string,p:Json):Promise<Json> {
     if(action==='session.create') {
@@ -112,7 +131,8 @@ export class Control extends EventEmitter {
         return {threadId:id,turnId:session.activeTurnId,kind:'stop_requested'};
       }
       const text=textRequired(p.text,'输入');
-      const input:Json[]=[{type:'text',text}];
+      // Desktop renders this input before app-server can supply protocol defaults.
+      const input:Json[]=[{type:'text',text,text_elements:[]}];
       if(p.images?.length) {
         if(!Array.isArray(p.images)||p.images.length>2||p.images.some((x:any)=>typeof x!=='string'||x.length>3_000_000||!/^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(x)))throw new BridgeError('invalid','最多两张 PNG、JPEG 或 WebP，每张不超过 2 MiB');
         // Unknown/custom providers remain text-first; only expose images when native metadata confirms them.

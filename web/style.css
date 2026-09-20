@@ -44,9 +44,12 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
 .home-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 18px 14px; gap: 12px; }
 .home-header h1 { flex: 1; min-width: 0; text-align: center; font-size: 20px; margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .home-header .round { background: #fff; height: 46px; width: 46px; }
-.machine-row { display: flex; align-items: center; text-align: left; padding: 10px 20px 16px; gap: 9px; border-radius: 0; width: 100%; font-size: 13px; }
-.machine-row > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.machine-row small { margin-left: auto; white-space: nowrap; font-size: 11px; }
+.home-identity { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 0; text-align: left; }
+.home-computer { display: grid; place-items: center; width: 46px; height: 46px; flex-shrink: 0; background: #fff; border-radius: 50%; }
+.home-identity strong { flex-shrink: 0; font-size: 20px; font-weight: 500; }
+.home-machine { display: flex; align-items: center; gap: 5px; min-width: 0; color: #5f5f5f; font-size: 12px; }
+.home-machine > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-machine small { flex-shrink: 0; font-size: 11px; }
 .home-content { overflow: auto; flex: 1; min-height: 0; padding: 30px 17px 116px; overscroll-behavior: contain; }
 .home-content h2 { font-size: 17px; font-weight: 550; margin: 0 0 18px; }
 .project-section { margin-bottom: 42px; }
@@ -194,7 +197,6 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
   .home-header { padding: max(16px, env(safe-area-inset-top)) 16px 18px; }
   .home-header .round { height: 48px; width: 48px; }
   .home-header h1 { font-size: 21px; }
-  .machine-row { font-size: 14px; padding: 9px 18px 14px; }
   .home-content { padding: 34px 18px 140px; }
   .home-content h2 { font-size: 18px; margin-bottom: 18px; }
   .project-row { gap: 13px; font-size: 18px; padding: 13px 1px; min-height: 54px; }
