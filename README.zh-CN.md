@@ -60,6 +60,12 @@ Windows 上未指定 `codexBin` 时，连接器优先使用桌面安装目录中
 
 ### Windows 连接器
 
+也可以让另一台电脑上的 Codex 自动安装和配置。向它发送：
+
+> 安装 GitHub 仓库 hzx829/codex-mobile-web 中 skills/codex-mobile-web-setup 这个 skill。
+
+下一轮使用 `$codex-mobile-web-setup`，提供已有中继地址即可。Skill 会下载并校验 Windows 便携包、识别本机 Codex、启动连接器并只读检查连接；首次 Token 在本机密码输入框中填写，也可指定本地 Token 文件。GitHub 账号不自动同步中继凭据。详见 [新电脑自动配置](QUICKSTART.md#让-codex-配置新电脑)。
+
 从 [Releases](https://github.com/hzx829/codex-mobile-web/releases) 下载 Windows 便携 ZIP，解压后双击 `start.cmd`。包内附带 Node 和构建结果，Codex 需事先单独安装。
 
 从源码启动时，安装 Node 24，在仓库目录执行：
