@@ -79,6 +79,7 @@ test('file preview follows the selected session across directories; large files 
     assert.equal((await readProjectFile(root,'../outside/secret.txt')).text,'private');
     await symlink(outside,join(root,'link'),process.platform==='win32'?'junction':'dir');
     assert.equal((await readProjectFile(root,'link/secret.txt')).text,'private');
-    await writeFile(join(root,'large.txt'),Buffer.alloc(2*1024*1024+1));await assert.rejects(readProjectFile(root,'large.txt'),/2 MiB/);
+    await writeFile(join(root,'large.txt'),Buffer.alloc(2*1024*1024+1));
+    const large=await readProjectFile(root,'large.txt');assert.equal(large.size,2*1024*1024+1);assert.match(large.notice!,/2 MiB/);assert.equal(large.data,undefined);assert.equal(large.text,undefined);assert.ok(large.revision);
   }finally{await removeTestTemp(dir);}
 });

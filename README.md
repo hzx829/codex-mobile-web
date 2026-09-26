@@ -12,7 +12,7 @@ Browse projects and conversations, send instructions, steer or stop a running ta
 - Start or continue tasks, follow progress, add instructions, stop a turn, and answer supported approvals or questions.
 - Choose an available model, reasoning level, and approval policy for the next turn; copy the conversation ID from its menu. Consecutive tool activity is collapsed in the timeline.
 - Tap a suggested follow-up to fill the composer; in-app back buttons return to the parent list.
-- View Markdown, code, task diffs, and small text/image files. Attach images when the runtime confirms model support.
+- Preview Markdown, highlighted code, visual task diffs and images in a bottom sheet on phones or a right pane on desktop. Download other files such as PowerPoint, PDF and ZIP. Attach images when the runtime confirms model support.
 - Open a local web page through the relay; the phone renders it directly while the connector forwards requests to the project's `localhost`.
 - Reconnect after a browser disconnect, retain text drafts, and check uncertain operations without automatically resending them.
 
@@ -23,7 +23,7 @@ Closing the phone page does not stop Codex. The computer must remain on and conn
 - You choose and operate the relay. The bridge has no built-in analytics, advertising, or telemetry endpoint operated by this project.
 - The relay application does not persist conversation history or project files, but it can read forwarded content. There is no end-to-end encryption; use a trusted relay with HTTPS/WSS for public access.
 - Model requests go from your computer to your configured provider. The bridge does not deliberately upload model credentials, but secrets in messages, tool output, or file previews travel with that content.
-- The shared Token grants access to projects and conversations on connected computers, without per-device or per-project permissions. File previews use the connector's OS permissions and can read outside the selected project, subject to preview format and size limits.
+- The shared Token grants access to projects and conversations on connected computers, without per-device or per-project permissions. File previews and downloads use the connector's OS permissions and can read outside the selected project, subject to their respective size limits.
 
 See [Privacy details](PRIVACY.md#english) for data storage, Token revocation, and removal.
 
@@ -98,7 +98,7 @@ See [DEPLOY.md](DEPLOY.md) (Chinese) for existing proxies, upgrades, rollback, a
 
 Scan the connector's QR code or open your relay URL and enter the same Token. The browser remembers it for that site. Treat the QR code like a password. Once connected, select a project, open a conversation, or start a new task.
 
-To preview a web app, start its development server on the computer. On the phone, choose “打开本机网页” from the main or conversation menu and enter a local URL such as `http://127.0.0.1:5173`. The page opens in a new tab in the phone's browser. The relay and connector tunnel HTTP and WebSocket requests instead of streaming screenshots. The preview port is the relay port plus one (3341 by default). Projects with hard-coded `localhost` URLs or Host/Origin restrictions may need changes.
+To preview a web app, start its development server on the computer. Open an existing conversation, choose “打开本机网页” from its menu and enter a local URL such as `http://127.0.0.1:5173`. The address is saved per computer and thread. The page opens in the preview pane, with a separate-tab option for sites that block embedding. Closing the pane keeps the preview session; “结束预览” or switching threads/computers ends it. Returning to a thread lets you reopen its saved address. Each connector supports one active preview. The relay and connector tunnel HTTP and WebSocket requests instead of streaming screenshots. The preview port is the relay port plus one (3341 by default). Projects with hard-coded `localhost` URLs or Host/Origin restrictions may need changes.
 
 Use `configure.cmd` to change settings after stopping this installation. `stop.cmd` stops the connector and its Codex child process, so finish connector-managed tasks first. Setup, optional login startup, and uninstall instructions are in [QUICKSTART.md](QUICKSTART.md) (Chinese).
 
@@ -112,7 +112,11 @@ Use `configure.cmd` to change settings after stopping this installation. `stop.c
 
 Models use your existing local Codex configuration. The connector is currently available for Windows; macOS and Linux connectors are not supported.
 
-Current limits: latest 100 turns per conversation view, truncated large output, file previews up to 2 MiB, and at most two supported images of 2 MiB each. No background push, audio upload, large-file download, or active standalone CLI takeover. Named Codex profiles are rejected for connector-managed app-server sessions on the tested CLI baseline.
+Click a file link in a reply, choose “下载文件” (download), then “保存到设备” (save to device) after receiving it. You can also enter a path in the conversation menu's “查看项目文件” option. Files transfer on demand from the selected computer without a relay copy; the computer must stay online. Downloads up to 100 MiB show progress and can be cancelled. File changes or disconnections fail explicitly; reopen the file to retry. Closing the file panel cancels reception and releases temporary content. Update both the relay web application and the computer connector to enable this feature.
+
+Task diffs support file selection, syntax and inline-edit highlighting, unified and side-by-side views. Markdown files support relative file links and local images. PowerPoint, PDF and other complex formats currently have a download entry only. Update the web application, relay and connector together. Preview UI acceptance remains manual; see [acceptance steps](ACCEPTANCE.md).
+
+Current limits: latest 100 turns per conversation view, truncated large output, text/image previews up to 2 MiB, file downloads up to 100 MiB, and at most two supported image attachments of 2 MiB each. Code views show up to 10,000 lines. Downloads are assembled in browser memory without resumable transfers. No background push, audio upload, or active standalone CLI takeover. Named Codex profiles are rejected for connector-managed app-server sessions on the tested CLI baseline.
 
 ## Development and provenance
 

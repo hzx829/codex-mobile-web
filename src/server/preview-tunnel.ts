@@ -3,7 +3,7 @@ import {randomBytes,randomUUID} from 'node:crypto';
 import {WebSocket, WebSocketServer} from 'ws';
 import type {Json} from '../shared/types.js';
 
-type Session={id:string;phone:WebSocket;connector:WebSocket;url:string;cookie:string;ticket:string;lastActivity:number};
+type Session={id:string;threadId:string;phone:WebSocket;connector:WebSocket;url:string;cookie:string;ticket:string;lastActivity:number};
 type HttpRoute={session:Session;response:ServerResponse;started:boolean;timer:NodeJS.Timeout;origin:string};
 type SocketRoute={session:Session;socket:WebSocket;ready:boolean;pending:{data:string;binary:boolean}[]};
 const authCookie='codex_preview';
@@ -17,7 +17,7 @@ export class PreviewTunnel {
   private sockets=new Map<string,SocketRoute>();
   private expiry:NodeJS.Timeout;
   constructor(private send:(socket:WebSocket,message:Json)=>void,private port:number){
-    this.expiry=setInterval(()=>{for(const session of this.sessions.values())if(Date.now()-session.lastActivity>30*60_000){this.stop(session.id);this.send(session.connector,{type:'preview.stop',sessionId:session.id});}},60_000);
+    this.expiry=setInterval(()=>{for(const session of this.sessions.values())if(Date.now()-session.lastActivity>30*60_000){this.stop(session.id,true);this.send(session.connector,{type:'preview.stop',sessionId:session.id,threadId:session.threadId});}},60_000);
     this.expiry.unref();
     this.server.on('upgrade',(req,socket,head)=>{
       const session=this.authorize(req);
@@ -27,7 +27,7 @@ export class PreviewTunnel {
   }
   start(phone:WebSocket,connector:WebSocket,result:Json):Json {
     for(const session of this.sessions.values())if(session.connector===connector)this.stop(session.id,true);
-    const session:Session={id:result.sessionId,phone,connector,url:result.url,cookie:token(),ticket:token(),lastActivity:Date.now()};
+    const session:Session={id:result.sessionId,threadId:result.threadId,phone,connector,url:result.url,cookie:token(),ticket:token(),lastActivity:Date.now()};
     this.sessions.set(session.id,session);
     return {...result,ticket:session.ticket,previewPort:(this.server.address() as any)?.port||this.port};
   }
@@ -36,7 +36,11 @@ export class PreviewTunnel {
     this.sessions.delete(id);
     for(const [routeId,route] of this.httpRoutes)if(route.session===session){clearTimeout(route.timer);route.response.destroy();this.httpRoutes.delete(routeId);}
     for(const [routeId,route] of this.sockets)if(route.session===session){route.socket.close();this.sockets.delete(routeId);}
-    if(notify)this.send(session.phone,{type:'preview.ended',sessionId:id});
+    if(notify)this.send(session.phone,{type:'preview.ended',sessionId:id,threadId:session.threadId});
+  }
+  stopForThread(id:string,threadId:string,connector:WebSocket,notify=true){
+    const session=this.sessions.get(id);
+    if(session&&session.threadId===threadId&&session.connector===connector)this.stop(id,notify);
   }
   stopPeer(peer:WebSocket){
     for(const session of this.sessions.values())if(session.connector===peer)this.stop(session.id,true);
@@ -100,12 +104,14 @@ export class PreviewTunnel {
     res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
     const path=req.url||'/';
     if(path.startsWith('/_bridge/enter?')){
-      const ticket=new URL(path,'http://preview.invalid').searchParams.get('ticket');
-      const session=[...this.sessions.values()].find(s=>s.ticket===ticket);
+      const params=new URL(path,'http://preview.invalid').searchParams,ticket=params.get('ticket'),id=params.get('session');
+      // A consumed ticket grants nothing; an existing cookie can reopen its own session.
+      const authenticated=this.authorize(req);
+      const session=id&&authenticated?.id===id?authenticated:[...this.sessions.values()].find(s=>Boolean(ticket)&&s.ticket===ticket&&(!id||s.id===id));
       if(!session){res.writeHead(401);res.end('Preview link expired');return;}
       session.ticket='';
       const target=new URL(session.url);
-      res.writeHead(302,{'Set-Cookie':`${authCookie}=${session.cookie}; HttpOnly; SameSite=Lax; Path=/${this.origin(req).startsWith('https:')?'; Secure':''}`,'Location':target.pathname+target.search});res.end();return;
+      res.writeHead(302,{'Set-Cookie':`${authCookie}=${session.cookie}; HttpOnly; SameSite=Lax; Path=/${this.origin(req).startsWith('https:')?'; Secure':''}`,'Location':target.pathname+target.search+target.hash});res.end();return;
     }
     const session=this.authorize(req);
     if(!session){res.writeHead(401);res.end('Preview expired. Open it from Codex Mobile again.');return;}

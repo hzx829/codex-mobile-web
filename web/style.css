@@ -189,6 +189,8 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
 .other-project summary { cursor: pointer; }
 .other-project form { margin-top: 15px; }
 .file-preview { width: min(850px, 100%); }
+.file-download { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.file-download a { display: inline-block; text-decoration: none; }
 .file-content { max-height: none; margin: 0; }
 .preview-image { max-width: 100%; display: block; margin: auto; }
 .browser-preview { display: flex; align-items: center; gap: 10px; min-width: 0; margin: 0 16px 8px; padding: 10px 12px; border-radius: 12px; background: #242424; color: #fff; }

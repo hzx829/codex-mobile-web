@@ -3,16 +3,18 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
-import { MAX_FRAME, type Json } from '../shared/types.js';
+import { MAX_FRAME, textRequired, type Json } from '../shared/types.js';
 import { PreviewTunnel } from './preview-tunnel.js';
 
 type Peer={role:'phone'|'connector';machineId?:string;name?:string;alive:boolean};
 export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3341) {
   const peers=new Map<WebSocket,Peer>();
-  const routes=new Map<string,{phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;timer:NodeJS.Timeout}>();
+  const routes=new Map<string,{phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;threadId?:string;timer:NodeJS.Timeout}>();
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
-    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'");
+    let frameOrigin="'none'";
+    try{const origin=new URL(`${req.headers['x-forwarded-proto']==='https'?'https':'http'}://${req.headers.host}`);origin.port=String((preview.server.address() as any)?.port||previewPort);frameOrigin=origin.origin;}catch{}
+    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-src ${frameOrigin}; frame-ancestors 'none'; object-src 'none'; base-uri 'none'`);
     if(req.url==='/health'){res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');return;}
     try {
       const pathname=decodeURIComponent(new URL(req.url||'/', 'http://localhost').pathname);
@@ -35,8 +37,14 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
   function publish(){for(const [ws,p]of peers)if(p.role==='phone')send(ws,{type:'machines',data:machines()});}
   function finish(routeId:string,message:Json){
     const r=routes.get(routeId);if(!r)return;clearTimeout(r.timer);routes.delete(routeId);
-    if(r.action==='preview.start'&&typeof message.result?.sessionId==='string'&&typeof message.result?.url==='string')message.result=preview.start(r.phone,r.connector,message.result);
-    if(r.action==='preview.stop'&&r.sessionId)preview.stop(r.sessionId);
+    if(r.action==='preview.start'&&!message.error){
+      const result=message.result;
+      if(r.phone.readyState!==WebSocket.OPEN||!result?.sessionId||typeof result.sessionId!=='string'||typeof result.url!=='string'||result.threadId!==r.threadId){
+        if(typeof result?.sessionId==='string')send(r.connector,{type:'preview.stop',sessionId:result.sessionId,threadId:r.threadId});
+        message={error:{code:'invalid',message:'网页预览的会话不匹配，请更新中继和电脑连接器'}};
+      }else message.result=preview.start(r.phone,r.connector,result);
+    }
+    if(r.action==='preview.stop'&&!message.error&&message.result?.stopped===true&&r.sessionId&&r.threadId)preview.stopForThread(r.sessionId,r.threadId,r.connector);
     send(r.phone,{...message,id:r.id,type:'response'});
   }
   wss.on('connection',ws=>{
@@ -57,17 +65,21 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       }
       if(p.role==='phone'&&m.type==='request') {
         if(typeof m.id!=='string'||m.id.length>100||typeof m.action!=='string'||!m.payload||typeof m.payload!=='object'){ws.close(4400);return;}
+        if(m.action==='preview.start'||m.action==='preview.stop')try{
+          m.payload.threadId=textRequired(m.payload.threadId,'会话');
+          if(m.action==='preview.stop')m.payload.sessionId=textRequired(m.payload.sessionId,'预览会话');
+        }catch(e){send(ws,{type:'response',id:m.id,error:{code:'invalid',message:(e as Error).message}});return;}
         const connector=[...peers].find(([,q])=>q.role==='connector'&&q.machineId===m.machineId)?.[0];
         if(!connector){send(ws,{type:'response',id:m.id,error:{code:'offline',message:'电脑未连接'}});return;}
         if([...routes.values()].filter(r=>r.phone===ws).length>=32){send(ws,{type:'response',id:m.id,error:{code:'busy',message:'请求较多，请稍后重试'}});return;}
         const routeId=randomUUID();
         const timer=setTimeout(()=>finish(routeId,{error:{code:'timeout',message:'电脑回执超时，请核实操作结果',uncertain:true}}),40_000);
-        routes.set(routeId,{phone:ws,connector,id:m.id,action:m.action,sessionId:m.payload.sessionId,timer});
+        routes.set(routeId,{phone:ws,connector,id:m.id,action:m.action,sessionId:m.payload.sessionId,threadId:m.payload.threadId,timer});
         send(connector,{type:'request',id:routeId,action:m.action,payload:m.payload});
       } else if(p.role==='connector'&&m.type==='response') {
         if(routes.get(m.id)?.connector===ws)finish(m.id,m);
       } else if(p.role==='connector'&&m.type==='preview.ended') {
-        preview.stop(m.sessionId,true);
+        preview.stopForThread(m.sessionId,m.threadId,ws);
       } else if(p.role==='connector'&&typeof m.type==='string'&&m.type.startsWith('proxy.')) {
         preview.handle(ws,m);
       } else if(p.role==='connector'&&m.type==='changed') {
@@ -78,7 +90,8 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       clearTimeout(authTimer);peers.delete(ws);
       preview.stopPeer(ws);
       for(const [id,r]of routes) {
-        if(r.phone===ws){if(r.action==='preview.start')send(r.connector,{type:'preview.stop'});clearTimeout(r.timer);routes.delete(id);}
+        // Wait for a pending start result so cleanup names that exact session.
+        if(r.phone===ws){if(r.action==='preview.start')continue;clearTimeout(r.timer);routes.delete(id);}
         else if(r.connector===ws)finish(id,{error:{code:'offline',message:'电脑连接中断，请核实操作结果',uncertain:true}});
       }
       publish();

@@ -40,11 +40,11 @@ function connect() {
     if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;console.log('电脑已连接中继');return;}
     if(!ready)return;
     if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
-    if(m.type==='preview.stop'){void browserPreview.stop(m.sessionId);return;}
+    if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
     if(m.type!=='request')return;
     try{
-      const result=m.action==='preview.start'?browserPreview.start(m.payload?.url)
-        :m.action==='preview.stop'?(await browserPreview.stop(m.payload?.sessionId),{stopped:true})
+      const result=m.action==='preview.start'?browserPreview.start(m.payload?.url,m.payload?.threadId)
+        :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
         :await control.handle(m as any);
       if(socket===ws)send({type:'response',id:m.id,result});
     }

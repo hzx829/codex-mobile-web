@@ -1,14 +1,15 @@
 import {useState} from 'react';
-import Markdown from 'react-markdown';
+import Markdown, {defaultUrlTransform} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type {Json} from '../src/shared/types';
 import {splitFollowups} from './followup';
+const windowsFilePath=/^[a-z]:(?:[\\/]|%5c|%2f)/i;
 export function SafeMarkdown({text,openFile,onFollowup}:{text:string;openFile:(path:string)=>void;onFollowup:(prompt:string)=>void}){
-  return splitFollowups(text).map((part,index)=>part.kind==='followup'?<button className="followup" type="button" key={index} onClick={()=>onFollowup(part.prompt)}>{part.label} ↗</button>:<Markdown key={index} remarkPlugins={[remarkGfm]} components={{img:({alt})=><span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
+  return splitFollowups(text).map((part,index)=>part.kind==='followup'?<button className="followup" type="button" key={index} onClick={()=>onFollowup(part.prompt)}>{part.label} ↗</button>:<Markdown key={index} remarkPlugins={[remarkGfm]} urlTransform={(url,key)=>key==='href'&&windowsFilePath.test(url)?url:defaultUrlTransform(url)} components={{img:({alt})=><span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
     if(!href)return <span>{children}</span>;
     if(/^https?:\/\//i.test(href))return <a href={href} target="_blank" rel="noreferrer noopener">{children} ↗</a>;
-    if(/^[a-z]+:/i.test(href)&&!/^[a-z]:[\\/]/i.test(href))return <span>{children}</span>;
-    return <button className="inline-link" onClick={()=>{try{openFile(decodeURIComponent(href).replace(/:\d+(?::\d+)?$/,''));}catch{openFile(href);}}}>{children}</button>;
+    if(/^[a-z]+:/i.test(href)&&!windowsFilePath.test(href))return <span>{children}</span>;
+    return <button className="inline-link" onClick={()=>openFile(href)}>{children}</button>;
   }}}>{part.text}</Markdown>);
 }
 export function RequestCard({request:r,disabled,respond}:{request:Json;disabled:boolean;respond:(response:Json)=>void}){

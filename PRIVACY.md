@@ -20,20 +20,21 @@ The bridge has no required developer-operated backend or built-in analytics/tele
 
 | Connection | Data |
 | --- | --- |
-| Phone ↔ relay ↔ connector | Token during WebSocket authentication; computer names/IDs, project paths, conversation metadata and displayed history; instructions, image attachments, task output, approvals/questions and replies, requested file previews and diffs; preview URL and proxied HTTP/WebSocket traffic, including page content and submitted form data; online status and change notifications |
+| Phone ↔ relay ↔ connector | Token during WebSocket authentication; computer names/IDs, project paths, conversation metadata and displayed history; instructions, image attachments, task output, approvals/questions and replies, requested file previews, downloads and diffs; preview URL and proxied HTTP/WebSocket traffic, including page content and submitted form data; online status and change notifications |
 | Computer → configured providers/tools | Native Codex model requests and network activity performed by tasks/tools; the relay is not a model gateway |
 | Installation/build | npm dependencies, container images, and the Node license during Windows packaging if not cached; certificate setup contacts the configured certificate authority |
 
 The connector returns selected model/provider metadata for display, not the full Codex configuration or a dedicated copy of API keys. But credentials typed into a conversation, emitted by tools, or read through file preview travel as ordinary content. There is no automatic secret-redaction guarantee. Existing Codex settings continue to determine model/tool behavior.
 
-The web app connects to its own site's WebSocket endpoint. Markdown images become placeholders rather than automatic external image requests; clicking an external link opens that site. Voice input uses the system keyboard, whose privacy behavior depends on its provider. This app does not record or upload microphone audio.
+The web app connects to its own site's WebSocket endpoint. Chat Markdown images and external images become placeholders; Markdown file previews can read local images through the authenticated file interface. Clicking an external link opens that site. Voice input uses the system keyboard, whose privacy behavior depends on its provider. This app does not record or upload microphone audio.
 
 ### Storage and retention
 
 | Location | Stored data | Retention |
 | --- | --- | --- |
-| Browser `localStorage` | Token (`connection`), last preview URL (`browser-preview-url`), text drafts (`draft:*`), pending operations (`operation:*`) that may include submitted text | No time-based expiry. Success clears related pending data/drafts where applicable. Disconnect clears the Token, not all drafts or pending records |
-| Browser memory | Loaded conversations, file previews, preview pages, image attachments and UI state | No app-managed persistent conversation cache; reload requires reselecting attachments. This does not guarantee secure erasure from browser/OS memory |
+| Browser `localStorage` | Token (`connection`), preview URLs per computer/thread (`browser-preview-url:*`; the unused legacy `browser-preview-url` may remain), text drafts (`draft:*`), pending operations (`operation:*`) that may include submitted text | No time-based expiry. Success clears related pending data/drafts where applicable. Disconnect clears the Token, not all drafts or pending records |
+| Browser memory | Loaded conversations, file previews, download chunks and assembled files, preview pages, image attachments and UI state | Closing the file panel cancels reception and releases its download URL; no app-managed persistent conversation or download cache. Reload requires reselecting attachments. This does not guarantee secure erasure from browser/OS memory |
+| Files saved on the phone/device | Files explicitly saved through the browser download link | Managed by the browser/OS; retained until the user deletes them. Disconnecting or clearing bridge storage does not delete saved files |
 | Preview browser cookies | Short-lived session cookie for the preview port and any cookies set by the proxied app | The session cookie stops granting access when the preview ends; the browser may retain cookies until cleared |
 | Connector `.local/config.json` | Relay address, Token, machine identity, selected local paths | Until changed/deleted; the app does not encrypt this file |
 | Connector `.local/connect.html`, `connect-qr.png` | Connection page and QR code containing the Token | Until regenerated/deleted; protect like the Token itself |
@@ -49,9 +50,9 @@ Default relay/connector status logging does not deliberately record message bodi
 
 The Token authenticates both phone and connector roles. There are no separate read-only credentials, device approvals, project allowlists, or per-device revocation. Authenticated clients can discover connected machines and issue supported requests. Treat the Token as a remote-control credential.
 
-An authenticated client can expose a loopback web service through the preview port. The phone browser runs the page and sends its requests through the relay and connector to the chosen local service. The one-time preview link creates a browser session cookie; ending the preview, connector disconnect, or 30 minutes of inactivity revokes that session. The relay operator can read and alter proxied page content and form submissions.
+An authenticated client can expose a loopback web service through the preview port. The phone browser runs the page and sends its requests through the relay and connector to the chosen local service. The one-time preview link creates a browser session cookie; ending the preview, switching threads/computers in the web app, connector disconnect, or 30 minutes of inactivity revokes that session. The relay operator can read and alter proxied page content and form submissions.
 
-**File preview is not confined to a project and does not pass through Codex's sandbox or approval flow.** It reads as the connector's OS user, accepts absolute paths and cross-directory references, and can expose readable text/image files, including sensitive files, up to 2 MiB. Format and size limits are not an authorization boundary. Use a dedicated OS account if you need to restrict readable files.
+**File preview and download are not confined to a project and do not pass through Codex's sandbox or approval flow.** They read as the connector's OS user and accept absolute paths and cross-directory references, including sensitive files. Previews support text/images up to 2 MiB; downloads support any regular file up to 100 MiB. Downloads use the authenticated connection without a public download URL or relay disk copy. Format and size limits are not an authorization boundary. Use a dedicated OS account if you need to restrict readable files.
 
 Task execution follows the applicable Codex session's permissions. The bridge adds no extra confirmation layer, and a Token holder can answer supported native approvals. The web page, static assets and `/health` are public; machine/conversation requests require WebSocket authentication. Use an unguessable random Token and HTTPS for public access. The app also accepts plain HTTP/WS and does not enforce HTTPS for you.
 
@@ -87,20 +88,21 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 | 连接 | 内容 |
 | --- | --- |
-| 手机 ↔ 中继 ↔ 连接器 | WebSocket 认证时的 Token；电脑名称/标识、项目路径、会话信息和展示的历史；指令、图片附件、任务输出、审批/问题及回应、主动请求的文件预览和差异；预览地址及代理的 HTTP/WebSocket 内容（包括页面和表单数据）；在线状态和变更通知 |
+| 手机 ↔ 中继 ↔ 连接器 | WebSocket 认证时的 Token；电脑名称/标识、项目路径、会话信息和展示的历史；指令、图片附件、任务输出、审批/问题及回应、主动请求的文件预览、下载和差异；预览地址及代理的 HTTP/WebSocket 内容（包括页面和表单数据）；在线状态和变更通知 |
 | 电脑 → 配置的模型服务/工具 | Codex 原生模型请求及任务/工具的网络活动；本中继不充当模型网关 |
 | 安装/构建 | npm 依赖、容器镜像；Windows 打包时未缓存的 Node 许可证；证书配置还会联系配置的证书签发机构 |
 
 连接器只返回展示所需的模型/provider 等信息，不发送完整 Codex 配置，也不专门上传 API Key。但输入会话、出现在工具输出、或经文件预览读取的凭据仍会随普通内容转发。程序不保证自动识别并去除敏感信息；模型和工具行为继续由原有 Codex 设置决定。
 
-网页连接本站的 WebSocket。Markdown 图片显示为占位文本，不主动请求外部图片；点击外部链接会打开对应网站。语音输入使用系统键盘，其隐私行为取决于键盘服务商；本项目不录制或上传麦克风音频。
+网页连接本站的 WebSocket。聊天中的 Markdown 图片和外部图片显示为占位文本；Markdown 文件预览可通过已认证文件接口读取本地图片，不主动请求外部图片。点击外部链接会打开对应网站。语音输入使用系统键盘，其隐私行为取决于键盘服务商；本项目不录制或上传麦克风音频。
 
 ### 保存位置与保留时间
 
 | 位置 | 保存内容 | 保留方式 |
 | --- | --- | --- |
-| 浏览器 `localStorage` | Token（`connection`）、上次预览地址（`browser-preview-url`）、文字草稿（`draft:*`）、可能含已提交文字的待核实记录（`operation:*`） | 无定时过期；成功后按情况清理对应记录/草稿。“断开连接”清除 Token，不清除全部草稿和待核实记录 |
-| 浏览器内存 | 已加载会话、文件预览、预览网页、图片附件与界面状态 | 应用没有持久化会话缓存，刷新后图片需重选；不保证浏览器/系统内存被安全擦除 |
+| 浏览器 `localStorage` | Token（`connection`）、按电脑/thread 保存的预览地址（`browser-preview-url:*`；可能留有不再读取的旧键 `browser-preview-url`）、文字草稿（`draft:*`）、可能含已提交文字的待核实记录（`operation:*`） | 无定时过期；成功后按情况清理对应记录/草稿。“断开连接”清除 Token，不清除全部草稿和待核实记录 |
+| 浏览器内存 | 已加载会话、文件预览、下载分块及组装后的文件、预览网页、图片附件与界面状态 | 关闭文件面板取消接收并释放下载链接；应用没有持久化会话或下载缓存，刷新后图片需重选；不保证浏览器/系统内存被安全擦除 |
+| 手机/设备上已保存的文件 | 使用者通过浏览器下载链接主动保存的文件 | 由浏览器/系统管理，使用者删除前保留；断开连接或清理中继应用存储不会删除已保存文件 |
 | 预览网页 Cookie | 预览端口的短期会话 Cookie，以及被代理网页自行设置的 Cookie | 预览结束后会话 Cookie 不再授权访问；浏览器可能继续保存 Cookie，需自行清除 |
 | 连接器 `.local/config.json` | 中继地址、Token、电脑标识和选定的本地路径 | 修改/删除前保留，应用不加密此文件 |
 | 连接器 `.local/connect.html`、`connect-qr.png` | 含 Token 的连接页和二维码 | 重新生成/删除前保留，按 Token 同等保管 |
@@ -116,11 +118,11 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 Token 同时认证手机和连接器，没有独立只读凭据、设备批准、项目白名单或逐设备撤销。认证后的客户端可以发现已连接电脑并发送受支持的请求。应把它视为远程控制凭据。
 
-**文件预览不限制在项目目录，也不经过 Codex 的沙箱或审批流程。** 它按连接器的系统账户读取，支持绝对路径和跨目录引用，可返回该账户能读取的文本/图片文件，包括敏感文件，上限为 2 MiB。格式和大小限制不构成权限隔离。如需限制可读范围，应使用专门的系统账户运行连接器。
+**文件预览和下载不限制在项目目录，也不经过 Codex 的沙箱或审批流程。** 它们按连接器的系统账户读取，支持绝对路径和跨目录引用，包括敏感文件。文本/图片预览上限为 2 MiB；任意普通文件的下载上限为 100 MiB。下载通过已认证连接传输，不创建公开下载 URL，也不在中继磁盘保存副本。格式和大小限制不构成权限隔离。如需限制可读范围，应使用专门的系统账户运行连接器。
 
 任务执行沿用对应 Codex 会话的权限。连接器不增加额外确认层，Token 持有者也能回应支持的原生审批。网页、静态资源与 `/health` 公开可访问，电脑/会话请求需先完成 WebSocket 认证。公网使用需要难以猜测的随机 Token 和 HTTPS；程序也接受 HTTP/WS，不会替使用者强制 HTTPS。
 
-持有 Token 的客户端可以通过预览端口开放电脑回环地址上的网页。手机浏览器运行网页，请求经中继和连接器转到选定的本机服务。一次性预览链接会建立浏览器会话 Cookie；主动结束预览、电脑断线或闲置 30 分钟后，该会话失效。中继运营者可读取和改动被代理的页面及表单内容。
+持有 Token 的客户端可以通过预览端口开放电脑回环地址上的网页。手机浏览器运行网页，请求经中继和连接器转到选定的本机服务。一次性预览链接会建立浏览器会话 Cookie；主动结束预览、在应用中切换 thread/电脑、电脑断线或闲置 30 分钟后，该会话失效。中继运营者可读取和改动被代理的页面及表单内容。
 
 ### 连接、撤销与清理
 

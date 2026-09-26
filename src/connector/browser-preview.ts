@@ -3,7 +3,7 @@ import {EventEmitter} from 'node:events';
 import {request as httpRequest, type ClientRequest, type IncomingMessage} from 'node:http';
 import {request as httpsRequest} from 'node:https';
 import {WebSocket} from 'ws';
-import {BridgeError, type Json} from '../shared/types.js';
+import {BridgeError, textRequired, type Json} from '../shared/types.js';
 
 type HttpRoute={request:ClientRequest;response?:IncomingMessage};
 
@@ -15,21 +15,26 @@ export function localPreviewUrl(value:unknown):string {
 }
 
 export class BrowserPreview extends EventEmitter {
-  private active?:{id:string;url:URL};
+  private active?:{id:string;threadId:string;url:URL};
   private requests=new Map<string,HttpRoute>();
   private sockets=new Map<string,WebSocket>();
-  start(value:unknown):Json {
+  start(value:unknown,thread:unknown):Json {
+    const threadId=textRequired(thread,'会话');
     const url=new URL(localPreviewUrl(value));
     this.stop();
-    const id=randomUUID();this.active={id,url};
-    return {sessionId:id,url:url.toString()};
+    const id=randomUUID();this.active={id,threadId,url};
+    return {sessionId:id,threadId,url:url.toString()};
   }
-  stop(sessionId?:unknown){
-    if(!this.active||sessionId&&sessionId!==this.active.id)return;
-    const id=this.active.id;this.active=undefined;
+  stopForThread(session:unknown,thread:unknown){
+    return this.stop(textRequired(session,'预览会话'),textRequired(thread,'会话'));
+  }
+  stop(sessionId?:unknown,threadId?:unknown):boolean {
+    if(!this.active||sessionId!==undefined&&sessionId!==this.active.id||threadId!==undefined&&threadId!==this.active.threadId)return false;
+    const active=this.active;this.active=undefined;
     for(const route of this.requests.values())route.request.destroy();this.requests.clear();
     for(const socket of this.sockets.values())socket.terminate();this.sockets.clear();
-    this.emit('ended',{sessionId:id});
+    this.emit('ended',{sessionId:active.id,threadId:active.threadId});
+    return true;
   }
   pauseResponses(){for(const route of this.requests.values())route.response?.pause();}
   resumeResponses(){for(const route of this.requests.values())route.response?.resume();}

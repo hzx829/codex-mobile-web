@@ -5,7 +5,7 @@ import { Desktop } from './desktop.js';
 import { Ledger } from './ledger.js';
 import { normalizeSession } from './normalize.js';
 import { approvalResult } from './approvals.js';
-import { projectDirectory, readProjectFile } from './project.js';
+import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
 import { nativeProjects } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, type Json, type BridgeRequest, type SessionView } from '../shared/types.js';
@@ -61,7 +61,10 @@ export class Control extends EventEmitter {
       return {data,nextCursor:r.nextCursor};
     }
     if(req.action==='session.read')return this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(5,Number(p.limit)||20)));
-    if(req.action==='file.read') {const session=await this.read(textRequired(p.threadId,'会话'),5);return readProjectFile(session.cwd,textRequired(p.path,'文件路径'));}
+    if(req.action==='file.read'||req.action==='file.download') {
+      const session=await this.read(textRequired(p.threadId,'会话'),5),path=textRequired(p.path,'文件路径');
+      return req.action==='file.read'?readProjectFile(session.cwd,path):downloadProjectFile(session.cwd,path,textRequired(p.revision,'文件版本',64),p.offset);
+    }
     throw new BridgeError('unsupported','此操作暂不支持');
   }
   async read(id:string,limit=20):Promise<SessionView> {
