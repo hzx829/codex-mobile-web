@@ -1,3 +1,7 @@
 codex.your-domain.example {
     reverse_proxy 127.0.0.1:3340
 }
+
+codex.your-domain.example:3341 {
+    reverse_proxy 127.0.0.1:3341
+}

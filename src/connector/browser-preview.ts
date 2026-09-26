@@ -1,16 +1,11 @@
-import {spawn, type ChildProcess} from 'node:child_process';
-import {EventEmitter} from 'node:events';
-import {existsSync} from 'node:fs';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
-import {join} from 'node:path';
-import {setTimeout as delay} from 'node:timers/promises';
 import {randomUUID} from 'node:crypto';
+import {EventEmitter} from 'node:events';
+import {request as httpRequest, type ClientRequest, type IncomingMessage} from 'node:http';
+import {request as httpsRequest} from 'node:https';
 import {WebSocket} from 'ws';
 import {BridgeError, type Json} from '../shared/types.js';
 
-type Pending={resolve:(value:Json)=>void;reject:(error:Error)=>void;timer:NodeJS.Timeout};
-type Session={id:string;url:string;width:number;height:number;dir:string;child:ChildProcess;socket:WebSocket;nextId:number;pending:Map<number,Pending>;closed:boolean;lastFrame:number};
+type HttpRoute={request:ClientRequest;response?:IncomingMessage};
 
 export function localPreviewUrl(value:unknown):string {
   if(typeof value!=='string'||value.length>2048)throw new BridgeError('invalid','请输入本机网页地址');
@@ -19,130 +14,83 @@ export function localPreviewUrl(value:unknown):string {
   return url.toString();
 }
 
-function browserBinary():string {
-  const roots=[process.env['PROGRAMFILES(X86)'],process.env.PROGRAMFILES,process.env.LOCALAPPDATA].filter((v):v is string=>Boolean(v));
-  const candidates=[...roots.flatMap(root=>[join(root,'Microsoft','Edge','Application','msedge.exe'),join(root,'Google','Chrome','Application','chrome.exe')])];
-  const found=candidates.find(existsSync);
-  if(!found)throw new BridgeError('browser_missing','电脑上未找到 Microsoft Edge 或 Google Chrome');
-  return found;
-}
-
-async function debuggerPort(dir:string,child:ChildProcess):Promise<number> {
-  let launchError=false;child.once('error',()=>{launchError=true;});
-  for(let i=0;i<120;i++){
-    if(launchError||child.exitCode!==null)break;
-    try {const port=Number((await readFile(join(dir,'DevToolsActivePort'),'utf8')).split(/\r?\n/)[0]);if(Number.isInteger(port)&&port>0&&port<65536)return port;}catch{}
-    await delay(100);
-  }
-  throw new BridgeError('browser_start','电脑浏览器未能启动远程预览');
-}
-
-async function pageSocket(port:number):Promise<WebSocket> {
-  for(let i=0;i<30;i++){
-    try {
-      const response=await fetch(`http://127.0.0.1:${port}/json/list`,{signal:AbortSignal.timeout(1000)});
-      const pages=await response.json() as Json[];
-      const target=pages.find(page=>page.type==='page'&&typeof page.webSocketDebuggerUrl==='string');
-      if(target){const address=new URL(target.webSocketDebuggerUrl);address.hostname='127.0.0.1';const socket=new WebSocket(address);await new Promise<void>((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});return socket;}
-    }catch{}
-    await delay(100);
-  }
-  throw new BridgeError('browser_start','无法连接电脑上的预览浏览器');
-}
-
 export class BrowserPreview extends EventEmitter {
-  private active?:Session;
-  private revision=0;
-  async start(value:unknown,rawWidth:unknown,rawHeight:unknown):Promise<Json> {
-    const url=localPreviewUrl(value);
-    const width=Math.max(320,Math.min(1000,Math.round(Number(rawWidth)||390)));
-    const height=Math.max(400,Math.min(1400,Math.round(Number(rawHeight)||760)));
-    const revision=++this.revision;
-    if(this.active)await this.dispose(this.active,true);
-    if(revision!==this.revision)throw new BridgeError('cancelled','预览已取消');
-    const dir=await mkdtemp(join(tmpdir(),'codex-mobile-preview-'));
-    let child:ChildProcess|undefined,socket:WebSocket|undefined,created:Session|undefined;
-    try {
-      child=spawn(browserBinary(),['--headless=new','--no-first-run','--no-default-browser-check','--remote-debugging-address=127.0.0.1','--remote-debugging-port=0',`--user-data-dir=${dir}`,`--window-size=${width},${height}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-      const port=await debuggerPort(dir,child);
-      if(revision!==this.revision)throw new BridgeError('cancelled','预览已取消');
-      socket=await pageSocket(port);
-      if(revision!==this.revision)throw new BridgeError('cancelled','预览已取消');
-      const session:Session={id:randomUUID(),url,width,height,dir,child,socket,nextId:0,pending:new Map(),closed:false,lastFrame:0};
-      created=session;
-      this.active=session;
-      socket.on('message',raw=>this.receive(session,raw.toString()));
-      socket.on('close',()=>{void this.dispose(session,true);});
-      child.on('exit',()=>{void this.dispose(session,true);});
-      await this.command(session,'Page.enable');
-      await this.command(session,'Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:true});
-      await this.command(session,'Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
-      await this.command(session,'Page.navigate',{url});
-      await delay(300);
-      const first:Json=await this.command(session,'Page.captureScreenshot',{format:'jpeg',quality:65,captureBeyondViewport:false}).catch(()=>({}));
-      await this.command(session,'Page.startScreencast',{format:'jpeg',quality:65,maxWidth:width,maxHeight:height,everyNthFrame:1,maxFramesInFlight:1});
-      if(revision!==this.revision)throw new BridgeError('cancelled','预览已取消');
-      return {sessionId:session.id,url,width,height,frame:first.data};
-    }catch(error){
-      if(created)await this.dispose(created,false);
-      else {socket?.terminate();child?.kill();await rm(dir,{recursive:true,force:true}).catch(()=>{});}
-      if(error instanceof BridgeError)throw error;
-      throw new BridgeError('browser_start','电脑浏览器启动失败，请检查 Edge 或 Chrome');
-    }
+  private active?:{id:string;url:URL};
+  private requests=new Map<string,HttpRoute>();
+  private sockets=new Map<string,WebSocket>();
+  start(value:unknown):Json {
+    const url=new URL(localPreviewUrl(value));
+    this.stop();
+    const id=randomUUID();this.active={id,url};
+    return {sessionId:id,url:url.toString()};
   }
-  async input(sessionId:unknown,input:Json):Promise<void> {
-    const session=this.active;
-    if(!session||session.id!==sessionId||session.closed)return;
-    const type=input?.type;
-    if(['touchStart','touchMove','touchEnd','touchCancel'].includes(type)){
-      const x=Number(input.x),y=Number(input.y);
-      if(type!=='touchEnd'&&type!=='touchCancel'&&(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>session.width||y>session.height))return;
-      await this.command(session,'Input.dispatchTouchEvent',{type,touchPoints:type==='touchEnd'||type==='touchCancel'?[]:[{x,y,id:1}]});
-    }else if(type==='text'){
-      if(typeof input.text!=='string'||input.text.length>4000)return;
-      await this.command(session,'Input.insertText',{text:input.text});
-    }else if(type==='key'){
-      const keys:Record<string,{code:string;keyCode:number;text?:string}>={Enter:{code:'Enter',keyCode:13,text:'\r'},Backspace:{code:'Backspace',keyCode:8},Tab:{code:'Tab',keyCode:9},Escape:{code:'Escape',keyCode:27}};
-      const key=keys[input.key];if(!key)return;
-      await this.command(session,'Input.dispatchKeyEvent',{type:'keyDown',key:input.key,code:key.code,windowsVirtualKeyCode:key.keyCode,text:key.text});
-      await this.command(session,'Input.dispatchKeyEvent',{type:'keyUp',key:input.key,code:key.code,windowsVirtualKeyCode:key.keyCode});
-    }else if(type==='reload')await this.command(session,'Page.reload',{ignoreCache:true});
-    else if(type==='back')await this.command(session,'Runtime.evaluate',{expression:'history.back()'});
-    else if(type==='scroll'){
-      const deltaX=Number(input.deltaX),deltaY=Number(input.deltaY);
-      if(Number.isFinite(deltaX)&&Number.isFinite(deltaY))await this.command(session,'Input.dispatchMouseEvent',{type:'mouseWheel',x:session.width/2,y:session.height/2,deltaX:Math.max(-1000,Math.min(1000,deltaX)),deltaY:Math.max(-1000,Math.min(1000,deltaY))});
-    }
+  stop(sessionId?:unknown){
+    if(!this.active||sessionId&&sessionId!==this.active.id)return;
+    const id=this.active.id;this.active=undefined;
+    for(const route of this.requests.values())route.request.destroy();this.requests.clear();
+    for(const socket of this.sockets.values())socket.terminate();this.sockets.clear();
+    this.emit('ended',{sessionId:id});
   }
-  async stop(sessionId?:unknown):Promise<void> {const session=this.active;if(!sessionId||session?.id===sessionId){this.revision++;if(session)await this.dispose(session,true);}}
-  private receive(session:Session,raw:string){
-    let message:Json;try{message=JSON.parse(raw);}catch{return;}
-    if(typeof message.id==='number'){
-      const pending=session.pending.get(message.id);if(!pending)return;
-      clearTimeout(pending.timer);session.pending.delete(message.id);
-      if(message.error)pending.reject(Error(message.error.message||'浏览器命令失败'));else pending.resolve(message.result||{});
-    }else if(message.method==='Page.screencastFrame'){
-      this.fire(session,'Page.screencastFrameAck',{sessionId:message.params?.sessionId});
-      const now=Date.now();if(session.closed||now-session.lastFrame<180)return;
-      session.lastFrame=now;
-      const data=message.params?.data;
-      if(typeof data==='string'&&data.length<2_000_000)this.emit('frame',{sessionId:session.id,data,width:session.width,height:session.height});
-    }
+  pauseResponses(){for(const route of this.requests.values())route.response?.pause();}
+  resumeResponses(){for(const route of this.requests.values())route.response?.resume();}
+  handle(message:Json){
+    if(message.type==='proxy.http.request'){this.http(message);return;}
+    const id=message.id;if(typeof id!=='string')return;
+    if(message.type==='proxy.http.pause'||message.type==='proxy.http.resume'||message.type==='proxy.http.cancel'){
+      const route=this.requests.get(id),response=route?.response;
+      if(message.type==='proxy.http.pause')response?.pause();
+      else if(message.type==='proxy.http.resume')response?.resume();
+      else {route?.request.destroy();this.requests.delete(id);}
+    }else if(message.type==='proxy.ws.open'){this.websocket(message);
+    }else if(message.type==='proxy.ws.data'){
+      const socket=this.sockets.get(id);
+      if(socket?.readyState===WebSocket.OPEN&&typeof message.data==='string')socket.send(message.binary?Buffer.from(message.data,'base64'):message.data);
+    }else if(message.type==='proxy.ws.close')this.sockets.get(id)?.close();
   }
-  private fire(session:Session,method:string,params:Json={}){if(!session.closed&&session.socket.readyState===WebSocket.OPEN)session.socket.send(JSON.stringify({id:++session.nextId,method,params}));}
-  private command(session:Session,method:string,params:Json={}):Promise<Json> {
-    if(session.closed||session.socket.readyState!==WebSocket.OPEN)return Promise.reject(Error('浏览器已关闭'));
-    return new Promise((resolve,reject)=>{
-      const id=++session.nextId,timer=setTimeout(()=>{session.pending.delete(id);reject(Error('浏览器响应超时'));},10_000);
-      session.pending.set(id,{resolve,reject,timer});session.socket.send(JSON.stringify({id,method,params}));
+  private target(message:Json):URL|undefined {
+    if(!this.active||message.sessionId!==this.active.id||typeof message.path!=='string'||!message.path.startsWith('/')||message.path.startsWith('//'))return;
+    const path=new URL(message.path,'http://preview.invalid');
+    return new URL(path.pathname+path.search,this.active.url.origin);
+  }
+  private headers(raw:Json,target:URL):Record<string,string|string[]> {
+    const headers:Record<string,string|string[]>={};
+    if(raw&&typeof raw==='object')for(const [key,value] of Object.entries(raw)){
+      const name=key.toLowerCase();
+      if(['host','connection','upgrade','proxy-connection','transfer-encoding','keep-alive','te','trailer','proxy-authorization','proxy-authenticate'].includes(name)||name.startsWith('sec-fetch-'))continue;
+      if(typeof value==='string'||Array.isArray(value)&&value.every(v=>typeof v==='string'))headers[name]=value;
+    }
+    headers.host=target.host;
+    if(headers.origin)headers.origin=target.origin;
+    if(headers.referer){try{const from=new URL(String(headers.referer));headers.referer=target.origin+from.pathname+from.search;}catch{delete headers.referer;}}
+    return headers;
+  }
+  private http(message:Json){
+    const target=this.target(message),id=message.id;
+    if(!target||typeof id!=='string'||!['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'].includes(message.method)||typeof message.body!=='string'){this.emit('message',{type:'proxy.http.fail',id});return;}
+    const body=Buffer.from(message.body,'base64');
+    if(body.length>8*1024*1024){this.emit('message',{type:'proxy.http.fail',id});return;}
+    const request=(target.protocol==='https:'?httpsRequest:httpRequest)(target,{method:message.method,headers:this.headers(message.headers,target)},response=>{
+      const route=this.requests.get(id);if(!route)return response.destroy();route.response=response;
+      this.emit('message',{type:'proxy.http.head',id,status:response.statusCode||502,headers:response.headers});
+      response.on('data',(chunk:Buffer)=>this.emit('message',{type:'proxy.http.data',id,data:chunk.toString('base64')}));
+      response.on('end',()=>{this.requests.delete(id);this.emit('message',{type:'proxy.http.end',id});});
+      response.on('error',()=>{this.requests.delete(id);this.emit('message',{type:'proxy.http.fail',id});});
     });
+    this.requests.set(id,{request});
+    request.on('error',()=>{this.requests.delete(id);this.emit('message',{type:'proxy.http.fail',id});});
+    request.setTimeout(120_000,()=>request.destroy());request.end(body);
   }
-  private async dispose(session:Session,notify:boolean){
-    if(session.closed)return;
-    session.closed=true;if(this.active===session)this.active=undefined;
-    for(const pending of session.pending.values()){clearTimeout(pending.timer);pending.reject(Error('浏览器已关闭'));}session.pending.clear();
-    session.socket.terminate();session.child.kill();
-    if(session.child.exitCode===null)await Promise.race([new Promise<void>(resolve=>session.child.once('exit',()=>resolve())),delay(1500)]);
-    for(let attempt=0;attempt<3;attempt++){try{await rm(session.dir,{recursive:true,force:true});break;}catch{await delay(200);}}
-    if(notify)this.emit('ended',{sessionId:session.id});
+  private websocket(message:Json){
+    const target=this.target(message),id=message.id;
+    if(!target||typeof id!=='string'){this.emit('message',{type:'proxy.ws.close',id});return;}
+    const headers=this.headers(message.headers,target);
+    target.protocol=target.protocol==='https:'?'wss:':'ws:';
+    delete headers['sec-websocket-key'];delete headers['sec-websocket-version'];delete headers['sec-websocket-extensions'];delete headers['sec-websocket-protocol'];
+    const protocols=typeof message.headers?.['sec-websocket-protocol']==='string'?message.headers['sec-websocket-protocol'].split(',').map((v:string)=>v.trim()).filter(Boolean):[];
+    const socket=new WebSocket(target,protocols,{headers,maxPayload:4*1024*1024});this.sockets.set(id,socket);
+    socket.on('open',()=>this.emit('message',{type:'proxy.ws.ready',id}));
+    socket.on('message',(data,isBinary)=>this.emit('message',{type:'proxy.ws.data',id,data:isBinary?data.toString('base64'):data.toString(),binary:isBinary}));
+    socket.on('error',()=>{});
+    socket.on('close',()=>{this.sockets.delete(id);this.emit('message',{type:'proxy.ws.close',id});});
   }
 }

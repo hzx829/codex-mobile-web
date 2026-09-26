@@ -5,7 +5,7 @@ import {Icon,type IconName} from './icons';
 import {SafeMarkdown,RequestCard} from './content';
 import {createFirstTurn} from './new-chat';
 import {SessionListLoader} from './session-list-loader';
-import {BrowserPreviewPanel,type PreviewSession} from './browser-preview';
+import {BrowserPreviewPanel,previewLink,type PreviewSession} from './browser-preview';
 import {groupItems} from './activity';
 import type {Json,SessionView,RequestAction,MessageItem} from '../src/shared/types';
 import './style.css';
@@ -32,7 +32,7 @@ function App(){
   const [draft,setDraft]=useState(''),[images,setImages]=useState<string[]>([]),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[approval,setApproval]=useState(''),[newCwd,setNewCwd]=useState('');
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
   const [preview,setPreview]=useState<Json|null>(null),[filePath,setFilePath]=useState('');
-  const [browserUrl,setBrowserUrl]=useState<string>(()=>load('browser-preview-url','http://127.0.0.1:5173')),[browserBusy,setBrowserBusy]=useState(false),[browserSession,setBrowserSession]=useState<PreviewSession|null>(null);
+  const [browserUrl,setBrowserUrl]=useState<string>(()=>load('browser-preview-url','http://127.0.0.1:5173')),[browserBusy,setBrowserBusy]=useState(false),[browserSession,setBrowserSession]=useState<PreviewSession|null>(null),[browserOpened,setBrowserOpened]=useState(false);
   const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,limit,searchQuery,archived}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null);
   const scrollAnchor=useRef<{height:number;top:number;limit:number;ready:boolean}|null>(null);
@@ -167,11 +167,13 @@ function App(){
   async function openFile(path:string){setError('');try{const file=await call('file.read',{threadId:selected,path});if(stillHere()){setPreview(file);setSheet(null);}}catch(e){if(stillHere())fail(e);}}
   async function openBrowser(){
     if(!connected||browserBusy)return;
+    const tab=window.open('about:blank','_blank');if(tab)tab.opener=null;
     setBrowserBusy(true);setError('');
     try{
-      const result=await call('preview.start',{url:browserUrl.trim(),width:window.innerWidth,height:Math.max(400,window.innerHeight-110)});
-      save('browser-preview-url',browserUrl.trim());setBrowserSession(result);setSheet(null);
-    }catch(e){fail(e);}finally{setBrowserBusy(false);}
+      const result=await call('preview.start',{url:browserUrl.trim()}) as PreviewSession;
+      save('browser-preview-url',browserUrl.trim());setBrowserSession(result);setBrowserOpened(Boolean(tab));setSheet(null);
+      if(tab)tab.location.href=previewLink(result);
+    }catch(e){tab?.close();fail(e);}finally{setBrowserBusy(false);}
   }
   function closeBrowser(){const session=browserSession;setBrowserSession(null);if(session)void call('preview.stop',{sessionId:session.sessionId}).catch(()=>{});}
   async function attach(files:FileList|null){
@@ -207,8 +209,9 @@ function App(){
 
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>在手机上继续使用 Codex。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   return <div className={`shell ${showThread?'has-session':''}`}>
-    <aside className="home-panel" inert={Boolean(sheet||preview||browserSession)}>
+    <aside className="home-panel" inert={Boolean(sheet||preview)}>
        <header className="home-header">{project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={busy} onClick={backToProjects}/><h1>{projectName(project)}</h1></>:<button className="home-identity" aria-label="选择电脑" onClick={()=>setSheet('computer')}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</span></button>}<IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
+      {!showThread&&browserSession&&client.current&&<BrowserPreviewPanel client={client.current} session={browserSession} opened={browserOpened} onOpen={()=>setBrowserOpened(true)} onClose={closeBrowser} onEnded={()=>setBrowserSession(null)}/>}
       <div className="home-content">
         {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
         <section className="recent-section"><h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2><nav aria-label={archived?'归档会话':'最近会话'}>{sessions.map(s=><button className={`session-row ${s.id===selected?'selected':''}`} key={s.id} disabled={busy} onClick={()=>navigate({...route,thread:s.id,newChat:false})}><span className="session-name">{s.status?.type==='active'&&<i className="dot online"/>}{s.title}</span><time>{relativeTime(s.updatedAt)}</time></button>)}</nav>
@@ -219,8 +222,9 @@ function App(){
       <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><label className="search-pill"><Icon name="search"/><input aria-label="搜索聊天" placeholder="搜索聊天…" value={search} maxLength={200} onChange={e=>setSearch(e.target.value)}/>{search&&<IconButton icon="close" label="清除搜索" onClick={()=>setSearch('')}/>}</label><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={startNew}/></div></div>
     </aside>
 
-    <main className="thread-panel" inert={Boolean(sheet||preview||browserSession)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
+    <main className="thread-panel" inert={Boolean(sheet||preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
        <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={backToSessions}/><button className="thread-title" onClick={()=>setSheet(newChat?'projects':'thread')}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><IconButton icon="computer" label="电脑与连接状态" onClick={()=>setSheet('computer')}/><IconButton icon="more" label="聊天选项" onClick={()=>setSheet('thread')}/></div></header>
+       {browserSession&&client.current&&<BrowserPreviewPanel client={client.current} session={browserSession} opened={browserOpened} onOpen={()=>setBrowserOpened(true)} onClose={closeBrowser} onEnded={()=>setBrowserSession(null)}/>}
       {!connected&&<div className="banner">连接已断开，电脑上的任务会继续。</div>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
       <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!;sticky.current=el.scrollHeight-el.scrollTop-el.clientHeight<100;}}>
@@ -263,10 +267,9 @@ function App(){
        </>}
        {sheet==='add'&&<>{canImage&&<MenuItem icon="image" disabled={busy} onClick={()=>fileInput.current?.click()}>添加图片</MenuItem>}<MenuItem icon="settings" onClick={()=>setSheet('model')}>模型与审批<span className="menu-detail">{selectedModel}</span></MenuItem>{selected&&<MenuItem icon="file" onClick={()=>setSheet('file')}>查看项目文件</MenuItem>}{newChat&&<MenuItem icon="folder" disabled={busy} onClick={()=>setSheet('projects')}>选择项目</MenuItem>}</>}
        {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 src/app.ts"/></label><button className="primary">打开文件</button></form>}
-       {sheet==='browser'&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>setBrowserUrl(e.target.value)} placeholder="http://127.0.0.1:5173"/></label><p className="muted">先在电脑启动网页服务。页面在电脑浏览器中运行，手机可点击、滚动和输入。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
+       {sheet==='browser'&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>setBrowserUrl(e.target.value)} placeholder="http://127.0.0.1:5173"/></label><p className="muted">先在电脑启动网页服务。手机会在新标签页直接打开该网页。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
      </SheetPanel>}
      {preview&&<SheetPanel title={preview.path} className="file-preview" close={()=>setPreview(null)}>{preview.data?<img className="preview-image" src={`data:${preview.mime};base64,${preview.data}`} alt={preview.path}/>:<pre className="file-content">{preview.text}</pre>}</SheetPanel>}
-     {browserSession&&client.current&&<BrowserPreviewPanel client={client.current} session={browserSession} onClose={closeBrowser} onEnded={()=>setBrowserSession(null)}/>}
   </div>;
 }
 function IconButton({icon,label,onClick,disabled=false,className=''}:{icon:IconName;label:string;onClick:()=>void;disabled?:boolean;className?:string}){return <button type="button" className={`icon-button ${className}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}><Icon name={icon}/></button>;}

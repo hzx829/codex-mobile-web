@@ -21,7 +21,7 @@ export class Client {
         const p=this.pending.get(m.id);if(!p)return;clearTimeout(p.timer);this.pending.delete(m.id);
         if(m.error)p.reject(m.error);else p.resolve(m.result);return;
       }
-      if(m.type==='preview.frame'||m.type==='preview.ended'){for(const listener of this.previewListeners)listener(m);return;}
+      if(m.type==='preview.ended'){for(const listener of this.previewListeners)listener(m);return;}
       this.receive(m);
     };
     ws.onclose=e=>{
@@ -41,6 +41,5 @@ export class Client {
     });
   }
   onPreview(listener:(message:Json)=>void){this.previewListeners.add(listener);return()=>{this.previewListeners.delete(listener);};}
-  previewInput(sessionId:string,input:Json){if(this.ready)this.ws?.send(JSON.stringify({type:'preview.input',sessionId,input}));}
   close(){this.stopped=true;clearTimeout(this.timer);this.ws?.close();}
 }

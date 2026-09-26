@@ -46,6 +46,7 @@ try {
     if(ready)break;await delay(100);
   }
   assert.ok(ready,'Packaged relay did not become healthy');
+  assert.equal((await fetch(`http://127.0.0.1:${port+1}/`,{signal:AbortSignal.timeout(1000)})).status,401);
   const html=await fetch(`http://127.0.0.1:${port}/`).then(r=>r.text());assert.ok(html.includes('id="root"'));
   const asset=html.match(/src="([^"]+\.js)"/)?.[1];assert.ok(asset);assert.equal((await fetch(`http://127.0.0.1:${port}${asset}`)).status,200);
   async function peer(role:string,auth=token){const ws=new WebSocket(`ws://127.0.0.1:${port}/ws`,{handshakeTimeout:5000});peers.push(ws);await once(ws,'open');

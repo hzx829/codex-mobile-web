@@ -16,9 +16,16 @@ const control=new Control(new Ledger(join(config.dataDir,'operations.sqlite')));
 const browserPreview=new BrowserPreview();
 await control.start();
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
+let proxyBackpressure:NodeJS.Timeout|undefined;
 const dirtyIds=new Set<string|null>();
 function send(value:Json){if(socket?.readyState===WebSocket.OPEN){const frame=JSON.stringify(value);if(Buffer.byteLength(frame)>MAX_FRAME||socket.bufferedAmount>MAX_FRAME)throw new BridgeError('too_large','会话内容较大，请减少历史范围');socket.send(frame);}}
-browserPreview.on('frame',(frame:Json)=>{try{if((socket?.bufferedAmount||0)<1_000_000)send({type:'preview.frame',...frame});}catch{}});
+browserPreview.on('message',(message:Json)=>{try{
+  send(message);
+  if(message.type==='proxy.http.data'&&!proxyBackpressure&&(socket?.bufferedAmount||0)>2_000_000){
+    browserPreview.pauseResponses();
+    proxyBackpressure=setInterval(()=>{if(!socket||socket.bufferedAmount<500_000){clearInterval(proxyBackpressure);proxyBackpressure=undefined;browserPreview.resumeResponses();}},20);
+  }
+}catch{}});
 browserPreview.on('ended',(event:Json)=>{try{send({type:'preview.ended',...event});}catch{}});
 function connect() {
   const url=new URL('/ws',config.relayUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';
@@ -32,11 +39,11 @@ function connect() {
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
     if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;console.log('电脑已连接中继');return;}
     if(!ready)return;
-    if(m.type==='preview.input'){void browserPreview.input(m.sessionId,m.input).catch(()=>{});return;}
+    if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
     if(m.type==='preview.stop'){void browserPreview.stop(m.sessionId);return;}
     if(m.type!=='request')return;
     try{
-      const result=m.action==='preview.start'?await browserPreview.start(m.payload?.url,m.payload?.width,m.payload?.height)
+      const result=m.action==='preview.start'?browserPreview.start(m.payload?.url)
         :m.action==='preview.stop'?(await browserPreview.stop(m.payload?.sessionId),{stopped:true})
         :await control.handle(m as any);
       if(socket===ws)send({type:'response',id:m.id,result});
@@ -45,6 +52,7 @@ function connect() {
   });
   ws.on('error',()=>{});
   ws.on('close',code=>{
+    clearInterval(proxyBackpressure);proxyBackpressure=undefined;
     void browserPreview.stop();
     clearTimeout(authTimer);clearInterval(pulse);if(stopping)return;
     if(code===4401||code===4409){console.error(code===4401?'连接 Token 不匹配，请在电脑更新配置':'同一电脑连接已被替换');return;}

@@ -4,12 +4,12 @@ import { resolve, extname, sep } from 'node:path';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { MAX_FRAME, type Json } from '../shared/types.js';
+import { PreviewTunnel } from './preview-tunnel.js';
 
 type Peer={role:'phone'|'connector';machineId?:string;name?:string;alive:boolean};
-export function createRelay(token:string,staticDir=resolve('dist')) {
+export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3341) {
   const peers=new Map<WebSocket,Peer>();
   const routes=new Map<string,{phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;timer:NodeJS.Timeout}>();
-  const previews=new Map<string,{phone:WebSocket;connector:WebSocket}>();
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'");
@@ -30,15 +30,13 @@ export function createRelay(token:string,staticDir=resolve('dist')) {
     if(ws.bufferedAmount>MAX_FRAME||Buffer.byteLength(frame)>MAX_FRAME){ws.close(1009,'response_too_large');return;}
     ws.send(frame);
   }
+  const preview=new PreviewTunnel(send,previewPort);
   function machines(){return [...peers.values()].filter(p=>p.role==='connector').map(p=>({id:p.machineId,name:p.name}));}
   function publish(){for(const [ws,p]of peers)if(p.role==='phone')send(ws,{type:'machines',data:machines()});}
   function finish(routeId:string,message:Json){
     const r=routes.get(routeId);if(!r)return;clearTimeout(r.timer);routes.delete(routeId);
-    if(r.action==='preview.start'&&typeof message.result?.sessionId==='string'){
-      for(const [id,p]of previews)if(p.connector===r.connector){previews.delete(id);send(p.phone,{type:'preview.ended',sessionId:id});}
-      previews.set(message.result.sessionId,{phone:r.phone,connector:r.connector});
-    }
-    if(r.action==='preview.stop'&&r.sessionId)previews.delete(r.sessionId);
+    if(r.action==='preview.start'&&typeof message.result?.sessionId==='string'&&typeof message.result?.url==='string')message.result=preview.start(r.phone,r.connector,message.result);
+    if(r.action==='preview.stop'&&r.sessionId)preview.stop(r.sessionId);
     send(r.phone,{...message,id:r.id,type:'response'});
   }
   wss.on('connection',ws=>{
@@ -66,27 +64,19 @@ export function createRelay(token:string,staticDir=resolve('dist')) {
         const timer=setTimeout(()=>finish(routeId,{error:{code:'timeout',message:'电脑回执超时，请核实操作结果',uncertain:true}}),40_000);
         routes.set(routeId,{phone:ws,connector,id:m.id,action:m.action,sessionId:m.payload.sessionId,timer});
         send(connector,{type:'request',id:routeId,action:m.action,payload:m.payload});
-      } else if(p.role==='phone'&&m.type==='preview.input') {
-        const preview=previews.get(m.sessionId);
-        if(preview?.phone===ws&&m.input&&typeof m.input==='object')send(preview.connector,{type:'preview.input',sessionId:m.sessionId,input:m.input});
       } else if(p.role==='connector'&&m.type==='response') {
         if(routes.get(m.id)?.connector===ws)finish(m.id,m);
-      } else if(p.role==='connector'&&m.type==='preview.frame') {
-        const preview=previews.get(m.sessionId);
-        if(preview?.connector===ws&&typeof m.data==='string'&&m.data.length<2_000_000&&preview.phone.bufferedAmount<1_000_000)send(preview.phone,{type:'preview.frame',sessionId:m.sessionId,data:m.data,width:m.width,height:m.height});
       } else if(p.role==='connector'&&m.type==='preview.ended') {
-        const preview=previews.get(m.sessionId);
-        if(preview?.connector===ws){previews.delete(m.sessionId);send(preview.phone,{type:'preview.ended',sessionId:m.sessionId});}
+        preview.stop(m.sessionId,true);
+      } else if(p.role==='connector'&&typeof m.type==='string'&&m.type.startsWith('proxy.')) {
+        preview.handle(ws,m);
       } else if(p.role==='connector'&&m.type==='changed') {
         for(const [phone,q]of peers)if(q.role==='phone')send(phone,{type:'changed',machineId:p.machineId,threadId:m.threadId||null,generation:m.generation});
       }
     });
     ws.on('close',()=>{
       clearTimeout(authTimer);peers.delete(ws);
-      for(const [id,preview]of previews){
-        if(preview.phone===ws){previews.delete(id);send(preview.connector,{type:'preview.stop',sessionId:id});}
-        else if(preview.connector===ws){previews.delete(id);send(preview.phone,{type:'preview.ended',sessionId:id});}
-      }
+      preview.stopPeer(ws);
       for(const [id,r]of routes) {
         if(r.phone===ws){if(r.action==='preview.start')send(r.connector,{type:'preview.stop'});clearTimeout(r.timer);routes.delete(id);}
         else if(r.connector===ws)finish(id,{error:{code:'offline',message:'电脑连接中断，请核实操作结果',uncertain:true}});
@@ -96,5 +86,5 @@ export function createRelay(token:string,staticDir=resolve('dist')) {
   });
   const heartbeat=setInterval(()=>{for(const [ws,p]of peers){if(!p.alive){ws.terminate();continue;}p.alive=false;ws.ping();}},15_000);
   server.on('close',()=>clearInterval(heartbeat));
-  return {server,wss,close:async()=>{clearInterval(heartbeat);for(const ws of wss.clients)ws.terminate();for(const r of routes.values())clearTimeout(r.timer);previews.clear();await new Promise<void>(r=>wss.close(()=>server.close(()=>r())));}};
+  return {server,previewServer:preview.server,wss,close:async()=>{clearInterval(heartbeat);for(const ws of wss.clients)ws.terminate();for(const r of routes.values())clearTimeout(r.timer);await preview.close();await new Promise<void>(r=>wss.close(()=>server.close(()=>r())));}};
 }

@@ -13,7 +13,7 @@ Browse projects and conversations, send instructions, steer or stop a running ta
 - Choose an available model, reasoning level, and approval policy for the next turn; copy the conversation ID from its menu. Consecutive tool activity is collapsed in the timeline.
 - Tap a suggested follow-up to fill the composer; in-app back buttons return to the parent list.
 - View Markdown, code, task diffs, and small text/image files. Attach images when the runtime confirms model support.
-- Open a local web page in a browser on your computer and control it from the phone; the page's `localhost` requests stay on the computer.
+- Open a local web page through the relay; the phone renders it directly while the connector forwards requests to the project's `localhost`.
 - Reconnect after a browser disconnect, retain text drafts, and check uncertain operations without automatically resending them.
 
 Closing the phone page does not stop Codex. The computer must remain on and connected. The relay is not a backup service and cannot execute tasks or supply stored conversation history while the computer is offline.
@@ -74,7 +74,7 @@ The first launch opens setup. For a local trial, select “本机中继” (loca
 
 ### Public relay
 
-On Linux with Docker Engine and Compose v2, use a source checkout or an extracted relay package from [Releases](https://github.com/hzx829/codex-mobile-web/releases). Point a domain at the server and allow TCP 80/443. In that directory:
+On Linux with Docker Engine and Compose v2, use a source checkout or an extracted relay package from [Releases](https://github.com/hzx829/codex-mobile-web/releases). Point a domain at the server and allow TCP 80/443/3341. In that directory:
 
 ```sh
 cp .env.example .env
@@ -90,7 +90,7 @@ docker compose -f compose.yaml -f compose.https.yaml up -d --build
 curl --fail https://your-domain.example/health
 ```
 
-Replace `your-domain.example` with your hostname. The supplied Caddy configuration provides HTTPS; port 3340 is published only on server loopback. The computer connects outbound, so no router port forwarding to it is needed. Source builds download npm dependencies; prebuilt relay packages only need the base container images.
+Replace `your-domain.example` with your hostname. The supplied Caddy configuration provides HTTPS for the main site and preview port 3341; relay ports 3340/3341 are published only on server loopback. The computer connects outbound, so no router port forwarding to it is needed. Source builds download npm dependencies; prebuilt relay packages only need the base container images.
 
 See [DEPLOY.md](DEPLOY.md) (Chinese) for existing proxies, upgrades, rollback, and troubleshooting.
 
@@ -98,7 +98,7 @@ See [DEPLOY.md](DEPLOY.md) (Chinese) for existing proxies, upgrades, rollback, a
 
 Scan the connector's QR code or open your relay URL and enter the same Token. The browser remembers it for that site. Treat the QR code like a password. Once connected, select a project, open a conversation, or start a new task.
 
-To preview a web app, start its development server on the computer. On the phone, choose “打开本机网页” from the main or conversation menu and enter a local URL such as `http://127.0.0.1:5173`. Edge or Chrome must be installed on the computer. The preview supports touch, text entry, Enter, Backspace, Back, and Reload. Closing it ends the temporary browser. The page runs in Chromium on the computer, so this does not test compatibility with the phone's own browser.
+To preview a web app, start its development server on the computer. On the phone, choose “打开本机网页” from the main or conversation menu and enter a local URL such as `http://127.0.0.1:5173`. The page opens in a new tab in the phone's browser. The relay and connector tunnel HTTP and WebSocket requests instead of streaming screenshots. The preview port is the relay port plus one (3341 by default). Projects with hard-coded `localhost` URLs or Host/Origin restrictions may need changes.
 
 Use `configure.cmd` to change settings after stopping this installation. `stop.cmd` stops the connector and its Codex child process, so finish connector-managed tasks first. Setup, optional login startup, and uninstall instructions are in [QUICKSTART.md](QUICKSTART.md) (Chinese).
 

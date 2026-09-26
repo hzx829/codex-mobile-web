@@ -7,6 +7,7 @@ services:
       BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN in .env}
     ports:
       - "127.0.0.1:3340:3340"
+      - "127.0.0.1:3341:3341"
     read_only: true
     tmpfs:
       - /tmp
