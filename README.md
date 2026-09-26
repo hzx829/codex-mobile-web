@@ -60,6 +60,8 @@ You need Windows with working Codex, a phone browser, and a relay reachable by b
 
 ### Windows connector
 
+To let Codex on another computer handle installation, ask it to install `skills/codex-mobile-web-setup` from the GitHub repository `hzx829/codex-mobile-web`. On the next turn, use `$codex-mobile-web-setup` with your existing relay URL. The skill downloads and verifies the portable release, detects local Codex, starts the connector, and checks the connection without creating a task. Enter the Token once in a local masked dialog, or provide a local Token file. GitHub sign-in does not transfer relay credentials. See [the setup skill](skills/codex-mobile-web-setup/SKILL.md).
+
 Download the Windows ZIP from [Releases](https://github.com/hzx829/codex-mobile-web/releases), extract it and run `start.cmd`. Node and the built application are included; Codex must already be installed separately.
 
 From a source checkout, install Node 24 and run in the repository directory:
