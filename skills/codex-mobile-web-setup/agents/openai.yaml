@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Mobile Web 配置"
+  short_description: "自动安装 Windows 连接器，接入已有中继并检查本机 Codex 状态"
+  default_prompt: "使用 $codex-mobile-web-setup 为这台电脑安装并配置连接器，接入我已有的中继。"

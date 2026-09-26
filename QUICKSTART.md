@@ -31,6 +31,28 @@
 
 ## 新电脑用便携包
 
+### 让 Codex 配置新电脑
+
+本仓库提供 [codex-mobile-web-setup skill](skills/codex-mobile-web-setup/SKILL.md)。在第二台 Windows x64 电脑的 Codex 中发送：
+
+```text
+从 GitHub 仓库 hzx829/codex-mobile-web 安装 skills/codex-mobile-web-setup 这个 skill。
+```
+
+安装后下一轮发送：
+
+```text
+使用 $codex-mobile-web-setup 配置这台电脑，中继地址是 https://你的中继域名。
+```
+
+Codex 会下载正式发布的 Windows ZIP、校验 SHA256、解压到 `%LOCALAPPDATA%\CodexMobileWeb`，并识别本机已有 Codex。首次只需在电脑弹出的密码输入框中填入现有中继 Token，随后自动保存配置、后台启动并检查连接。已有 Token 文件时，也可在请求中提供其本地路径。不要把 Token 发到对话或 GitHub；同一个 GitHub 账号不自动同步它。
+
+再次调用会沿用该电脑的安装和配置，不自动升级或停止正在运行的任务。每台电脑首次配置会生成独立标识，**不要从另一台电脑复制 `.local/`**，否则相同 `machineId` 会导致连接互相替换。网页中选择对应电脑后，显示其本地项目和会话。
+
+自动检查只读取电脑、模型和项目数量；手机发送任务等交互由使用者实测。正式发布包可能落后于 `main`，需要新功能时一起更新中继和连接器。
+
+### 手工配置
+
 在 `release/` 找到本次生成的 ZIP。解压后双击 `start.cmd`，第一次会打开配置窗口：选择“本机中继”或“连接自己的中继”，填写地址。公网模式填写服务器的 Token，本机模式首次可留空。包内带 Node 运行时和已构建程序；电脑需已有可用 Codex，不用安装本项目的开发依赖。
 
 不需要填写项目目录；项目与会话自动读取，名称沿用 Codex。可以选择原有 `codex.exe` 和 Codex 配置目录；留空时自动识别。保存后 `start.cmd` 会记住连接方式，公网模式只启动连接器。状态页显示连接、当前模型和官方桌面是否在线，检查过程不会创建任务。
