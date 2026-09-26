@@ -20,7 +20,7 @@ The bridge has no required developer-operated backend or built-in analytics/tele
 
 | Connection | Data |
 | --- | --- |
-| Phone ↔ relay ↔ connector | Token during WebSocket authentication; computer names/IDs, project paths, conversation metadata and displayed history; instructions, image attachments, task output, approvals/questions and replies, requested file previews and diffs; online status and change notifications |
+| Phone ↔ relay ↔ connector | Token during WebSocket authentication; computer names/IDs, project paths, conversation metadata and displayed history; instructions, image attachments, task output, approvals/questions and replies, requested file previews and diffs; remote browser URL, screen frames and touch/keyboard input; online status and change notifications |
 | Computer → configured providers/tools | Native Codex model requests and network activity performed by tasks/tools; the relay is not a model gateway |
 | Installation/build | npm dependencies, container images, and the Node license during Windows packaging if not cached; certificate setup contacts the configured certificate authority |
 
@@ -32,8 +32,9 @@ The web app connects to its own site's WebSocket endpoint. Markdown images becom
 
 | Location | Stored data | Retention |
 | --- | --- | --- |
-| Browser `localStorage` | Token (`connection`), text drafts (`draft:*`), pending operations (`operation:*`) that may include submitted text | No time-based expiry. Success clears related pending data/drafts where applicable. Disconnect clears the Token, not all drafts or pending records |
-| Browser memory | Loaded conversations, file previews, image attachments and UI state | No app-managed persistent conversation cache; reload requires reselecting attachments. This does not guarantee secure erasure from browser/OS memory |
+| Browser `localStorage` | Token (`connection`), last preview URL (`browser-preview-url`), text drafts (`draft:*`), pending operations (`operation:*`) that may include submitted text | No time-based expiry. Success clears related pending data/drafts where applicable. Disconnect clears the Token, not all drafts or pending records |
+| Browser memory | Loaded conversations, file previews, remote browser frames, image attachments and UI state | No app-managed persistent conversation cache; reload requires reselecting attachments. This does not guarantee secure erasure from browser/OS memory |
+| Connector OS temporary directory | Isolated Edge/Chrome profile for an active remote browser preview | Removed when preview closes, best effort. A process crash may leave a temporary profile until manually cleaned |
 | Connector `.local/config.json` | Relay address, Token, machine identity, selected local paths | Until changed/deleted; the app does not encrypt this file |
 | Connector `.local/connect.html`, `connect-qr.png` | Connection page and QR code containing the Token | Until regenerated/deleted; protect like the Token itself |
 | Connector `.local/operations.sqlite` | Operation IDs, payload hashes, states, result/error receipts, managed-session IDs | Operation rows older than seven days are removed when the ledger opens, not by a continuous timer. Managed-session IDs do not expire automatically. Receipts may contain sensitive error details; this is not a full transcript or an audit log |
@@ -47,6 +48,8 @@ Default relay/connector status logging does not deliberately record message bodi
 ### Access granted by the Token
 
 The Token authenticates both phone and connector roles. There are no separate read-only credentials, device approvals, project allowlists, or per-device revocation. Authenticated clients can discover connected machines and issue supported requests. Treat the Token as a remote-control credential.
+
+An authenticated client can open a loopback web service in an isolated browser on the connected computer. Its page and any linked sites run with that computer's network access; screen frames and input pass through the relay. The temporary browser does not reuse the user's normal browser profile.
 
 **File preview is not confined to a project and does not pass through Codex's sandbox or approval flow.** It reads as the connector's OS user, accepts absolute paths and cross-directory references, and can expose readable text/image files, including sensitive files, up to 2 MiB. Format and size limits are not an authorization boundary. Use a dedicated OS account if you need to restrict readable files.
 
@@ -84,7 +87,7 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 | 连接 | 内容 |
 | --- | --- |
-| 手机 ↔ 中继 ↔ 连接器 | WebSocket 认证时的 Token；电脑名称/标识、项目路径、会话信息和展示的历史；指令、图片附件、任务输出、审批/问题及回应、主动请求的文件预览和差异；在线状态和变更通知 |
+| 手机 ↔ 中继 ↔ 连接器 | WebSocket 认证时的 Token；电脑名称/标识、项目路径、会话信息和展示的历史；指令、图片附件、任务输出、审批/问题及回应、主动请求的文件预览和差异；远程浏览器地址、画面及触摸/键盘输入；在线状态和变更通知 |
 | 电脑 → 配置的模型服务/工具 | Codex 原生模型请求及任务/工具的网络活动；本中继不充当模型网关 |
 | 安装/构建 | npm 依赖、容器镜像；Windows 打包时未缓存的 Node 许可证；证书配置还会联系配置的证书签发机构 |
 
@@ -96,8 +99,9 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 | 位置 | 保存内容 | 保留方式 |
 | --- | --- | --- |
-| 浏览器 `localStorage` | Token（`connection`）、文字草稿（`draft:*`）、可能含已提交文字的待核实记录（`operation:*`） | 无定时过期；成功后按情况清理对应记录/草稿。“断开连接”清除 Token，不清除全部草稿和待核实记录 |
-| 浏览器内存 | 已加载会话、文件预览、图片附件与界面状态 | 应用没有持久化会话缓存，刷新后图片需重选；不保证浏览器/系统内存被安全擦除 |
+| 浏览器 `localStorage` | Token（`connection`）、上次预览地址（`browser-preview-url`）、文字草稿（`draft:*`）、可能含已提交文字的待核实记录（`operation:*`） | 无定时过期；成功后按情况清理对应记录/草稿。“断开连接”清除 Token，不清除全部草稿和待核实记录 |
+| 浏览器内存 | 已加载会话、文件预览、远程浏览器画面、图片附件与界面状态 | 应用没有持久化会话缓存，刷新后图片需重选；不保证浏览器/系统内存被安全擦除 |
+| 连接器系统临时目录 | 活跃远程预览使用的独立 Edge/Chrome 配置目录 | 关闭预览时尽力删除；进程异常退出可能留下临时目录，需手动清理 |
 | 连接器 `.local/config.json` | 中继地址、Token、电脑标识和选定的本地路径 | 修改/删除前保留，应用不加密此文件 |
 | 连接器 `.local/connect.html`、`connect-qr.png` | 含 Token 的连接页和二维码 | 重新生成/删除前保留，按 Token 同等保管 |
 | 连接器 `.local/operations.sqlite` | 操作 ID、载荷摘要、状态、结果/错误回执、托管会话 ID | 打开数据库时删除超过七天的操作记录，不做持续定时清理；托管会话 ID 无自动过期。回执可能含敏感错误详情，不是完整聊天库或审计日志 |
@@ -115,6 +119,8 @@ Token 同时认证手机和连接器，没有独立只读凭据、设备批准�
 **文件预览不限制在项目目录，也不经过 Codex 的沙箱或审批流程。** 它按连接器的系统账户读取，支持绝对路径和跨目录引用，可返回该账户能读取的文本/图片文件，包括敏感文件，上限为 2 MiB。格式和大小限制不构成权限隔离。如需限制可读范围，应使用专门的系统账户运行连接器。
 
 任务执行沿用对应 Codex 会话的权限。连接器不增加额外确认层，Token 持有者也能回应支持的原生审批。网页、静态资源与 `/health` 公开可访问，电脑/会话请求需先完成 WebSocket 认证。公网使用需要难以猜测的随机 Token 和 HTTPS；程序也接受 HTTP/WS，不会替使用者强制 HTTPS。
+
+持有 Token 的客户端可以在已连接电脑的独立浏览器中打开本机回环地址上的网页。该网页及其外部链接使用电脑的网络访问能力，画面和输入经中继传输。临时浏览器不复用电脑日常浏览器的配置目录。
 
 ### 连接、撤销与清理
 

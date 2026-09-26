@@ -8,6 +8,7 @@ export class Client {
   private retry=0;
   private timer:ReturnType<typeof setTimeout>|undefined;
   private pending=new Map<string,{resolve:(v:any)=>void;reject:(e:any)=>void;timer:ReturnType<typeof setTimeout>}>();
+  private previewListeners=new Set<(message:Json)=>void>();
   constructor(private token:string,private receive:(m:Json)=>void,private status:(s:string)=>void){this.connect();}
   private connect() {
     this.status('connecting');
@@ -20,10 +21,12 @@ export class Client {
         const p=this.pending.get(m.id);if(!p)return;clearTimeout(p.timer);this.pending.delete(m.id);
         if(m.error)p.reject(m.error);else p.resolve(m.result);return;
       }
+      if(m.type==='preview.frame'||m.type==='preview.ended'){for(const listener of this.previewListeners)listener(m);return;}
       this.receive(m);
     };
     ws.onclose=e=>{
       this.ready=false;
+      for(const listener of this.previewListeners)listener({type:'preview.disconnected'});
       for(const p of this.pending.values()){clearTimeout(p.timer);p.reject({code:'offline',message:'连接断开，正在核实操作结果',uncertain:true});}this.pending.clear();
       if(this.stopped)return;
       if(e.code===4401){this.status('auth_error');return;}
@@ -37,5 +40,7 @@ export class Client {
       this.pending.set(id,{resolve,reject,timer});this.ws!.send(JSON.stringify({type:'request',id,machineId,action,payload}));
     });
   }
+  onPreview(listener:(message:Json)=>void){this.previewListeners.add(listener);return()=>{this.previewListeners.delete(listener);};}
+  previewInput(sessionId:string,input:Json){if(this.ready)this.ws?.send(JSON.stringify({type:'preview.input',sessionId,input}));}
   close(){this.stopped=true;clearTimeout(this.timer);this.ws?.close();}
 }

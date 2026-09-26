@@ -12,9 +12,20 @@ export function resolveCodex(configured = process.env.CODEX_BIN): string {
     return configured;
   }
   if (process.platform !== 'win32') return 'codex';
-  // Prefer the installation the user's shell resolves, without launching a shell.
-  const roots = (process.env.PATH || '').split(';');
+  return resolveWindowsCodex(process.env.PATH || '', process.env.LOCALAPPDATA || '');
+}
+
+export function resolveWindowsCodex(pathValue: string, localAppData: string): string {
+  const managed = localAppData ? join(localAppData, 'OpenAI', 'Codex', 'bin') : '';
+  if (managed && existsSync(managed)) {
+    // The unversioned binary can lag behind the desktop app's versioned installation.
+    const versions = readdirSync(managed).map(n => join(managed, n, 'codex.exe'))
+      .filter(p => existsSync(p)).sort((a,b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+    if (versions[0]) return versions[0];
+  }
+  const roots = pathValue.split(';');
   for (const root of roots) {
+    if (!root) continue;
     if (existsSync(join(root, 'codex.exe'))) return join(root, 'codex.exe');
     const vendor = join(root, 'node_modules', '@openai', 'codex', 'node_modules', '@openai');
     if (existsSync(vendor)) for (const pkg of readdirSync(vendor)) {
@@ -25,11 +36,9 @@ export function resolveCodex(configured = process.env.CODEX_BIN): string {
     }
     for(const subdir of ['bin','codex']){const legacy = join(root, 'node_modules', '@openai', 'codex', 'vendor', process.arch==='arm64'?'aarch64-pc-windows-msvc':'x86_64-pc-windows-msvc', subdir, 'codex.exe');if(existsSync(legacy))return legacy;}
   }
-  const managed = join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin');
-  if (existsSync(managed)) {
-    const candidates = [join(managed, 'codex.exe'), ...readdirSync(managed).map(n => join(managed, n, 'codex.exe'))]
-      .filter(p => existsSync(p)).sort((a,b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-    if (candidates[0]) return candidates[0];
+  if (managed) {
+    const direct = join(managed, 'codex.exe');
+    if (existsSync(direct)) return direct;
   }
   throw new Error('未找到 Codex 可执行文件，请设置 CODEX_BIN');
 }

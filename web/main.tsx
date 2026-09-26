@@ -5,7 +5,9 @@ import {Icon,type IconName} from './icons';
 import {SafeMarkdown,RequestCard} from './content';
 import {createFirstTurn} from './new-chat';
 import {SessionListLoader} from './session-list-loader';
-import type {Json,SessionView,RequestAction} from '../src/shared/types';
+import {BrowserPreviewPanel,type PreviewSession} from './browser-preview';
+import {groupItems} from './activity';
+import type {Json,SessionView,RequestAction,MessageItem} from '../src/shared/types';
 import './style.css';
 
 const load=(key:string,fallback:any)=>{try{return JSON.parse(localStorage.getItem(key)||'null')??fallback;}catch{return fallback;}};
@@ -17,7 +19,7 @@ function relativeTime(value:number){if(!value)return '';const elapsed=Math.max(0
 function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('token');if(token){save('connection',token);history.replaceState(null,'',location.pathname);}return token||load('connection','');}
 type Route={thread:string;project:string;newChat:boolean};
 const home:Route={thread:'',project:'',newChat:false};
-type Sheet='home'|'thread'|'computer'|'projects'|'model'|'add'|'file'|null;
+type Sheet='home'|'thread'|'computer'|'projects'|'model'|'add'|'file'|'browser'|null;
 
 function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
@@ -27,9 +29,10 @@ function App(){
   const [info,setInfo]=useState<Json|null>(null),[projects,setProjects]=useState<string[]>([]),[sessions,setSessions]=useState<Json[]>([]);
   const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
   const [view,setView]=useState<SessionView|null>(null),[limit,setLimit]=useState(20),[loading,setLoading]=useState(false);
-  const [draft,setDraft]=useState(''),[images,setImages]=useState<string[]>([]),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[newCwd,setNewCwd]=useState('');
+  const [draft,setDraft]=useState(''),[images,setImages]=useState<string[]>([]),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[approval,setApproval]=useState(''),[newCwd,setNewCwd]=useState('');
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
   const [preview,setPreview]=useState<Json|null>(null),[filePath,setFilePath]=useState('');
+  const [browserUrl,setBrowserUrl]=useState<string>(()=>load('browser-preview-url','http://127.0.0.1:5173')),[browserBusy,setBrowserBusy]=useState(false),[browserSession,setBrowserSession]=useState<PreviewSession|null>(null);
   const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,limit,searchQuery,archived}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null);
   const scrollAnchor=useRef<{height:number;top:number;limit:number;ready:boolean}|null>(null);
@@ -40,13 +43,13 @@ function App(){
   const stillHere=()=>current.current.machine===machine&&current.current.selected===selected;
   function fail(e:any){setError(e?.message||'操作失败，请重试');}
   function navigate(next:Route,replace=false){
-    const depth=replace?(history.state?.cmwDepth||0):(history.state?.cmwDepth||0)+1;
-    history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine,cmwDepth:depth},'',location.pathname);
+    history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine},'',location.pathname);
     setSheet(null);setRoute(next);
   }
-  function back(){setSheet(null);if(history.state?.cmwDepth>0)history.back();else navigate({...home,project:showThread?project:''},true);}
+  function backToProjects(){navigate(home);}
+  function backToSessions(){navigate({...home,project});}
   useEffect(()=>{
-    history.replaceState({cmwRoute:home,cmwMachine:machine,cmwDepth:0},'',location.pathname);
+    history.replaceState({cmwRoute:home,cmwMachine:machine},'',location.pathname);
     const pop=(e:PopStateEvent)=>{setSheet(null);const next=e.state?.cmwMachine===current.current.machine?e.state.cmwRoute:home;setRoute(next||home);};
     window.addEventListener('popstate',pop);return()=>window.removeEventListener('popstate',pop);
   },[machine]);
@@ -92,7 +95,7 @@ function App(){
   },[token]);
   useEffect(()=>{if(!machine&&machines[0])setMachine(machines[0].id);},[machines,machine]);
   useEffect(()=>{
-    sequence.current++;setView(null);setLoading(Boolean(selected));setLimit(20);setImages([]);setModel('');setEffort('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;
+    sequence.current++;setView(null);setLoading(Boolean(selected));setLimit(20);setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;
     setDraft(load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
   },[machine,selected]);
   useEffect(()=>{void refreshSession();},[limit,connected]);
@@ -113,6 +116,7 @@ function App(){
   useEffect(()=>{if(connected&&pending&&!busy)void checkPending();},[connected,pending?.opId,busy]);
   useEffect(()=>{if(!notice||pending)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice,pending]);
   function editDraft(value:string){setDraft(value);save(draftKey,value);}
+  function insertFollowup(prompt:string){if(!draft.trimEnd().endsWith(prompt))editDraft(draft.trim()?`${draft.trimEnd()}\n\n${prompt}`:prompt);setNotice('已填入输入框，确认后发送。');composer.current?.focus();}
   function setOperation(value:Json|null){save(pendingKey,value);if(stillHere())setPending(value);}
   function accepted(record:Json,result:Json){
     if(record.action==='session.create'&&record.submittedText&&result.threadId){
@@ -143,10 +147,10 @@ function App(){
   function startNew(){if(!connected||busy)return;setNewCwd(project||view?.cwd||info?.roots?.[0]||'');navigate({...route,thread:'',newChat:true});}
   async function submit(){
     if(!connected||busy||pending||!draft.trim())return;
-    if(!newChat){if(view?.canControl)await mutate('turn.send',{...target(),text:draft,images,...(!view.activeTurnId?{model:model||undefined,effort:effort||undefined}:{})});return;}
+    if(!newChat){if(view?.canControl)await mutate('turn.send',{...target(),text:draft,images,...(!view.activeTurnId?{model:model||undefined,effort:effort||undefined,approvalPolicy:approval||undefined}:{})});return;}
     const createId=operationId(),sendId=operationId(),text=draft,creating={opId:createId,action:'session.create',submittedText:text,imageCount:images.length};
     setBusy(true);setError('');setNotice('正在发送…');setOperation(creating);
-    const result=await createFirstTurn((action,payload)=>call(action,payload),{cwd:newCwd,text,images,model,effort,createId,sendId},id=>{
+    const result=await createFirstTurn((action,payload)=>call(action,payload),{cwd:newCwd,text,images,model,effort,approvalPolicy:approval,createId,sendId},id=>{
       save(`draft:${machine}:${id}`,text);save(`operation:${machine}:${id}`,{opId:sendId,action:'turn.send',submittedText:text});
       save(draftKey,'');setOperation(null);
       if(stillHere()&&current.current.newChat)navigate({...route,thread:id,newChat:false},true);
@@ -161,6 +165,15 @@ function App(){
     setBusy(false);scheduleRefresh();void list();
   }
   async function openFile(path:string){setError('');try{const file=await call('file.read',{threadId:selected,path});if(stillHere()){setPreview(file);setSheet(null);}}catch(e){if(stillHere())fail(e);}}
+  async function openBrowser(){
+    if(!connected||browserBusy)return;
+    setBrowserBusy(true);setError('');
+    try{
+      const result=await call('preview.start',{url:browserUrl.trim(),width:window.innerWidth,height:Math.max(400,window.innerHeight-110)});
+      save('browser-preview-url',browserUrl.trim());setBrowserSession(result);setSheet(null);
+    }catch(e){fail(e);}finally{setBrowserBusy(false);}
+  }
+  function closeBrowser(){const session=browserSession;setBrowserSession(null);if(session)void call('preview.stop',{sessionId:session.sessionId}).catch(()=>{});}
   async function attach(files:FileList|null){
     if(!files)return;const results:string[]=[];
     for(const file of Array.from(files).slice(0,2)){
@@ -170,18 +183,32 @@ function App(){
   }
   function changeMachine(id:string){setSheet(null);if(id===machine)return;infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');setMachine(id);setRoute(home);}
   function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);changeMachine('');}
+  async function copySessionId(){
+    const id=view?.id===selected?view.sessionId:selected;if(!id)return;
+    try{
+      if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(id);
+      else {
+        const input=document.createElement('textarea');input.value=id;input.style.position='fixed';input.style.opacity='0';document.body.append(input);input.select();
+        try{if(!document.execCommand('copy'))throw Error('copy failed');}finally{input.remove();}
+      }
+      setNotice('会话 ID 已复制');setSheet(null);
+    }catch{setError('复制失败，请长按下方会话 ID 手动复制。');}
+  }
   const projectName=(path:string)=>info?.projects?.find((p:Json)=>p.path===path)?.name||name(path);
   const selectedModel=model||view?.model||info?.model;
   const availableModels=(info?.models||[]).filter((m:Json)=>(view?.provider||info?.provider)==='openai'||m.model===(view?.model||info?.model));
+  const customModel=Boolean(model)&&!availableModels.some((m:Json)=>m.model===model);
   const modelInfo=availableModels.find((m:Json)=>m.model===selectedModel),canImage=modelInfo?.inputModalities?.includes('image');
+  const inheritedApproval=newChat?info?.approvalPolicy:view?.approvalPolicy;
+  const approvalLabel=inheritedApproval==='never'?'不提示':inheritedApproval==='on-request'?'按需审批':'电脑配置';
   const canWrite=connected&&!busy&&!pending&&(newChat?Boolean(newCwd):Boolean(view?.canControl));
   const visibleTitle=newChat?'新聊天':view?.title||sessions.find(s=>s.id===selected)?.title||'正在打开…';
   const feedback=<>{error&&<div className="feedback error" role="alert"><span>{error}</span><IconButton icon="close" label="关闭提示" onClick={()=>setError('')}/></div>}{notice&&<div className="feedback" role="status">{notice}</div>}{pending&&!busy&&<div className="pending"><button onClick={()=>void checkPending()}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先查看最新任务，确认这次操作的实际结果。清除提示不会重发旧操作。')){setOperation(null);setNotice('');}}}>我已核实</button></div>}</>;
 
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>在手机上继续使用 Codex。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   return <div className={`shell ${showThread?'has-session':''}`}>
-    <aside className="home-panel" inert={Boolean(sheet||preview)}>
-      <header className="home-header">{project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={busy} onClick={back}/><h1>{projectName(project)}</h1></>:<button className="home-identity" aria-label="选择电脑" onClick={()=>setSheet('computer')}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</span></button>}<IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
+    <aside className="home-panel" inert={Boolean(sheet||preview||browserSession)}>
+       <header className="home-header">{project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={busy} onClick={backToProjects}/><h1>{projectName(project)}</h1></>:<button className="home-identity" aria-label="选择电脑" onClick={()=>setSheet('computer')}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</span></button>}<IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
       <div className="home-content">
         {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
         <section className="recent-section"><h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2><nav aria-label={archived?'归档会话':'最近会话'}>{sessions.map(s=><button className={`session-row ${s.id===selected?'selected':''}`} key={s.id} disabled={busy} onClick={()=>navigate({...route,thread:s.id,newChat:false})}><span className="session-name">{s.status?.type==='active'&&<i className="dot online"/>}{s.title}</span><time>{relativeTime(s.updatedAt)}</time></button>)}</nav>
@@ -192,15 +219,15 @@ function App(){
       <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><label className="search-pill"><Icon name="search"/><input aria-label="搜索聊天" placeholder="搜索聊天…" value={search} maxLength={200} onChange={e=>setSearch(e.target.value)}/>{search&&<IconButton icon="close" label="清除搜索" onClick={()=>setSearch('')}/>}</label><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={startNew}/></div></div>
     </aside>
 
-    <main className="thread-panel" inert={Boolean(sheet||preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
-      <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={back}/><button className="thread-title" onClick={()=>setSheet(newChat?'projects':'thread')}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><IconButton icon="computer" label="电脑与连接状态" onClick={()=>setSheet('computer')}/><IconButton icon="more" label="聊天选项" onClick={()=>setSheet('thread')}/></div></header>
+    <main className="thread-panel" inert={Boolean(sheet||preview||browserSession)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
+       <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={backToSessions}/><button className="thread-title" onClick={()=>setSheet(newChat?'projects':'thread')}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><IconButton icon="computer" label="电脑与连接状态" onClick={()=>setSheet('computer')}/><IconButton icon="more" label="聊天选项" onClick={()=>setSheet('thread')}/></div></header>
       {!connected&&<div className="banner">连接已断开，电脑上的任务会继续。</div>}
-      {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
+      {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
       <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!;sticky.current=el.scrollHeight-el.scrollTop-el.clientHeight<100;}}>
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={limit>=100} onClick={()=>{sticky.current=false;const el=timeline.current;if(el)scrollAnchor.current={height:el.scrollHeight,top:el.scrollTop,limit:Math.min(100,limit+20),ready:false};setLimit(n=>Math.min(100,n+20));}}>查看更早内容{limit>=100?'（最近 100 轮）':''}</button>}
         {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:view?.turns.map(turn=><section className="turn" key={turn.id}>
-          {turn.items.map(item=>item.role==='activity'?<details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>:<article className={`message ${item.role}`} key={item.id}><SafeMarkdown text={item.text} openFile={openFile}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</article>)}
+          {groupItems(turn.items).map((group,index)=>group[0].role==='activity'?<details className="activity-group" key={`activity-${index}`}><summary>{turn.status==='inProgress'?'正在处理':'运行记录'} · {group.length} 项<span className="activity-excerpt">{activityLabel[group.at(-1)!.type]||'任务活动'}</span></summary><div className="activity-list">{group.map(item=><details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>)}</div></details>:group.map((item:MessageItem)=><article className={`message ${item.role}`} key={item.id}><SafeMarkdown text={item.text} openFile={openFile} onFollowup={insertFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</article>))}
           <div className="turn-status">{turn.status!=='completed'&&(statusLabel[turn.status]||turn.status)}{turn.diff&&<button onClick={()=>setPreview({path:'本轮任务差异',text:turn.diff,mime:'text/plain'})}><Icon name="file" size={14}/>查看修改</button>}</div>{turn.error&&<p className="error">{turn.error}</p>}
         </section>)}
       </div>
@@ -211,21 +238,35 @@ function App(){
           <IconButton icon="plus" label="添加与选项" className="composer-add" disabled={busy} onClick={()=>setSheet('add')}/>
           <textarea ref={composer} aria-label="任务输入" placeholder={newChat||!view?.turns.length?'接下来我们该写什么代码？':view?.activeTurnId?'补充当前任务…':`在 ${machineName} 上继续…`} value={draft} disabled={busy} onChange={e=>editDraft(e.target.value)} rows={1}/>
           <div className="composer-actions">{view?.activeTurnId&&!newChat&&<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canWrite} onClick={()=>void mutate('turn.stop',target())}/>}{draft.trim()?<button className="black round send" aria-label={view?.activeTurnId?'补充当前任务':'发送消息'} disabled={!canWrite}><Icon name="send" size={21}/></button>:!view?.activeTurnId&&<IconButton icon="mic" label="使用系统键盘听写" onClick={()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');}}/>}</div>
-        </form>
-        <input className="hidden" ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={e=>{void attach(e.target.files);e.target.value='';}}/>
+         </form>
+         <button className="composer-settings" type="button" onClick={()=>setSheet('model')} disabled={busy}>{selectedModel||'选择模型'} · {approval==='never'?'不提示':approval==='on-request'?'按需审批':approvalLabel}<Icon name="chevron" size={13}/></button>
+         <input className="hidden" ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={e=>{void attach(e.target.files);e.target.value='';}}/>
       </div>
     </>}</main>
 
-    {sheet&&<SheetPanel title={({home:'选项',thread:'聊天选项',computer:'电脑',projects:'选择项目',model:'模型与思考',add:'添加与选项',file:'查看项目文件'} as const)[sheet]} close={()=>setSheet(null)}>
-      {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
-      {sheet==='thread'&&<><MenuItem icon="settings" onClick={()=>setSheet('model')}>模型与思考<span className="menu-detail">{selectedModel||'沿用电脑配置'}</span></MenuItem><MenuItem icon="file" disabled={!selected} onClick={()=>setSheet('file')}>查看项目文件</MenuItem><MenuItem icon="refresh" disabled={!selected||!connected} onClick={()=>{setSheet(null);void refreshSession();}}>刷新会话</MenuItem><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem></>}
+     {sheet&&<SheetPanel title={({home:'选项',thread:'聊天选项',computer:'电脑',projects:'选择项目',model:'模型与审批',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页'} as const)[sheet]} close={()=>setSheet(null)}>
+       {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="browser" disabled={!connected} onClick={()=>setSheet('browser')}>打开本机网页</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
+       {sheet==='thread'&&<><MenuItem icon="settings" onClick={()=>setSheet('model')}>模型与审批<span className="menu-detail">{selectedModel||'沿用电脑配置'}</span></MenuItem><MenuItem icon="browser" disabled={!connected} onClick={()=>setSheet('browser')}>打开本机网页</MenuItem><MenuItem icon="file" disabled={!selected} onClick={()=>setSheet('file')}>查看项目文件</MenuItem><MenuItem icon="refresh" disabled={!selected||!connected} onClick={()=>{setSheet(null);void refreshSession();}}>刷新会话</MenuItem><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem>{selected&&<><MenuItem icon="copy" onClick={()=>void copySessionId()}>复制会话 ID</MenuItem><label className="session-id-label">会话 ID<input readOnly value={view?.id===selected?view.sessionId:selected} onFocus={e=>e.target.select()}/></label></>}</>}
       {sheet==='computer'&&<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>}
-      {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
-      {sheet==='model'&&<><p className="muted">{view?.activeTurnId?'当前任务沿用正在使用的模型，结束后可以更换。':'默认沿用电脑配置，也可以填写同一提供商的模型 ID。'}</p><label>模型<input list="models" disabled={Boolean(view?.activeTurnId)||busy} value={model} onChange={e=>setModel(e.target.value)} placeholder={selectedModel||'沿用配置'}/></label><datalist id="models">{availableModels.map((m:Json)=><option key={m.id||m.model} value={m.model}>{m.displayName}</option>)}</datalist><label>思考程度<select disabled={Boolean(view?.activeTurnId)||busy} value={effort} onChange={e=>setEffort(e.target.value)}><option value="">沿用电脑设置</option>{modelInfo?.supportedReasoningEfforts?.map((r:Json)=><option key={r.reasoningEffort} value={r.reasoningEffort}>{({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'更多',max:'最多'} as Json)[r.reasoningEffort]||r.reasoningEffort}</option>)}</select></label><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}
-      {sheet==='add'&&<>{canImage&&<MenuItem icon="image" disabled={busy} onClick={()=>fileInput.current?.click()}>添加图片</MenuItem>}<MenuItem icon="settings" onClick={()=>setSheet('model')}>模型与思考<span className="menu-detail">{selectedModel}</span></MenuItem>{selected&&<MenuItem icon="file" onClick={()=>setSheet('file')}>查看项目文件</MenuItem>}{newChat&&<MenuItem icon="folder" disabled={busy} onClick={()=>setSheet('projects')}>选择项目</MenuItem>}</>}
-      {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 src/app.ts"/></label><button className="primary">打开文件</button></form>}
-    </SheetPanel>}
-    {preview&&<SheetPanel title={preview.path} className="file-preview" close={()=>setPreview(null)}>{preview.data?<img className="preview-image" src={`data:${preview.mime};base64,${preview.data}`} alt={preview.path}/>:<pre className="file-content">{preview.text}</pre>}</SheetPanel>}
+       {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setApproval('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
+       {sheet==='model'&&<>
+         <p className="muted">{view?.activeTurnId?'当前任务沿用正在使用的设置，结束后可以更换。':'下次发送时使用所选模型与审批策略。'}</p>
+         <label>模型<select disabled={Boolean(view?.activeTurnId)||busy||!availableModels.length} value={model} onChange={e=>{setModel(e.target.value);setEffort('');}}>
+           <option value="">沿用当前设置{selectedModel?` · ${view?.model||info?.model}`:''}</option>
+           {availableModels.map((m:Json)=><option key={m.id||m.model} value={m.model}>{m.displayName||m.model}</option>)}
+           {customModel&&<option value={model}>{model}</option>}
+         </select></label>
+         <details className="other-project"><summary>输入其他模型 ID</summary><label>同一提供商的模型 ID<input disabled={Boolean(view?.activeTurnId)||busy} value={model} onChange={e=>{setModel(e.target.value);setEffort('');}} placeholder="例如自定义模型 ID"/></label></details>
+         <label>思考程度<select disabled={Boolean(view?.activeTurnId)||busy||!modelInfo} value={effort} onChange={e=>setEffort(e.target.value)}><option value="">沿用当前设置</option>{modelInfo?.supportedReasoningEfforts?.map((r:Json)=><option key={r.reasoningEffort} value={r.reasoningEffort}>{({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'更多',max:'最多'} as Json)[r.reasoningEffort]||r.reasoningEffort}</option>)}</select></label>
+         <label>审批策略<select disabled={Boolean(view?.activeTurnId)||busy} value={approval} onChange={e=>setApproval(e.target.value)}><option value="">沿用当前设置 · {approvalLabel}</option><option value="on-request">按需审批</option><option value="never">不提示审批</option></select></label>
+         <button className="primary" onClick={()=>setSheet(null)}>完成</button>
+       </>}
+       {sheet==='add'&&<>{canImage&&<MenuItem icon="image" disabled={busy} onClick={()=>fileInput.current?.click()}>添加图片</MenuItem>}<MenuItem icon="settings" onClick={()=>setSheet('model')}>模型与审批<span className="menu-detail">{selectedModel}</span></MenuItem>{selected&&<MenuItem icon="file" onClick={()=>setSheet('file')}>查看项目文件</MenuItem>}{newChat&&<MenuItem icon="folder" disabled={busy} onClick={()=>setSheet('projects')}>选择项目</MenuItem>}</>}
+       {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 src/app.ts"/></label><button className="primary">打开文件</button></form>}
+       {sheet==='browser'&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>setBrowserUrl(e.target.value)} placeholder="http://127.0.0.1:5173"/></label><p className="muted">先在电脑启动网页服务。页面在电脑浏览器中运行，手机可点击、滚动和输入。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
+     </SheetPanel>}
+     {preview&&<SheetPanel title={preview.path} className="file-preview" close={()=>setPreview(null)}>{preview.data?<img className="preview-image" src={`data:${preview.mime};base64,${preview.data}`} alt={preview.path}/>:<pre className="file-content">{preview.text}</pre>}</SheetPanel>}
+     {browserSession&&client.current&&<BrowserPreviewPanel client={client.current} session={browserSession} onClose={closeBrowser} onEnded={()=>setBrowserSession(null)}/>}
   </div>;
 }
 function IconButton({icon,label,onClick,disabled=false,className=''}:{icon:IconName;label:string;onClick:()=>void;disabled?:boolean;className?:string}){return <button type="button" className={`icon-button ${className}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}><Icon name={icon}/></button>;}

@@ -32,3 +32,34 @@ test('token gate, machine routing and receipt recovery after phone disconnect',a
     assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status,200);
   }finally{await relay.close();ledger.close();}
 });
+
+test('browser preview frames and input stay with the phone that opened it',async()=>{
+  const token='preview-test-token-123456789';const relay=createRelay(token);relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');
+  const url=`ws://127.0.0.1:${(relay.server.address() as any).port}/ws`;
+  async function peer(role:'phone'|'connector'){
+    const ws=new WebSocket(url);await once(ws,'open');const ready=waitFrame(ws,m=>m.type==='ready');
+    ws.send(JSON.stringify({type:'hello',role,token,machineId:'pc',name:'Test PC'}));await ready;return ws;
+  }
+  try{
+    const connector=await peer('connector'),owner=await peer('phone'),other=await peer('phone');
+    const request=waitFrame(connector,m=>m.type==='request'&&m.action==='preview.start');
+    owner.send(JSON.stringify({type:'request',id:'open',machineId:'pc',action:'preview.start',payload:{url:'http://127.0.0.1:5173'}}));
+    const started=await request,response=waitFrame(owner,m=>m.type==='response'&&m.id==='open');
+    connector.send(JSON.stringify({type:'response',id:started.id,result:{sessionId:'session-1',width:390,height:700}}));
+    assert.equal((await response).result.sessionId,'session-1');
+    const leaked:any[]=[];other.on('message',raw=>leaked.push(JSON.parse(raw.toString())));
+    const frame=waitFrame(owner,m=>m.type==='preview.frame');
+    connector.send(JSON.stringify({type:'preview.frame',sessionId:'session-1',data:'YWJj',width:390,height:700}));
+    assert.equal((await frame).data,'YWJj');
+    other.send(JSON.stringify({type:'preview.input',sessionId:'session-1',input:{type:'reload'}}));
+    const input=waitFrame(connector,m=>m.type==='preview.input');
+    owner.send(JSON.stringify({type:'preview.input',sessionId:'session-1',input:{type:'touchStart',x:1,y:2}}));
+    assert.equal((await input).input.type,'touchStart');
+    assert.equal(leaked.some(m=>m.type==='preview.frame'),false);
+    const stop=waitFrame(connector,m=>m.type==='preview.stop');owner.close();assert.equal((await stop).sessionId,'session-1');
+    const opening=waitFrame(connector,m=>m.type==='request'&&m.action==='preview.start');
+    other.send(JSON.stringify({type:'request',id:'unfinished',machineId:'pc',action:'preview.start',payload:{url:'http://localhost:3000'}}));await opening;
+    const cancel=waitFrame(connector,m=>m.type==='preview.stop'&&!m.sessionId);other.close();await cancel;
+    connector.close();
+  }finally{await relay.close();}
+});

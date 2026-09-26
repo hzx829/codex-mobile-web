@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
+import {randomUUID} from 'node:crypto';
 import {resolve} from 'node:path';
 import {projectCatalog} from '../src/connector/projects.js';
 import {Control} from '../src/connector/control.js';
@@ -50,9 +51,9 @@ test('paginated history uses the turns endpoint when thread/read cannot include 
     calls:any[]=[];requests=new Map();
     async rpc(method:string,params:any) {
       this.calls.push({method,params});
-      if(method==='thread/read'&&params.includeTurns)throw new BridgeError('runtime_error','paginated_threads is not supported yet');
+      if(method==='thread/read'&&params.includeTurns)throw new BridgeError('runtime_error','paginated threads do not support thread/read(includeTurns=true)');
       if(method==='thread/read')return {thread:{id:'paged',cwd,name:'分页会话',turns:[]}};
-      if(method==='thread/turns/list')return {data:[{id:'new',status:'completed',items:[]},{id:'old',status:'completed',items:[]}],nextCursor:'older'};
+      if(method==='thread/turns/list')return {data:[{id:'new',status:'completed',items:[{id:'reply',type:'agentMessage',text:'完整回复'}]},{id:'old',status:'completed',items:[]}],nextCursor:'older'};
       throw Error(method);
     }
     close(){}
@@ -62,6 +63,32 @@ test('paginated history uses the turns endpoint when thread/read cannot include 
   try {
     const view=await control.read('paged',5);
     assert.equal(view.source,'history');assert.equal(view.hasMore,true);assert.deepEqual(view.turns.map(t=>t.id),['old','new']);
-    assert.deepEqual(runtime.calls.at(-1),{method:'thread/turns/list',params:{threadId:'paged',limit:5,sortDirection:'desc'}});
+    assert.equal(view.turns[1].items[0].text,'完整回复');
+    assert.deepEqual(runtime.calls.at(-1),{method:'thread/turns/list',params:{threadId:'paged',limit:5,sortDirection:'desc',itemsView:'full'}});
+  } finally {control.close();}
+});
+
+test('paginated history uses the local index when turn listing is unavailable',async()=>{
+  const cwd=resolve('paged-project');
+  class Runtime extends EventEmitter {
+    requests=new Map();
+    async rpc(method:string,params:any) {
+      if(method==='thread/read'&&params.includeTurns)throw new BridgeError('runtime_error','list_turns is not supported yet');
+      if(method==='thread/read')return {thread:{id:'paged',cwd,name:'分页会话'}};
+      if(method==='thread/turns/list')throw Error('unsupported endpoint should not be called');
+      throw Error(method);
+    }
+    close(){}
+  }
+  class Desktop extends EventEmitter {clientId='';async follow(){throw Error('not active');}close(){}}
+  const history=()=>({turns:[{id:'turn',status:'completed',items:[{id:'answer',type:'agentMessage',text:'本地记录'}]}],hasMore:true});
+  const control=new Control(new Ledger(':memory:'),new Runtime() as any,new Desktop() as any,async()=>[],history);
+  try {
+    const view=await control.read('paged',5);
+    assert.equal(view.source,'history');assert.equal(view.hasMore,true);
+    assert.equal(view.resumeUnavailable,true);
+    assert.equal(view.turns[0].items[0].text,'本地记录');
+    const resume=await control.handle({id:'resume',action:'session.resume',payload:{threadId:'paged',confirmIdle:true,opId:`${Date.now()}:${randomUUID()}`}});
+    assert.equal(resume.state,'failed');assert.equal(resume.error.code,'unsupported');
   } finally {control.close();}
 });

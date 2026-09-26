@@ -14,6 +14,17 @@ test('new chat creates then sends once to the confirmed session',async()=>{
   assert.deepEqual(calls.map(c=>c.action),['session.create','session.read','turn.send']);
   assert.equal(calls[2].payload.threadId,'s');assert.equal(calls[2].payload.opId,'send');assert.equal(calls[2].payload.generation,'g');
 });
+test('new chat passes model and approval settings to thread creation and first turn',async()=>{
+  const calls:any[]=[];
+  await createFirstTurn(async(action,payload)=>{
+    calls.push({action,payload});
+    if(action==='session.create')return {state:'accepted',threadId:'s'};
+    if(action==='session.read')return {canControl:true,activeTurnId:null,source:'connector',generation:'g'};
+    return {state:'accepted'};
+  },{...input,model:'model-a',effort:'high',approvalPolicy:'on-request'},()=>{});
+  assert.equal(calls[0].payload.model,'model-a');assert.equal(calls[0].payload.approvalPolicy,'on-request');
+  assert.equal(calls[2].payload.effort,'high');assert.equal(calls[2].payload.approvalPolicy,'on-request');
+});
 test('uncertain creation never sends; failed snapshot keeps the new draft unsent',async()=>{
   let count=0;
   const uncertain=await createFirstTurn(async()=>{count++;throw {uncertain:true,message:'lost receipt'};},input,()=>assert.fail('no confirmed session'));

@@ -17,7 +17,7 @@ const run=promisify(execFile),quote=(value:string)=>"'"+value.replace(/'/g,"''")
 let artifact=process.argv[2];
 if(!artifact) {
   const candidates=[];
-  for(const name of await readdir('release')) {const path=resolve('release',name),entry=await stat(path);if(entry.isDirectory())candidates.push({path,time:entry.mtimeMs});}
+  for(const name of await readdir('release')) {const path=resolve('release',name),entry=await stat(path);if(entry.isDirectory()&&/^codex-mobile-web-/.test(name))candidates.push({path,time:entry.mtimeMs});}
   artifact=candidates.sort((a,b)=>b.time-a.time)[0]?.path;
 }
 if(!artifact)throw new Error('Build the Windows package first');

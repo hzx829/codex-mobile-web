@@ -7,7 +7,14 @@ import { normalizeSession } from './normalize.js';
 import { approvalResult } from './approvals.js';
 import { projectDirectory, readProjectFile } from './project.js';
 import { nativeProjects } from './projects.js';
+import { readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, type Json, type BridgeRequest, type SessionView } from '../shared/types.js';
+
+function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
+  if(value===undefined||value===null||value==='')return undefined;
+  if(value==='on-request'||value==='never')return value;
+  throw new BridgeError('invalid','审批策略无效');
+}
 
 export class Control extends EventEmitter {
   generation=randomUUID();
@@ -16,7 +23,7 @@ export class Control extends EventEmitter {
   private diffs=new Map<string,string>();
   private starting=new Map<string,string>();
   private locks=new Map<string,Promise<unknown>>();
-  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects) {
+  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory) {
     super();
     runtime.on('event',(e:Json)=>{
       if(e.method==='turn/diff/updated')this.diffs.set(e.params.turnId,e.params.diff);
@@ -42,7 +49,7 @@ export class Control extends EventEmitter {
       const models=await this.runtime.rpc('model/list',{}).catch(()=>({data:[]}));
       const c=config.config||{};
       const projects=await this.projects(c);
-      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',models:models.data||[],generation:this.generation};
+      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',models:models.data||[],generation:this.generation};
     }
     if(req.action==='sessions.list') {
       const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
@@ -60,10 +67,12 @@ export class Control extends EventEmitter {
   async read(id:string,limit=20):Promise<SessionView> {
     let view:SessionView;
     if(this.loaded.has(id)) {
-      const {raw,hasMore}=await this.runtimeThread(id,limit);
+      const {raw,hasMore,notice,resumeUnavailable}=await this.runtimeThread(id,limit);
       Object.assign(raw,this.settings.get(id));
       view=normalizeSession(raw,'connector',[...this.runtime.requests.values()].filter(r=>r.params?.threadId===id),limit);
       view.hasMore=hasMore||view.hasMore;
+      if(notice)view.notice=notice;
+      if(resumeUnavailable)view.resumeUnavailable=true;
       let starting=this.starting.get(id);
       if(starting&&raw.turns?.some((t:Json)=>t.id===starting&&t.status!=='inProgress')){this.starting.delete(id);starting=undefined;}
       if(starting&&!view.activeTurnId){view.activeTurnId=starting;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
@@ -74,49 +83,65 @@ export class Control extends EventEmitter {
         const raw=await this.desktop.follow(id);
         view=normalizeSession(raw,'desktop',raw.requests||[],limit);
       } catch(e) {
-        const {raw,hasMore}=await this.runtimeThread(id,limit);
+        const {raw,hasMore,notice,resumeUnavailable}=await this.runtimeThread(id,limit);
         view=normalizeSession(raw,'history',[],limit);
         view.hasMore=hasMore||view.hasMore;
-        view.notice='当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。';
+        view.resumeUnavailable=resumeUnavailable;
+        view.notice=notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
       }
     }
     view.generation=this.generation;return view;
   }
-  private async runtimeThread(id:string,limit:number):Promise<{raw:Json;hasMore:boolean}> {
+  private async runtimeThread(id:string,limit:number):Promise<{raw:Json;hasMore:boolean;notice?:string;resumeUnavailable?:boolean}> {
     try {
       const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:true});
-      return {raw:r.thread,hasMore:false};
+      return {raw:r.thread,hasMore:false,resumeUnavailable:r.thread.historyMode==='paginated'&&!this.loaded.has(id)};
     } catch(e) {
-      if(!(e instanceof BridgeError)||!/paginated[_\s]threads?.*(?:do not support|is not supported)/i.test(e.message)) {
+      const paginated=e instanceof BridgeError&&/paginated[_\s]threads?.*(?:do not support|is not supported)/i.test(e.message);
+      const unsupportedTurns=e instanceof BridgeError&&/list_turns is not supported yet/i.test(e.message);
+      if(!paginated&&!unsupportedTurns) {
         if(e instanceof BridgeError&&/not materialized yet/.test(e.message)) {
           const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:false});
           return {raw:r.thread,hasMore:false};
         }
         throw e;
       }
-      const [thread,page]=await Promise.all([
-        this.runtime.rpc('thread/read',{threadId:id,includeTurns:false}),
-        this.runtime.rpc('thread/turns/list',{threadId:id,limit,sortDirection:'desc'}),
-      ]);
-      const turns=page.data||page.turns||page.items||[];
-      return {raw:{...thread.thread,turns:[...turns].reverse()},hasMore:Boolean(page.nextCursor)};
+      const thread=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:false});
+      const indexed=()=>{
+        const page=this.history(id,limit);
+        const resumeUnavailable=!this.loaded.has(id);
+        if(page)return {raw:{...thread.thread,turns:page.turns},hasMore:page.hasMore,resumeUnavailable};
+        return {raw:{...thread.thread,turns:[]},hasMore:false,resumeUnavailable,
+          notice:resumeUnavailable?'此会话的分页历史暂时无法读取，请在 Codex 桌面查看完整记录。':undefined};
+      };
+      if(unsupportedTurns)return indexed();
+      try {
+        const page=await this.runtime.rpc('thread/turns/list',{threadId:id,limit,sortDirection:'desc',itemsView:'full'});
+        const turns=page.data||page.turns||page.items||[];
+        return {raw:{...thread.thread,turns:[...turns].reverse()},hasMore:Boolean(page.nextCursor)};
+      } catch(error) {
+        if(!(error instanceof BridgeError)||!/list_turns is not supported yet/i.test(error.message))throw error;
+        return indexed();
+      }
     }
   }
   private async mutate(action:string,p:Json):Promise<Json> {
     if(action==='session.create') {
       const cwd=await projectDirectory(textRequired(p.cwd,'项目目录'));
-      const options:Json={cwd};if(p.model)options.model=textRequired(p.model,'模型',200);
+      const options:Json={cwd,historyMode:'legacy'};if(p.model)options.model=textRequired(p.model,'模型',200);
+      const policy=approvalPolicy(p.approvalPolicy);if(policy)options.approvalPolicy=policy;
       const r=await this.runtime.rpc('thread/start',options);
-      this.loaded.add(r.thread.id);this.ledger.claim(r.thread.id);this.settings.set(r.thread.id,{model:r.model,modelProvider:r.modelProvider});
+      this.loaded.add(r.thread.id);this.ledger.claim(r.thread.id);this.settings.set(r.thread.id,{model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy||policy,sessionId:r.thread.sessionId||r.thread.id});
       this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider};
     }
     const id=textRequired(p.threadId,'会话');
     const session=await this.read(id);
     if(action==='session.resume') {
       if(session.source!=='history')throw new BridgeError('already_connected','会话已经接入，请刷新后直接发送');
+      if(session.resumeUnavailable)throw new BridgeError('unsupported','此分页会话暂不能在连接器中继续，请在 Codex 桌面操作');
       if(!p.confirmIdle||session.activeTurnId)throw new BridgeError('active','请先在电脑结束原任务，再继续会话');
       const r=await this.runtime.rpc('thread/resume',{threadId:id});
-      this.loaded.add(id);this.ledger.claim(id);this.settings.set(id,{model:r.model,modelProvider:r.modelProvider});this.emit('change',id);return {threadId:id,model:r.model,provider:r.modelProvider};
+      this.loaded.add(id);this.ledger.claim(id);this.settings.set(id,{model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy,sessionId:r.thread?.sessionId||id});this.emit('change',id);return {threadId:id,model:r.model,provider:r.modelProvider};
     }
     if(!session.canControl)throw new BridgeError('read_only',session.notice||'当前会话暂不能操作');
     if(p.generation!==this.generation||p.source!==session.source)throw new BridgeError('changed','连接状态已改变，请刷新任务后重试');
@@ -143,16 +168,17 @@ export class Control extends EventEmitter {
       }
       let result:any;
       if(session.activeTurnId) {
-        if(p.model||p.effort)throw new BridgeError('active','运行中补充沿用当前模型；下一轮可以更换');
+        if(p.model||p.effort||p.approvalPolicy)throw new BridgeError('active','运行中补充沿用当前设置；下一轮可以更换');
         const params={input,expectedTurnId:session.activeTurnId};
         result=session.source==='desktop'?await this.desktop.request('thread-follower-steer-turn',{...context,...params}):await this.runtime.rpc('turn/steer',{threadId:id,...params});
       } else {
         const request:Json={threadId:id,input};
         if(p.model)request.model=textRequired(p.model,'模型',200);
         if(p.effort){if(!['none','minimal','low','medium','high','xhigh','max'].includes(p.effort))throw new BridgeError('invalid','推理档位无效');request.effort=p.effort;}
+        const policy=approvalPolicy(p.approvalPolicy);if(policy)request.approvalPolicy=policy;
         if(session.source==='desktop')result=await this.desktop.request('thread-follower-start-turn',{...context,turnStart:{request:{...request,clientUserMessageId:p.opId},context:{inheritThreadSettings:true}}});
         else {result=await this.runtime.rpc('turn/start',request);if(result?.turn?.id)this.starting.set(id,result.turn.id);}
-        if(p.model&&session.source==='connector')this.settings.set(id,{...this.settings.get(id),model:p.model});
+        if(session.source==='connector'&&(p.model||policy))this.settings.set(id,{...this.settings.get(id),...(p.model?{model:p.model}:{}),...(policy?{approvalPolicy:policy}:{})});
       }
       this.emit('change',id);
       return {threadId:id,turnId:result?.result?.turn?.id||result?.turn?.id||session.activeTurnId||null,kind:session.activeTurnId?'steer_accepted':'turn_accepted'};

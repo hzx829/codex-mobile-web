@@ -37,7 +37,7 @@ export function normalizeSession(raw:Json,source:SessionView['source'],requests:
   });
   const runtimeActive=raw.threadRuntimeStatus?.type==='active'||raw.status?.type==='active';
   const unresolvedActive=runtimeActive&&!active;
-  return {id:raw.id,title:raw.title||raw.name||raw.preview?.slice(0,80)||'新会话',cwd:raw.cwd||'',model:raw.latestModel||raw.model||'',provider:raw.modelProvider||'',source,
+  return {id:raw.id,sessionId:typeof raw.sessionId==='string'&&raw.sessionId?raw.sessionId:raw.id,title:raw.title||raw.name||raw.preview?.slice(0,80)||'新会话',cwd:raw.cwd||'',model:raw.latestModel||raw.model||'',provider:raw.modelProvider||'',approvalPolicy:raw.approvalPolicy||raw.threadSettings?.approvalPolicy||'',source,
     activeTurnId:active?.turnId||active?.id||null,turns,requests:requests.filter(r=>!r.completed),canControl:source!=='history'&&!unresolvedActive,hasMore:all.length>limit,
     notice:unresolvedActive?'正在同步运行中的任务，暂不能操作':undefined};
 }

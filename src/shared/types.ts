@@ -1,12 +1,12 @@
 export type Json = Record<string, any>;
-export type RequestAction = 'info' | 'sessions.list' | 'session.read' | 'session.create' | 'session.resume' | 'turn.send' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read';
+export type RequestAction = 'info' | 'sessions.list' | 'session.read' | 'session.create' | 'session.resume' | 'turn.send' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'preview.start' | 'preview.stop';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
 export interface TurnView { id: string; status: string; items: MessageItem[]; diff?: string; error?: string }
 export interface SessionView {
-  id: string; title: string; cwd: string; model: string; provider: string;
+  id: string; sessionId: string; title: string; cwd: string; model: string; provider: string; approvalPolicy?: string;
   source: 'desktop' | 'connector' | 'history'; activeTurnId: string | null;
-  turns: TurnView[]; requests: Json[]; canControl: boolean; hasMore?: boolean; notice?: string; generation?: string;
+  turns: TurnView[]; requests: Json[]; canControl: boolean; hasMore?: boolean; notice?: string; generation?: string; resumeUnavailable?: boolean;
 }
 export class BridgeError extends Error {
   constructor(public code: string, message: string, public uncertain = false) { super(message); }

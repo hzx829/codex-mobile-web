@@ -1,5 +1,5 @@
 import type {ReactNode} from 'react';
-export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat';
+export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser';
 export function Icon({name,size=24}:{name:IconName;size?:number}) {
   const paths:Record<IconName,ReactNode>={
     back:<><path d="m11 5-7 7 7 7M4 12h16"/></>,
@@ -20,6 +20,8 @@ export function Icon({name,size=24}:{name:IconName;size?:number}) {
     logout:<><path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5M10 12h11m-4-4 4 4-4 4"/></>,
     check:<path d="m5 12 4 4L19 6"/>,
     chat:<><rect x="5" y="2" width="14" height="12" rx="2"/><path d="M3 15h18v3H3z"/><path d="M6 22h.01M10 22h.01M14 22h.01M18 22h.01"/></>,
+    copy:<><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h2"/></>,
+    browser:<><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 9h20M6 6.5h.01M9 6.5h.01M12 6.5h.01"/></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }

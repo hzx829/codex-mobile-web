@@ -59,6 +59,7 @@ test('current Windows canonical history exposes the real active turn and pending
   const raw={id:'s',cwd:'x',latestModel:'deepseek-test',modelProvider:'local-test',turns:[],turnHistory:{kind:'canonical',history:{entitiesByKey:{b:{turnId:'t2',status:'inProgress',params:{input:[{type:'text',text:'hello'}]},items:[{id:'answer',type:'agentMessage',text:'working'}]},a:{turnId:'t1',status:'completed',items:[]}},islands:[{entries:[{value:'a'},{value:'b'}]}]}},threadRuntimeStatus:{type:'active'}};
   const v=normalizeSession(raw,'desktop',[{id:42,method:'item/tool/requestUserInput',params:{}},{id:43,completed:true}],1);
   assert.equal(v.activeTurnId,'t2');assert.equal(v.canControl,true);assert.equal(v.hasMore,true);assert.equal(v.turns[0].items[0].role,'user');assert.equal(v.requests.length,1);assert.equal(v.model,'deepseek-test');
+  assert.equal(v.sessionId,'s');
   assert.equal(normalizeSession({id:'s',status:{type:'active'},turns:[]},'connector',[]).canControl,false);
 });
 test('approval responders preserve native IDs, decisions and permission scope',()=>{

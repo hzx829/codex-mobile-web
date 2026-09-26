@@ -10,7 +10,10 @@ Browse projects and conversations, send instructions, steer or stop a running ta
 
 - Discover existing projects and conversations, including archived conversations.
 - Start or continue tasks, follow progress, add instructions, stop a turn, and answer supported approvals or questions.
+- Choose an available model, reasoning level, and approval policy for the next turn; copy the conversation ID from its menu. Consecutive tool activity is collapsed in the timeline.
+- Tap a suggested follow-up to fill the composer; in-app back buttons return to the parent list.
 - View Markdown, code, task diffs, and small text/image files. Attach images when the runtime confirms model support.
+- Open a local web page in a browser on your computer and control it from the phone; the page's `localhost` requests stay on the computer.
 - Reconnect after a browser disconnect, retain text drafts, and check uncertain operations without automatically resending them.
 
 Closing the phone page does not stop Codex. The computer must remain on and connected. The relay is not a backup service and cannot execute tasks or supply stored conversation history while the computer is offline.
@@ -44,6 +47,8 @@ flowchart LR
 This shows the recommended public HTTPS deployment. TLS ends at the reverse proxy. The proxy-to-relay connection stays on the same host or private container network; both are trusted components.
 
 The connector uses local desktop IPC for existing desktop sessions, and a Codex app-server child process for sessions it creates or resumes. If a live owner cannot be reached, it shows history and asks you to confirm that the original task has ended before resuming it here. Active standalone CLI sessions cannot be taken over.
+
+On Windows, an unset `codexBin` uses the newest Codex in the desktop installation before checking PATH. Restart the connector after a desktop update when its tasks are idle. An explicit binary path remains pinned until changed.
 
 The relay keeps connection routes in memory; the connector stores operation IDs and receipts in local SQLite. After reconnecting, the browser fetches current state and checks earlier operations. Uncertain results remain pending rather than triggering an automatic retry. Restarting the connector may interrupt its own app-server tasks; its stop script does not stop the separate Codex desktop process.
 
@@ -92,6 +97,8 @@ See [DEPLOY.md](DEPLOY.md) (Chinese) for existing proxies, upgrades, rollback, a
 ### Connect and manage
 
 Scan the connector's QR code or open your relay URL and enter the same Token. The browser remembers it for that site. Treat the QR code like a password. Once connected, select a project, open a conversation, or start a new task.
+
+To preview a web app, start its development server on the computer. On the phone, choose “打开本机网页” from the main or conversation menu and enter a local URL such as `http://127.0.0.1:5173`. Edge or Chrome must be installed on the computer. The preview supports touch, text entry, Enter, Backspace, Back, and Reload. Closing it ends the temporary browser. The page runs in Chromium on the computer, so this does not test compatibility with the phone's own browser.
 
 Use `configure.cmd` to change settings after stopping this installation. `stop.cmd` stops the connector and its Codex child process, so finish connector-managed tasks first. Setup, optional login startup, and uninstall instructions are in [QUICKSTART.md](QUICKSTART.md) (Chinese).
 
