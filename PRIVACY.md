@@ -52,7 +52,7 @@ The Token authenticates both phone and connector roles. There are no separate re
 
 An authenticated client can expose a loopback web service through the preview port. The phone browser runs the page and sends its requests through the relay and connector to the chosen local service. The one-time preview link creates a browser session cookie; ending the preview, switching threads/computers in the web app, connector disconnect, or 30 minutes of inactivity revokes that session. The relay operator can read and alter proxied page content and form submissions.
 
-**File preview and download are not confined to a project and do not pass through Codex's sandbox or approval flow.** They read as the connector's OS user and accept absolute paths and cross-directory references, including sensitive files. Previews support text/images up to 2 MiB; downloads support any regular file up to 100 MiB. Downloads use the authenticated connection without a public download URL or relay disk copy. Format and size limits are not an authorization boundary. Use a dedicated OS account if you need to restrict readable files.
+**File preview and download are not confined to a project and do not pass through Codex's sandbox or approval flow.** They read as the connector's OS user and accept absolute paths and cross-directory references, including sensitive files. Previews support text/images up to 2 MiB; video playback and downloads support files up to 100 MiB. Video is assembled in browser memory before playback. Transfers use the authenticated connection without a public download URL or relay disk copy. Format and size limits are not an authorization boundary. Use a dedicated OS account if you need to restrict readable files.
 
 Task execution follows the applicable Codex session's permissions. The bridge adds no extra confirmation layer, and a Token holder can answer supported native approvals. The web page, static assets and `/health` are public; machine/conversation requests require WebSocket authentication. Use an unguessable random Token and HTTPS for public access. The app also accepts plain HTTP/WS and does not enforce HTTPS for you.
 
@@ -118,7 +118,7 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 Token 同时认证手机和连接器，没有独立只读凭据、设备批准、项目白名单或逐设备撤销。认证后的客户端可以发现已连接电脑并发送受支持的请求。应把它视为远程控制凭据。
 
-**文件预览和下载不限制在项目目录，也不经过 Codex 的沙箱或审批流程。** 它们按连接器的系统账户读取，支持绝对路径和跨目录引用，包括敏感文件。文本/图片预览上限为 2 MiB；任意普通文件的下载上限为 100 MiB。下载通过已认证连接传输，不创建公开下载 URL，也不在中继磁盘保存副本。格式和大小限制不构成权限隔离。如需限制可读范围，应使用专门的系统账户运行连接器。
+**文件预览和下载不限制在项目目录，也不经过 Codex 的沙箱或审批流程。** 它们按连接器的系统账户读取，支持绝对路径和跨目录引用，包括敏感文件。文本/图片预览上限为 2 MiB；视频播放与普通文件下载上限为 100 MiB。视频先在浏览器内存中组装，再交给原生播放器。传输走已认证连接，不创建公开下载 URL，也不在中继磁盘保存副本。格式和大小限制不构成权限隔离。如需限制可读范围，应使用专门的系统账户运行连接器。
 
 任务执行沿用对应 Codex 会话的权限。连接器不增加额外确认层，Token 持有者也能回应支持的原生审批。网页、静态资源与 `/health` 公开可访问，电脑/会话请求需先完成 WebSocket 认证。公网使用需要难以猜测的随机 Token 和 HTTPS；程序也接受 HTTP/WS，不会替使用者强制 HTTPS。
 

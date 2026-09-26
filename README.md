@@ -12,7 +12,7 @@ Browse projects and conversations, send instructions, steer or stop a running ta
 - Start or continue tasks, follow progress, add instructions, stop a turn, and answer supported approvals or questions.
 - Choose an available model, reasoning level, and approval policy for the next turn; copy the conversation ID from its menu. Consecutive tool activity is collapsed in the timeline.
 - Tap a suggested follow-up to fill the composer; in-app back buttons return to the parent list.
-- Preview Markdown, highlighted code, visual task diffs and images in a bottom sheet on phones or a right pane on desktop. Download other files such as PowerPoint, PDF and ZIP. Attach images when the runtime confirms model support.
+- Preview Markdown, highlighted code, visual task diffs, images and videos in a bottom sheet on phones or a right pane on desktop. Download other files such as PowerPoint, PDF and ZIP. Attach images when the runtime confirms model support.
 - Open a local web page through the relay; the phone renders it directly while the connector forwards requests to the project's `localhost`.
 - Reconnect after a browser disconnect, retain text drafts, and check uncertain operations without automatically resending them.
 
@@ -118,7 +118,7 @@ Click a file link in a reply, choose “下载文件” (download), then “保�
 
 Task diffs support file selection, syntax and inline-edit highlighting, unified and side-by-side views. Markdown files support relative file links and local images. PowerPoint, PDF and other complex formats currently have a download entry only. Update the web application, relay and connector together. Preview UI acceptance remains manual; see [acceptance steps](ACCEPTANCE.md).
 
-Current limits: latest 100 turns per conversation view, truncated large output, text/image previews up to 2 MiB, file downloads up to 100 MiB, and at most two supported image attachments of 2 MiB each. Code views show up to 10,000 lines. Downloads are assembled in browser memory without resumable transfers. No background push, audio upload, or active standalone CLI takeover. Named Codex profiles are rejected for connector-managed app-server sessions on the tested CLI baseline.
+Current limits: latest 100 turns per conversation view, truncated large output, text/image previews up to 2 MiB, file downloads and video playback up to 100 MiB, and at most two supported image attachments of 2 MiB each. MP4, WebM, OGV and MOV load on request into browser memory and use the browser's native decoder. Code views show up to 10,000 lines. Downloads are assembled in browser memory without resumable transfers. No background push, audio upload, or active standalone CLI takeover. Named Codex profiles are rejected for connector-managed app-server sessions on the tested CLI baseline.
 
 ## Development and provenance
 

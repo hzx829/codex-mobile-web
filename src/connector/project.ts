@@ -43,6 +43,9 @@ export async function readProjectFile(cwd:string,path:string):Promise<FilePrevie
   const {handle,target,info}=await openProjectFile(cwd,path);
   try {
     const file:FilePreview={path:target,name:basename(path),size:Number(info.size),revision:revision(target,info),mime:'application/octet-stream'};
+    const video:Record<string,string>={'.mp4':'video/mp4','.m4v':'video/mp4','.webm':'video/webm','.ogv':'video/ogg','.mov':'video/quicktime'};
+    const videoMime=video[extname(target).toLowerCase()];
+    if(videoMime)return {...file,mime:videoMime};
     if(file.size>2*1024*1024)return {...file,notice:'文件超过 2 MiB 预览上限。'};
     const data=await readBytes(handle,0,file.size);
     if(data.length!==file.size||revision(target,await handle.stat({bigint:true}))!==file.revision)throw changed();

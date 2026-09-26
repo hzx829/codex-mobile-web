@@ -11,6 +11,7 @@ import {FILE_CHUNK_SIZE,MAX_DOWNLOAD_SIZE,type FilePreview} from '../src/shared/
 import {receiveFile} from '../web/file-download.js';
 import {SafeMarkdown} from '../web/content.js';
 import {FilePreviewPanel} from '../web/file-preview.js';
+import {fileViewer} from '../web/preview-target.js';
 
 test('Windows drive links remain file actions; unsafe protocols and embedded images stay inert',()=>{
   const render=(text:string)=>renderToStaticMarkup(createElement(SafeMarkdown,{text,openFile:()=>{},onFollowup:()=>{}}));
@@ -20,6 +21,8 @@ test('Windows drive links remain file actions; unsafe protocols and embedded ima
   for(const path of ['javascript:alert%281%29','data:text/html,evil','vbscript:evil','file:///C:/private.txt']) {
     assert.doesNotMatch(render(`[危险](${path})`),/<a |<button/);
   }
+  assert.match(render('![演示视频](D:/grab-fin/deliverables/demo-video/Shop-Agent-GrabMart-Clay-v2.mp4)'),/<button class="inline-link" type="button">\[视频：演示视频\]<\/button>/);
+  assert.match(render('![成品图](images/cover.png)'),/<button class="inline-link" type="button">\[图片：成品图\]<\/button>/);
   assert.match(render('[官网](https://example.com)'),/<a href="https:\/\/example.com" target="_blank" rel="noreferrer noopener">/);
   assert.doesNotMatch(render('![image](https://example.com/image.png)\n<script>alert(1)</script>'),/<img|<script/);
 });
@@ -87,4 +90,23 @@ test('incomplete, out-of-order, interrupted and cancelled downloads never produc
   assert.equal(calls,1);
   const waiting=new AbortController(),pending=receiveFile(file,()=>new Promise(()=>{}),waiting.signal);
   waiting.abort();await assert.rejects(pending,(e:any)=>e.name==='AbortError');
+});
+
+test('video files expose playable metadata and transfer through the existing chunk protocol',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'cmw-video-'));
+  try{
+    for(const name of ['recording.mp4','capture.webm']){
+      const data=Buffer.alloc(2*1024*1024+17,0x51);
+      await writeFile(join(dir,name),data);
+      const file=await readProjectFile(dir,name);
+      assert.equal(fileViewer(file),'video');
+      assert.equal(file.mime,name.endsWith('.mp4')?'video/mp4':'video/webm');
+      assert.equal(file.data,undefined);assert.equal(file.text,undefined);assert.equal(file.notice,undefined);
+      const html=renderToStaticMarkup(createElement(FilePreviewPanel,{file,connected:true,read:offset=>downloadProjectFile(dir,name,file.revision,offset)}));
+      assert.match(html,/加载视频/);assert.doesNotMatch(html,/<video/);
+      const blob=await receiveFile(file,offset=>downloadProjectFile(dir,name,file.revision,offset),new AbortController().signal);
+      assert.deepEqual(Buffer.from(await blob.arrayBuffer()),data);
+      assert.equal(blob.slice(0,blob.size,file.mime).type,file.mime);
+    }
+  }finally{await removeTestTemp(dir);}
 });

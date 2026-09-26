@@ -42,6 +42,8 @@
 .document-markdown .inline-link { padding: 0; text-align: left; text-decoration: underline; border-radius: 0; font: inherit; }
 .image-viewer { padding: 18px; flex: 1; overflow: auto; background: #fafafa; }
 .image-viewer.original img { max-width: none; }
+.video-viewer { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: #111; }
+.video-viewer video { display: block; width: 100%; max-height: 100%; }
 .diff-viewer { flex: 1; display: flex; flex-direction: column; min-height: 0; --diff-code-insert-background-color: #e9f7ed; --diff-code-delete-background-color: #fff0ef; --diff-code-insert-edit-background-color: #acf0bc; --diff-code-delete-edit-background-color: #ffb9b4; }
 .diff-toolbar > span:first-child { margin-right: auto; }
 .diff-file-picker { display: flex; align-items: center; gap: 10px; padding: 12px; border-bottom: 1px solid var(--line); }

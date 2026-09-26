@@ -25,6 +25,7 @@ export function localDocumentLink(href:string,documentPath:string):string|null {
 
 export function fileViewer(file:FilePreview) {
   if(file.data!==undefined&&/^image\/(png|jpeg|webp|gif)$/.test(file.mime))return 'image';
+  if(/^video\/(mp4|webm|ogg|quicktime)$/.test(file.mime))return 'video';
   if(file.text!==undefined)return /\.(md|markdown|mdown)$/i.test(file.name)?'markdown':'code';
   return 'unsupported';
 }
