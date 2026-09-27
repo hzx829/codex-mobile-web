@@ -1,4 +1,5 @@
 import type { Json, SessionView, MessageItem, TurnView } from '../shared/types.js';
+import {contextUsage} from './usage.js';
 
 const bounded=(s:unknown)=>typeof s==='string'?(s.length>120_000?s.slice(0,120_000)+'\n\n[内容较长，剩余部分请在电脑查看]':s):'';
 const contentText=(c:any):string=>Array.isArray(c)?c.map(x=>typeof x==='string'?x:x.text||'').filter(Boolean).join('\n'):bounded(c);
@@ -38,6 +39,6 @@ export function normalizeSession(raw:Json,source:SessionView['source'],requests:
   const runtimeActive=raw.threadRuntimeStatus?.type==='active'||raw.status?.type==='active';
   const unresolvedActive=runtimeActive&&!active;
   return {id:raw.id,sessionId:typeof raw.sessionId==='string'&&raw.sessionId?raw.sessionId:raw.id,title:raw.title||raw.name||raw.preview?.slice(0,80)||'新会话',cwd:raw.cwd||'',model:raw.latestModel||raw.model||'',provider:raw.modelProvider||'',approvalPolicy:raw.approvalPolicy||raw.threadSettings?.approvalPolicy||'',source,
-    activeTurnId:active?.turnId||active?.id||null,turns,requests:requests.filter(r=>!r.completed),canControl:source!=='history'&&!unresolvedActive,hasMore:all.length>limit,
+    activeTurnId:active?.turnId||active?.id||null,running:Boolean(active||runtimeActive),contextUsage:contextUsage(raw.latestTokenUsageInfo),turns,requests:requests.filter(r=>!r.completed),canControl:source!=='history'&&!unresolvedActive,hasMore:all.length>limit,
     notice:unresolvedActive?'正在同步运行中的任务，暂不能操作':undefined};
 }

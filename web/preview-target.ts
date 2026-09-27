@@ -4,11 +4,14 @@ import type {PreviewSession} from './browser-preview';
 export type PreviewTarget =
   | {kind:'file'; machineId:string; threadId:string; path:string; line?:number; file?:FilePreview; error?:string; request:number}
   | {kind:'diff'; threadId:string; turnId:string; text:string}
+  | {kind:'image'; url:string; title:string}
   | {kind:'web'; session:PreviewSession};
 
 export function fileReference(value:string):{path:string;line?:number} {
   let path=value;
   try{path=decodeURIComponent(value);}catch{}
+  // Codex file links use /C:/... in Markdown; the filesystem needs C:/....
+  path=path.replace(/^\/(?=[a-z]:[\\/])/i,'');
   const match=path.match(/(?::(\d+)(?::\d+)?|#L(\d+)(?:C\d+)?(?:-L?\d+)?)$/i);
   return {path:match?path.slice(0,match.index):path,...(match?{line:Math.max(1,Number(match[1]||match[2]))}:{})};
 }

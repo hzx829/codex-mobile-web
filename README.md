@@ -10,9 +10,12 @@ Browse projects and conversations, send instructions, steer or stop a running ta
 
 - Discover existing projects and conversations, including archived conversations.
 - Start or continue tasks, follow progress, add instructions, stop a turn, and answer supported approvals or questions.
-- Choose an available model, reasoning level, and approval policy for the next turn; copy the conversation ID from its menu. Consecutive tool activity is collapsed in the timeline.
+- Consecutive tool activity is collapsed in the timeline.
 - Tap a suggested follow-up to fill the composer; in-app back buttons return to the parent list.
-- Preview Markdown, highlighted code, visual task diffs, images and videos in a bottom sheet on phones or a right pane on desktop. Download other files such as PowerPoint, PDF and ZIP. Attach images when the runtime confirms model support.
+- Long-press a conversation on mobile or right-click on desktop to pin, organize, mark unread, copy its ID, rename or archive it. Pins, sections and unread marks stay in this browser per computer; rename and archive update Codex.
+- Choose the next turn's model, reasoning effort and approval policy inside the composer.
+- Open the top-right status ring to see the thread ID, directory, context usage, account limits and reset times. Missing native statistics are shown as unavailable.
+- Preview Markdown, highlighted code, visual task diffs, images and videos in a bottom sheet on phones or a right pane on desktop. Download other files such as PowerPoint, PDF and ZIP. Select or paste images, including image Base64, with a count and clickable previews before sending. Image attachments require runtime-confirmed model support.
 - Open a local web page through the relay; the phone renders it directly while the connector forwards requests to the project's `localhost`.
 - Reconnect after a browser disconnect, retain text drafts, and check uncertain operations without automatically resending them.
 
@@ -100,7 +103,7 @@ See [DEPLOY.md](DEPLOY.md) (Chinese) for existing proxies, upgrades, rollback, a
 
 Scan the connector's QR code or open your relay URL and enter the same Token. The browser remembers it for that site. Treat the QR code like a password. Once connected, select a project, open a conversation, or start a new task.
 
-To preview a web app, start its development server on the computer. Open an existing conversation, choose “打开本机网页” from its menu and enter a local URL such as `http://127.0.0.1:5173`. The address is saved per computer and thread. The page opens in the preview pane, with a separate-tab option for sites that block embedding. Closing the pane keeps the preview session; “结束预览” or switching threads/computers ends it. Returning to a thread lets you reopen its saved address. Each connector supports one active preview. The relay and connector tunnel HTTP and WebSocket requests instead of streaming screenshots. The preview port is the relay port plus one (3341 by default). Projects with hard-coded `localhost` URLs or Host/Origin restrictions may need changes.
+To preview a web app, start its development server on the computer. Open an existing conversation, choose “打开本机网页” from the composer’s “＋” menu and enter a local URL such as `http://127.0.0.1:5173`. The address is saved per computer and thread. The page opens in the preview pane, with a separate-tab option for sites that block embedding. Closing the pane keeps the preview session; “结束预览” or switching threads/computers ends it. Returning to a thread lets you reopen its saved address. Each connector supports one active preview. The relay and connector tunnel HTTP and WebSocket requests instead of streaming screenshots. The preview port is the relay port plus one (3341 by default). Projects with hard-coded `localhost` URLs or Host/Origin restrictions may need changes.
 
 Use `configure.cmd` to change settings after stopping this installation. `stop.cmd` stops the connector and its Codex child process, so finish connector-managed tasks first. Setup, optional login startup, and uninstall instructions are in [QUICKSTART.md](QUICKSTART.md) (Chinese).
 

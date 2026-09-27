@@ -12,6 +12,9 @@ test('file references preserve Windows paths, encoded spaces and source line loc
   assert.deepEqual(fileReference('C:/work/My%20File.ts:12:3'),{path:'C:/work/My File.ts',line:12});
   assert.deepEqual(fileReference('src/main.ts#L25-L29'),{path:'src/main.ts',line:25});
   assert.deepEqual(fileReference(String.raw`D:\work\src\file.ts`),{path:String.raw`D:\work\src\file.ts`});
+  assert.deepEqual(fileReference('/C:/Users/NINGMEI/Documents/delegate/codex-mobile-web/.local/config.json'),{path:'C:/Users/NINGMEI/Documents/delegate/codex-mobile-web/.local/config.json'});
+  assert.deepEqual(fileReference('/D:/lingan/lyz-editor-backend/docs/features/organization/WORKSPACE_REVIEW_2026-09-26.md'),{path:'D:/lingan/lyz-editor-backend/docs/features/organization/WORKSPACE_REVIEW_2026-09-26.md'});
+  assert.deepEqual(fileReference('/C:%5Cwork%5Cconfig.json#L3'),{path:String.raw`C:\work\config.json`,line:3});
   assert.equal(localDocumentLink('../src/app.ts:7','C:\\work\\docs\\README.md'),'C:/work/docs/../src/app.ts:7');
   assert.equal(localDocumentLink('images/a%20b.png','/work/docs/README.md'),'/work/docs/images/a b.png');
   assert.equal(localDocumentLink('D:/other/deck.pptx','C:/work/README.md'),'D:/other/deck.pptx');

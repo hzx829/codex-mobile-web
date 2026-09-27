@@ -1,11 +1,14 @@
 export type Json = Record<string, any>;
-export type RequestAction = 'info' | 'sessions.list' | 'session.read' | 'session.create' | 'session.resume' | 'turn.send' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'preview.start' | 'preview.stop';
+export type RequestAction = 'info' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'preview.start' | 'preview.stop';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
 export interface TurnView { id: string; status: string; items: MessageItem[]; diff?: string; error?: string }
+export interface ContextUsage { usedTokens: number; windowTokens: number | null }
+export interface UsageLimit { id: string; name: string | null; usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
+export interface ThreadStatus { threadId: string; limits: UsageLimit[]; limitsNotice?: string }
 export interface SessionView {
   id: string; sessionId: string; title: string; cwd: string; model: string; provider: string; approvalPolicy?: string;
-  source: 'desktop' | 'connector' | 'history'; activeTurnId: string | null;
+  source: 'desktop' | 'connector' | 'history'; activeTurnId: string | null; running?: boolean; contextUsage?: ContextUsage | null;
   turns: TurnView[]; requests: Json[]; canControl: boolean; hasMore?: boolean; notice?: string; generation?: string; resumeUnavailable?: boolean;
 }
 export class BridgeError extends Error {

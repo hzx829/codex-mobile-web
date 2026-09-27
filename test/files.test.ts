@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,truncate,utimes,rename,unlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,truncate,utimes,rename,unlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createElement} from 'react';
@@ -11,11 +11,11 @@ import {FILE_CHUNK_SIZE,MAX_DOWNLOAD_SIZE,type FilePreview} from '../src/shared/
 import {receiveFile} from '../web/file-download.js';
 import {SafeMarkdown} from '../web/content.js';
 import {FilePreviewPanel} from '../web/file-preview.js';
-import {fileViewer} from '../web/preview-target.js';
+import {fileReference,fileViewer} from '../web/preview-target.js';
 
 test('Windows drive links remain file actions; unsafe protocols and embedded images stay inert',()=>{
   const render=(text:string)=>renderToStaticMarkup(createElement(SafeMarkdown,{text,openFile:()=>{},onFollowup:()=>{}}));
-  for(const path of ['D:/project/Pitch-v2.2.pptx','C:/project/My%20Deck.pptx',String.raw`C:\project\deck.pptx`,'C:%5Cproject%5Cdeck.pptx','<D:/project/My Deck.pptx>','/project/deck.pptx','docs/deck.pptx','C:/project/app.ts:12:3']) {
+  for(const path of ['D:/project/Pitch-v2.2.pptx','C:/project/My%20Deck.pptx',String.raw`C:\project\deck.pptx`,'C:%5Cproject%5Cdeck.pptx','<D:/project/My Deck.pptx>','/project/deck.pptx','/C:/Users/NINGMEI/Documents/delegate/codex-mobile-web/.local/config.json','/D:/lingan/lyz-editor-backend/docs/features/organization/WORKSPACE_REVIEW_2026-09-26.md','docs/deck.pptx','C:/project/app.ts:12:3']) {
     assert.match(render(`[文件](${path})`),/<button class="inline-link">文件<\/button>/);
   }
   for(const path of ['javascript:alert%281%29','data:text/html,evil','vbscript:evil','file:///C:/private.txt']) {
@@ -25,6 +25,18 @@ test('Windows drive links remain file actions; unsafe protocols and embedded ima
   assert.match(render('![成品图](images/cover.png)'),/<button class="inline-link" type="button">\[图片：成品图\]<\/button>/);
   assert.match(render('[官网](https://example.com)'),/<a href="https:\/\/example.com" target="_blank" rel="noreferrer noopener">/);
   assert.doesNotMatch(render('![image](https://example.com/image.png)\n<script>alert(1)</script>'),/<img|<script/);
+});
+
+test('Codex /C:/ links can open a dot-directory JSON file on Windows',async()=>{
+  if(process.platform!=='win32')return;
+  const dir=await mkdtemp(join(tmpdir(),'cmw-local-path-'));
+  try{
+    await mkdir(join(dir,'.local'));
+    const target=join(dir,'.local','config.json');await writeFile(target,'{"sample":true}');
+    const reference=`/${target.replace(/\\/g,'/')}`;
+    const file=await readProjectFile(dir,fileReference(reference).path);
+    assert.equal(file.text,'{"sample":true}');assert.equal(fileViewer(file),'code');
+  }finally{await removeTestTemp(dir);}
 });
 
 test('binary, empty and active text files have a download entry while text/image previews stay usable',async()=>{

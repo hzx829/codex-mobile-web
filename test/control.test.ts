@@ -108,3 +108,103 @@ test('a newly created paginated thread can send its first turn without listing h
     assert.equal(runtime.calls.includes('thread/turns/list'),false);
   }finally{control.close();await removeTestTemp(cwd);}
 });
+
+test('thread rename/archive/unarchive use native metadata methods and replay the same receipt',async()=>{
+  class Runtime extends EventEmitter{requests=new Map();calls:any[]=[];async rpc(method:string,params:any){this.calls.push({method,params});return {};}close(){}}
+  class Desktop extends EventEmitter{clientId='desktop';states=new Map();async follow(){return {id:'s',turns:[],requests:[]};}request(){assert.fail('metadata changes must not start, resume or interrupt a turn');}close(){}}
+  const runtime=new Runtime(),control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any),changes:string[]=[];
+  control.on('change',id=>changes.push(id));
+  try{
+    for(const [action,method,payload] of [['session.rename','thread/name/set',{name:'新的名称'}],['session.archive','thread/archive',{}],['session.unarchive','thread/unarchive',{}]] as const){
+      const request={id:randomUUID(),action,payload:{threadId:'s',...payload,opId:`${Date.now()}:${randomUUID()}`}};
+      const first=await control.handle(request);assert.equal(first.state,'accepted');
+      assert.deepEqual(await control.handle(request),first);
+      assert.deepEqual(runtime.calls.at(-1),{method,params:{threadId:'s',...payload}});
+    }
+    assert.equal(runtime.calls.length,3);assert.deepEqual(changes,['s','s','s']);
+    const invalid=await control.handle({id:'invalid',action:'session.rename',payload:{threadId:'s',name:' ',opId:`${Date.now()}:${randomUUID()}`}});
+    assert.equal(invalid.state,'failed');assert.equal(runtime.calls.length,3);
+  }finally{control.close();}
+});
+
+test('archive rejects a running thread even before its active turn is available',async()=>{
+  class Runtime extends EventEmitter{requests=new Map();rpc(){assert.fail('must not archive a running thread');}close(){}}
+  class Desktop extends EventEmitter{clientId='desktop';states=new Map();turns:any[]=[];async follow(){return {id:'s',status:{type:'active'},turns:this.turns,requests:[]};}close(){}}
+  const desktop=new Desktop(),control=new Control(new Ledger(':memory:'),new Runtime() as any,desktop as any);
+  try{
+    for(const turns of [[],[{turnId:'active',status:'inProgress',items:[]}]]){
+      desktop.turns=turns;
+      const result=await control.handle({id:randomUUID(),action:'session.archive',payload:{threadId:'s',opId:`${Date.now()}:${randomUUID()}`}});
+      assert.equal(result.state,'failed');assert.equal(result.error.code,'active');
+    }
+  }finally{control.close();}
+});
+
+test('image-only turns validate the selected model and reach desktop with the full attachment list',async()=>{
+  class Runtime extends EventEmitter{requests=new Map();async rpc(method:string){assert.equal(method,'model/list');return {data:[{model:'vision',inputModalities:['text','image']},{model:'text',inputModalities:['text']}]};}close(){}}
+  class Desktop extends EventEmitter{
+    clientId='desktop';states=new Map();calls:any[]=[];active=false;
+    async follow(){return {id:'s',latestModel:this.active?'vision':'text',turns:this.active?[{turnId:'active',status:'inProgress',items:[]}]:[],requests:[]};}
+    async request(method:string,params:any){this.calls.push({method,params});return {result:{turn:{id:'next'}}};}close(){}
+  }
+  const desktop=new Desktop(),control=new Control(new Ledger(':memory:'),new Runtime() as any,desktop as any);
+  const images=['data:image/png;base64,iVBORw0KGgo=','data:image/jpeg;base64,/9j/2Q=='];
+  const send=(payload:any)=>control.handle({id:randomUUID(),action:'turn.send',payload:{threadId:'s',source:'desktop',generation:control.generation,expectedTurnId:desktop.active?'active':null,opId:`${Date.now()}:${randomUUID()}`,...payload}});
+  try{
+    const sent=await send({text:' \n ',images,model:'vision'});assert.equal(sent.state,'accepted');
+    assert.deepEqual(desktop.calls.at(-1).params.turnStart.request.input,images.map(url=>({type:'image',url})));
+    assert.equal(desktop.calls.at(-1).params.turnStart.request.model,'vision');
+    for(const payload of [{text:'',images},{text:'',images:[]},{text:'image',images:[...images,images[0]],model:'vision'},{text:'image',images:['data:image/png;base64,?'],model:'vision'}]){
+      const count=desktop.calls.filter(c=>c.method==='thread-follower-start-turn').length;
+      assert.equal((await send(payload)).state,'failed');
+      assert.equal(desktop.calls.filter(c=>c.method==='thread-follower-start-turn').length,count);
+    }
+    desktop.active=true;
+    assert.equal((await send({images})).state,'accepted');
+    assert.equal(desktop.calls.at(-1).method,'thread-follower-steer-turn');
+    assert.deepEqual(desktop.calls.at(-1).params.input,images.map(url=>({type:'image',url})));
+    assert.equal((await send({images,model:'vision'})).state,'failed');
+  }finally{control.close();}
+});
+
+test('connector context updates stay with their thread, decrease after compaction, and clear on runtime disconnect',async()=>{
+  const cwd=await mkdtemp(join(tmpdir(),'cmw-context-'));
+  class Runtime extends EventEmitter{
+    requests=new Map();count=0;
+    async rpc(method:string,params:any){
+      if(method==='thread/start')return {thread:{id:`s${++this.count}`,cwd,turns:[]},model:'vision',modelProvider:'openai'};
+      if(method==='thread/read')return {thread:{id:params.threadId,cwd,turns:[]}};
+      assert.fail(method);
+    }close(){}
+  }
+  class Desktop extends EventEmitter{clientId='';states=new Map();async follow(){throw new BridgeError('no_owner','no desktop owner');}close(){}}
+  const runtime=new Runtime(),control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any,async()=>[],()=>null);
+  const update=(id:string,used:number)=>runtime.emit('event',{method:'thread/tokenUsage/updated',params:{threadId:id,turnId:'t',tokenUsage:{last:{totalTokens:used},total:{totalTokens:9_000_000},modelContextWindow:260000}}});
+  try{
+    for(let i=0;i<2;i++)assert.equal((await control.handle({id:randomUUID(),action:'session.create',payload:{cwd,opId:`${Date.now()}:${randomUUID()}`}})).state,'accepted');
+    assert.equal((await control.read('s1')).contextUsage,null);
+    update('s1',104000);update('s2',230000);
+    assert.equal((await control.read('s1')).contextUsage?.usedTokens,104000);assert.equal((await control.read('s2')).contextUsage?.usedTokens,230000);
+    update('s1',12000);assert.equal((await control.read('s1')).contextUsage?.usedTokens,12000);
+    runtime.emit('event',{method:'thread/compacted',params:{threadId:'s1'}});assert.equal((await control.read('s1')).contextUsage,null);
+    assert.equal((await control.read('s2')).contextUsage?.usedTokens,230000);
+    runtime.emit('offline');assert.equal((await control.read('s2')).contextUsage,null);
+  }finally{control.close();await removeTestTemp(cwd);}
+});
+
+test('thread status only reads native account limits and does not apply them to another provider',async()=>{
+  class Runtime extends EventEmitter{
+    requests=new Map();calls:string[]=[];unavailable=false;
+    async rpc(method:string){this.calls.push(method);assert.equal(method,'account/rateLimits/read');if(this.unavailable)throw new BridgeError('runtime_error','private native error');return {rateLimitsByLimitId:{codex:{limitId:'codex',primary:{usedPercent:3,windowDurationMins:10080,resetsAt:1791075340},secondary:null,credits:{private:'not forwarded'}}}};}close(){}
+  }
+  class Desktop extends EventEmitter{clientId='desktop';states=new Map();async follow(id:string){return {id,modelProvider:id==='custom'?'custom':'openai',turns:[]};}close(){}}
+  const runtime=new Runtime(),control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any);
+  const read=(threadId:string)=>control.handle({id:randomUUID(),action:'session.status',payload:{threadId}});
+  try{
+    const result=await read('native');assert.equal(result.threadId,'native');assert.equal(result.limits[0].windowMinutes,10080);assert.equal(result.limits[0].usedPercent,3);
+    assert.ok(!JSON.stringify(result).includes('private'));
+    const custom=await read('custom');assert.deepEqual(custom.limits,[]);assert.ok(custom.limitsNotice.includes('提供商'));assert.equal(runtime.calls.length,1);
+    runtime.unavailable=true;const missing=await read('native');assert.deepEqual(missing.limits,[]);assert.ok(missing.limitsNotice.includes('暂未提供'));assert.ok(!JSON.stringify(missing).includes('private'));
+    assert.deepEqual(runtime.calls,['account/rateLimits/read','account/rateLimits/read']);
+  }finally{control.close();}
+});

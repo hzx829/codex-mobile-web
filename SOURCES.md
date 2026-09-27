@@ -24,6 +24,8 @@ Remodex 的协议思路可参考，但其被检查版本仍主要从 `conversati
 
 `.research/` 保存本地研究副本与生成协议，不参与构建或分发。构建依赖由 `package-lock.json` 固定，便携包附依赖许可证。真实桌面写操作与 DeepSeek 实际服务仍待人工验证；第三方协议夹具通过不等于真实服务通过。
 
+2026-09-27 核对本地生成的 `ThreadTokenUsage`、`ThreadTokenUsageUpdatedNotification`、`GetAccountRateLimitsResponse`、`RateLimitWindow`，以及桌面研究副本中的 `latestTokenUsageInfo` 映射。上下文取最近一次用量；额度优先 `rateLimitsByLimitId`，`resetsAt` 为 Unix 秒。本机 `account/rateLimits/read` 只读调用实际返回 7 天额度窗口；未请求额度重置或购买操作。
+
 额外兼容边界：CLI 0.146.0 的 `--profile` 仅支持其列出的运行命令，不支持 app-server，旧式 `-c profile=...` 同样拒绝。第一版明确拒绝连接器命名 profile 配置；不自行合并 TOML 或降级到不同模型。
 
 2026-09-17 补充核对官方桌面 `26.908.9136.0`：IPC 方法版本仍与上述基线一致，但文本输入必须显式带 `text_elements: []`。当日手机继续桌面会话时，`turn/start` 已成功，桌面保留的原始 `params.input` 缺少该字段，渲染触发 `Cannot read properties of undefined (reading 'length')`；app-server 返回的用户消息虽已补默认值，并未修复桌面的原始输入。连接器已统一补齐新一轮与运行中补充的文本字段；自动回归覆盖两条发送路径，修复后的真实页面由人类复验。

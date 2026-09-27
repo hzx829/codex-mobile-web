@@ -8,7 +8,9 @@ import { approvalResult } from './approvals.js';
 import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
 import { nativeProjects } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
-import { BridgeError, textRequired, type Json, type BridgeRequest, type SessionView } from '../shared/types.js';
+import { BridgeError, textRequired, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus } from '../shared/types.js';
+import {imageDataUrl,MAX_IMAGES} from '../shared/images.js';
+import {contextUsage,accountLimits} from './usage.js';
 
 function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   if(value===undefined||value===null||value==='')return undefined;
@@ -22,15 +24,18 @@ export class Control extends EventEmitter {
   private settings=new Map<string,Json>();
   private diffs=new Map<string,string>();
   private starting=new Map<string,string>();
+  private contexts=new Map<string,ContextUsage|null>();
   private locks=new Map<string,Promise<unknown>>();
   constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory) {
     super();
     runtime.on('event',(e:Json)=>{
       if(e.method==='turn/diff/updated')this.diffs.set(e.params.turnId,e.params.diff);
       if(e.method==='turn/completed')this.starting.delete(e.params.threadId);
+      if(e.method==='thread/tokenUsage/updated')this.contexts.set(e.params.threadId,contextUsage(e.params.tokenUsage));
+      if(e.method==='thread/compacted')this.contexts.delete(e.params.threadId);
       this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
     });
-    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.settings.clear();this.generation=randomUUID();this.emit('change',null);});
+    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.settings.clear();this.contexts.clear();this.generation=randomUUID();this.emit('change',null);});
     desktop.on('change',(id:string)=>this.emit('change',id));
     desktop.on('resync',(id:string)=>{this.emit('change',id);});
     desktop.on('offline',()=>{this.generation=randomUUID();this.emit('change',null);});
@@ -39,7 +44,7 @@ export class Control extends EventEmitter {
   async handle(req:BridgeRequest):Promise<any> {
     const p=req.payload||{};
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
-    if(['session.create','session.resume','turn.send','turn.stop','request.respond'].includes(req.action)) {
+    if(['session.create','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,()=>this.mutate(req.action,p)));
     }
@@ -61,6 +66,14 @@ export class Control extends EventEmitter {
       return {data,nextCursor:r.nextCursor};
     }
     if(req.action==='session.read')return this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(5,Number(p.limit)||20)));
+    if(req.action==='session.status') {
+      const session=await this.read(textRequired(p.threadId,'会话'),5);
+      const status:ThreadStatus={threadId:session.id,limits:[]};
+      if(session.provider&&session.provider!=='openai')return {...status,limitsNotice:'当前提供商未提供额度信息'};
+      try {status.limits=accountLimits(await this.runtime.rpc('account/rateLimits/read',{},8000));}catch{/* Accounts without usage metadata remain unavailable, never zero. */}
+      if(!status.limits.length)status.limitsNotice='运行端暂未提供额度信息';
+      return status;
+    }
     if(req.action==='file.read'||req.action==='file.download') {
       const session=await this.read(textRequired(p.threadId,'会话'),5),path=textRequired(p.path,'文件路径');
       return req.action==='file.read'?readProjectFile(session.cwd,path):downloadProjectFile(session.cwd,path,textRequired(p.revision,'文件版本',64),p.offset);
@@ -73,12 +86,13 @@ export class Control extends EventEmitter {
       const {raw,hasMore,notice,resumeUnavailable}=await this.runtimeThread(id,limit);
       Object.assign(raw,this.settings.get(id));
       view=normalizeSession(raw,'connector',[...this.runtime.requests.values()].filter(r=>r.params?.threadId===id),limit);
+      view.contextUsage=this.contexts.get(id)||null;
       view.hasMore=hasMore||view.hasMore;
       if(notice)view.notice=notice;
       if(resumeUnavailable)view.resumeUnavailable=true;
       let starting=this.starting.get(id);
       if(starting&&raw.turns?.some((t:Json)=>t.id===starting&&t.status!=='inProgress')){this.starting.delete(id);starting=undefined;}
-      if(starting&&!view.activeTurnId){view.activeTurnId=starting;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
+      if(starting&&!view.activeTurnId){view.activeTurnId=starting;view.running=true;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
       else if(starting&&view.activeTurnId===starting)this.starting.delete(id);
       for(const turn of view.turns)turn.diff=this.diffs.get(turn.id)||turn.diff;
     } else {
@@ -138,7 +152,22 @@ export class Control extends EventEmitter {
       this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider};
     }
     const id=textRequired(p.threadId,'会话');
+    if(action==='session.rename') {
+      const name=textRequired(p.name,'会话名称',200);
+      await this.runtime.rpc('thread/name/set',{threadId:id,name});
+      this.emit('change',id);return {threadId:id,name};
+    }
+    if(action==='session.unarchive') {
+      await this.runtime.rpc('thread/unarchive',{threadId:id});
+      this.emit('change',id);return {threadId:id,archived:false};
+    }
     const session=await this.read(id);
+    if(action==='session.archive') {
+      if(session.running)throw new BridgeError('active','请等当前任务结束后再归档');
+      await this.runtime.rpc('thread/archive',{threadId:id});
+      this.loaded.delete(id);this.settings.delete(id);this.contexts.delete(id);
+      this.emit('change',id);return {threadId:id,archived:true};
+    }
     if(action==='session.resume') {
       if(session.source!=='history')throw new BridgeError('already_connected','会话已经接入，请刷新后直接发送');
       if(session.resumeUnavailable)throw new BridgeError('unsupported','此分页会话暂不能在连接器中继续，请在 Codex 桌面操作');
@@ -158,16 +187,17 @@ export class Control extends EventEmitter {
         else await this.runtime.rpc('turn/interrupt',{threadId:id,turnId:session.activeTurnId});
         return {threadId:id,turnId:session.activeTurnId,kind:'stop_requested'};
       }
-      const text=textRequired(p.text,'输入');
+      if(p.images!==undefined&&(!Array.isArray(p.images)||p.images.length>MAX_IMAGES))throw new BridgeError('invalid','最多两张 PNG、JPEG 或 WebP，每张不超过 2 MiB');
+      const images=(p.images||[]).map(imageDataUrl);
+      const text=images.length&&(p.text===undefined||typeof p.text==='string'&&!p.text.trim())?'':textRequired(p.text,'输入');
       // Desktop renders this input before app-server can supply protocol defaults.
-      const input:Json[]=[{type:'text',text,text_elements:[]}];
-      if(p.images?.length) {
-        if(!Array.isArray(p.images)||p.images.length>2||p.images.some((x:any)=>typeof x!=='string'||x.length>3_000_000||!/^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(x)))throw new BridgeError('invalid','最多两张 PNG、JPEG 或 WebP，每张不超过 2 MiB');
+      const input:Json[]=text?[{type:'text',text,text_elements:[]}]:[];
+      if(images.length) {
         // Unknown/custom providers remain text-first; only expose images when native metadata confirms them.
         const models=await this.runtime.rpc('model/list',{});
-        const model=models.data?.find((m:Json)=>m.model===session.model);
+        const model=models.data?.find((m:Json)=>m.model===(!session.activeTurnId&&p.model||session.model));
         if(!model?.inputModalities?.includes('image'))throw new BridgeError('unsupported','当前模型未确认图片能力');
-        input.push(...p.images.map((url:string)=>({type:'image',url})));
+        input.push(...images.map((url:string)=>({type:'image',url})));
       }
       let result:any;
       if(session.activeTurnId) {
