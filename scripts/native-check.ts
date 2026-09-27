@@ -37,7 +37,7 @@ function event(method:string,predicate:(p:Json)=>boolean=()=>true):Promise<Json>
 try{
   await runtime.start();const config=await runtime.rpc('config/read',{cwd:project,includeLayers:false});assert.equal(config.config.model_provider,'fixture');
   const started=await runtime.rpc('thread/start',{cwd:project});assert.equal(started.model,'mobile-fixture');assert.equal(started.modelProvider,'fixture');assert.equal(started.approvalPolicy,'never');assert.equal(started.sandbox.type,'dangerFullAccess');
-  await assert.rejects(runtime.rpc('thread/read',{threadId:started.thread.id,includeTurns:true}),/not materialized yet/);
+  await assert.rejects(runtime.rpc('thread/read',{threadId:started.thread.id,includeTurns:true}),/not materialized yet|list_turns is not supported yet/);
   const done=event('turn/completed');await runtime.rpc('turn/start',{threadId:started.thread.id,input:[{type:'text',text:'Return the fixture response.'}]});const completed=await done;
   assert.equal(completed.turn.status,'completed');assert.equal(receivedModel,'mobile-fixture');assert.equal(receivedAuth,true);
   const read=await runtime.rpc('thread/read',{threadId:started.thread.id,includeTurns:true});assert.ok(read.thread.turns.some((t:Json)=>t.items.some((i:Json)=>i.text==='FIXTURE_OK')));

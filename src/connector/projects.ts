@@ -1,6 +1,7 @@
 import {readFile} from 'node:fs/promises';
 import {homedir} from 'node:os';
 import {isAbsolute,join,normalize} from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
 import {BridgeError,type Json} from '../shared/types.js';
 
 export interface Project {path:string;name:string}
@@ -24,4 +25,21 @@ export async function nativeProjects(config:Json,home=process.env.CODEX_HOME||jo
   try{state=JSON.parse(await readFile(join(home,'.codex-global-state.json'),'utf8'));}
   catch(e:any){if(e.code!=='ENOENT')throw new BridgeError('project_index','Codex 项目列表暂时无法读取，请稍后刷新');}
   return projectCatalog(state,config);
+}
+
+export function indexedSessions(options:{cwd?:string;archived:boolean;search?:string;cursor?:string},home=process.env.CODEX_HOME||join(homedir(),'.codex')) {
+  const offset=options.cursor?Number(/^db:(\d+)$/.exec(options.cursor)?.[1]):0;
+  if(!Number.isSafeInteger(offset)||offset<0)throw new BridgeError('invalid','会话分页标识无效');
+  const db=new DatabaseSync(join(home,'state_5.sqlite'),{readOnly:true});
+  try {
+    const where=["archived = ?","COALESCE(NULLIF(name,''),NULLIF(title,''),NULLIF(preview,'')) IS NOT NULL"],args:any[]=[options.archived?1:0];
+    if(options.cwd){
+      const cwd=normalize(options.cwd),other=process.platform==='win32'?(cwd.startsWith('\\\\?\\')?cwd.slice(4):'\\\\?\\'+cwd):cwd;
+      where.push('(cwd = ? COLLATE NOCASE OR cwd = ? COLLATE NOCASE)');args.push(cwd,other);
+    }
+    if(options.search){where.push("instr(COALESCE(NULLIF(name,''),NULLIF(title,''),preview,''), ?) > 0");args.push(options.search);}
+    const rows=db.prepare(`SELECT id,COALESCE(NULLIF(name,''),NULLIF(title,''),preview,'') AS title,cwd,model,model_provider AS provider,updated_at AS updatedAt
+      FROM threads WHERE ${where.join(' AND ')} ORDER BY updated_at DESC,id DESC LIMIT 31 OFFSET ?`).all(...args,offset) as Json[];
+    return {data:rows.slice(0,30).map(row=>({id:row.id,title:String(row.title||'新会话').slice(0,100),cwd:row.cwd||'',model:row.model||'',provider:row.provider,updatedAt:row.updatedAt})),nextCursor:rows.length>30?`db:${offset+30}`:null};
+  } finally {db.close();}
 }

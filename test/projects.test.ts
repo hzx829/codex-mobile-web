@@ -2,11 +2,15 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
-import {resolve} from 'node:path';
-import {projectCatalog} from '../src/connector/projects.js';
+import {mkdtemp} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {resolve,join} from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
+import {projectCatalog,indexedSessions} from '../src/connector/projects.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {BridgeError} from '../src/shared/types.js';
+import {removeTestTemp} from '../scripts/test-temp.js';
 
 test('native projects keep desktop names and order, including empty or moved projects',()=>{
   const a=resolve('missing-project-a'),b=resolve('missing-project-b'),c=resolve('cli-only-project');
@@ -22,7 +26,6 @@ test('session listing and reading do not require an allowed or existing director
     calls:any[]=[];requests=new Map();
     async rpc(method:string,params:any) {
       this.calls.push({method,params});
-      if(method==='thread/list')return params.useStateDbOnly?{data:[{id:'moved',cwd:moved,name:'旧会话'},{id:'other',cwd:outside},{id:'chat',cwd:''}],nextCursor:'page-2'}:{data:[],nextCursor:'scan-cursor'};
       if(method==='thread/read')return {thread:{id:'moved',cwd:moved,turns:[]}};
       if(method==='config/read')return {config:{model:'custom-model',model_provider:'custom',secret:'must-stay-local'}};
       if(method==='model/list')return {data:[]};
@@ -30,19 +33,40 @@ test('session listing and reading do not require an allowed or existing director
     }
     close(){}
   }
-  class Desktop extends EventEmitter {clientId='';async follow(){throw Error('not active');}close(){}}
-  const runtime=new Runtime(),control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any,async()=>[{path:outside,name:'电脑项目'}]);
+  class Desktop extends EventEmitter {clientId='';states=new Map();async follow(){throw Error('not active');}close(){}}
+  const runtime=new Runtime(),lists:any[]=[],control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any,async()=>[{path:outside,name:'电脑项目'}],()=>null,(options:any)=>{
+    lists.push(options);return {data:[{id:'moved',cwd:moved,title:'旧会话'},{id:'other',cwd:outside,title:'其他会话'},{id:'chat',cwd:'',title:'会话'}].map(row=>({...row,model:'',provider:'openai',updatedAt:0})),nextCursor:'page-2'};
+  });
   try {
     const list=await control.handle({id:'list',action:'sessions.list',payload:{cursor:'page-1',archived:true}});
     assert.deepEqual(list.data.map((t:any)=>t.id),['moved','other','chat']);assert.equal(list.nextCursor,'page-2');
-    const params=runtime.calls.at(-1).params;assert.equal(params.cwd,undefined);assert.deepEqual(params.modelProviders,[]);assert.equal(params.archived,true);assert.equal(params.cursor,'page-1');assert.ok(params.sourceKinds.includes('subAgent'));
-    assert.equal(params.useStateDbOnly,true);
+    assert.deepEqual(lists.at(-1),{cwd:undefined,archived:true,search:undefined,cursor:'page-1'});
     const repaired=await control.handle({id:'repair',action:'sessions.list',payload:{cwd:moved,refresh:true}});
-    assert.deepEqual(runtime.calls.slice(-2).map(c=>c.params.useStateDbOnly),[false,true]);assert.deepEqual(repaired,list);
+    assert.deepEqual(repaired,list);
     assert.equal((await control.read('moved')).id,'moved');
-    await control.handle({id:'filter',action:'sessions.list',payload:{cwd:moved}});assert.equal(runtime.calls.at(-1).params.cwd,moved);
+    await control.handle({id:'filter',action:'sessions.list',payload:{cwd:moved}});assert.equal(lists.at(-1).cwd,moved);
     const info=await control.handle({id:'info',action:'info',payload:{}});assert.deepEqual(info.roots,[outside]);assert.equal(info.projects[0].name,'电脑项目');assert.ok(!JSON.stringify(info).includes('must-stay-local'));
   } finally {control.close();}
+});
+
+test('session index lists desktop-owned threads without asking app-server to open them',async()=>{
+  const home=await mkdtemp(join(tmpdir(),'cmw-index-')),cwd=resolve('project');
+  const db=new DatabaseSync(join(home,'state_5.sqlite'));
+  db.exec('CREATE TABLE threads (id TEXT,name TEXT,title TEXT,preview TEXT,cwd TEXT,model TEXT,model_provider TEXT,updated_at INTEGER,archived INTEGER)');
+  const insert=db.prepare('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?)');
+  for(let i=0;i<32;i++)insert.run(`thread-${i}`,null,`会话 ${i}`,`会话 ${i}`,process.platform==='win32'?`\\\\?\\${cwd}`:cwd,'model','openai',1000-i,0);
+  insert.run('archived',null,'旧会话','旧会话',cwd,'model','openai',2000,1);
+  insert.run('empty',null,null,null,cwd,'model','openai',3000,0);
+  db.close();
+  try{
+    const first=indexedSessions({cwd,archived:false},home);
+    assert.equal(first.data.length,30);assert.equal(first.data[0].id,'thread-0');assert.equal(first.nextCursor,'db:30');
+    const second=indexedSessions({cwd,archived:false,cursor:first.nextCursor!},home);
+    assert.deepEqual(second.data.map(t=>t.id),['thread-30','thread-31']);assert.equal(second.nextCursor,null);
+    assert.deepEqual(indexedSessions({cwd,archived:false,search:'会话 7'},home).data.map(t=>t.id),['thread-7']);
+    assert.deepEqual(indexedSessions({cwd,archived:true},home).data.map(t=>t.id),['archived']);
+    assert.throws(()=>indexedSessions({archived:false,cursor:'wrong'},home),/分页标识/);
+  }finally{await removeTestTemp(home);}
 });
 
 test('paginated history uses the turns endpoint when thread/read cannot include turns',async()=>{

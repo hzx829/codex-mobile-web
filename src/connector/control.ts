@@ -6,7 +6,7 @@ import { Ledger } from './ledger.js';
 import { normalizeSession } from './normalize.js';
 import { approvalResult } from './approvals.js';
 import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
-import { nativeProjects } from './projects.js';
+import { nativeProjects, indexedSessions } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus } from '../shared/types.js';
 import {imageDataUrl,MAX_IMAGES} from '../shared/images.js';
@@ -26,7 +26,7 @@ export class Control extends EventEmitter {
   private starting=new Map<string,string>();
   private contexts=new Map<string,ContextUsage|null>();
   private locks=new Map<string,Promise<unknown>>();
-  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory) {
+  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions) {
     super();
     runtime.on('event',(e:Json)=>{
       if(e.method==='turn/diff/updated')this.diffs.set(e.params.turnId,e.params.diff);
@@ -58,12 +58,11 @@ export class Control extends EventEmitter {
     }
     if(req.action==='sessions.list') {
       const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
-      const params={limit:30,cursor:p.cursor||null,modelProviders:[],cwd,archived:Boolean(p.archived),searchTerm:p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined,sortKey:'updated_at',sourceKinds:['cli','vscode','appServer','exec','subAgent','subAgentReview','subAgentCompact','subAgentThreadSpawn','subAgentOther','unknown']};
-      // Only explicit refresh scans history; return indexed ordering/cursors for every page.
-      if(p.refresh===true)await this.runtime.rpc('thread/list',{...params,useStateDbOnly:false});
-      const r=await this.runtime.rpc('thread/list',{...params,useStateDbOnly:true});
-      const data=(r.data||[]).map((t:Json)=>({id:t.id,title:t.name||t.preview?.slice(0,100)||'新会话',cwd:t.cwd||'',model:t.model||'',provider:t.modelProvider,status:t.status,updatedAt:t.updatedAt}));
-      return {data,nextCursor:r.nextCursor};
+      const search=p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined;
+      if(p.refresh===true)await this.runtime.rpc('thread/list',{limit:1,useStateDbOnly:false},3000).catch(()=>{});
+      // The desktop-owned thread can block app-server thread/list; the state index remains readable.
+      const page=this.listSessions({cwd,archived:Boolean(p.archived),search,cursor:p.cursor});
+      return {...page,data:page.data.map(thread=>({...thread,status:this.desktop.states.get(thread.id)?.state.threadRuntimeStatus}))};
     }
     if(req.action==='session.read')return this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(5,Number(p.limit)||20)));
     if(req.action==='session.status') {
