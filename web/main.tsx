@@ -9,7 +9,8 @@ import {BrowserPreviewPanel,WebViewer,type PreviewSession} from './browser-previ
 import {belongsToThread,defaultPreviewUrl,openThreadPreview,previewUrlKey} from './thread-preview';
 import {groupItems} from './activity';
 import {PreviewPane,useCompactPreview} from './preview-pane';
-import {fileReference,type PreviewTarget} from './preview-target';
+import {fileReference,samePreviewTarget,type PreviewTarget} from './preview-target';
+import {home,initialLocation,rememberLocation,parseLocation,type Route} from './route-state';
 import {appendImages,pastedImage,readImageFiles} from './attachments';
 import {MAX_IMAGES} from '../src/shared/images';
 import {ThreadMenu,ThreadRow} from './thread-menu';
@@ -27,18 +28,19 @@ const DiffViewer=lazy(()=>import('./diff-viewer').then(module=>({default:module.
 const load=(key:string,fallback:any)=>{try{return JSON.parse(localStorage.getItem(key)||'null')??fallback;}catch{return fallback;}};
 const save=(key:string,value:any)=>{try{localStorage.setItem(key,JSON.stringify(value));}catch{}};
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
+const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:'网页预览';
 const statusLabel:Record<string,string>={inProgress:'进行中',completed:'已完成',interrupted:'已停止',failed:'失败'};
 const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划'};
 function relativeTime(value:number){if(!value)return '';const elapsed=Math.max(0,Date.now()-(value<1e12?value*1000:value));const minutes=Math.floor(elapsed/60_000);return minutes<1?'刚刚':minutes<60?`${minutes}分钟`:minutes<1440?`${Math.floor(minutes/60)}小时`:`${Math.floor(minutes/1440)}天`;}
-function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('token');if(token){save('connection',token);history.replaceState(null,'',location.pathname);}return token||load('connection','');}
-type Route={thread:string;project:string;newChat:boolean};
-const home:Route={thread:'',project:'',newChat:false};
+function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('token');if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
+const savedLocation=initialLocation();
+type PreviewTab={id:number;target:PreviewTarget};
 type Sheet='home'|'computer'|'projects'|'model'|'approval'|'add'|'file'|'browser'|null;
 
 function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
-  const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState('');
-  const [route,setRoute]=useState<Route>(home),[sheet,setSheet]=useState<Sheet>(null);
+  const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
+  const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const {thread:selected,project,newChat}=route,showThread=Boolean(selected||newChat);
   const [info,setInfo]=useState<Json|null>(null),[projects,setProjects]=useState<string[]>([]),[sessions,setSessions]=useState<Json[]>([]);
   const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
@@ -50,9 +52,11 @@ function App(){
   const [preferenceState,setPreferences]=useState<{machine:string;values:ThreadPreferences}>({machine:'',values:{}});
   const preferences=preferenceState.machine===machine?preferenceState.values:{};
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
-  const [preview,setPreview]=useState<PreviewTarget|null>(null),[filePath,setFilePath]=useState('');
+  const [previewState,setPreviewState]=useState<{tabs:PreviewTab[];activeId:number|null}>({tabs:[],activeId:null}),[filePath,setFilePath]=useState('');
+  const preview=previewState.tabs.find(tab=>tab.id===previewState.activeId)?.target||null;
+  const previewIds=useRef(0);
   const compactPreview=useCompactPreview();
-  const fileSequence=useRef(0);
+  const fileSequence=useRef(0),browserSequence=useRef(0);
   const [browserUrl,setBrowserUrl]=useState(defaultPreviewUrl),[browserRequest,setBrowserRequest]=useState<number|null>(null),[browserState,setBrowserSession]=useState<PreviewSession|null>(null);
   const browserBusy=browserRequest!==null,browserSession=belongsToThread(browserState,machine,selected)?browserState:null;
   const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,limit,searchQuery,archived}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
@@ -63,20 +67,27 @@ function App(){
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
   const call=(action:RequestAction,payload:Json={},target=machine)=>client.current!.request(action,payload,target);
   const stillHere=()=>current.current.machine===machine&&current.current.selected===selected;
-  function closePreview(){fileSequence.current++;setPreview(null);}
-  function showPreview(next:PreviewTarget){fileSequence.current++;setPreview(next);setSheet(null);}
+  function closePreview(){browserSequence.current++;setPreviewState({tabs:[],activeId:null});}
+  function showPreview(next:PreviewTarget){
+    const id=++previewIds.current;
+    setPreviewState(old=>{const existing=old.tabs.find(tab=>samePreviewTarget(tab.target,next));return existing
+      ?{tabs:old.tabs.map(tab=>tab.id===existing.id?{...tab,target:next}:tab),activeId:existing.id}
+      :{tabs:[...old.tabs,{id,target:next}],activeId:id};});
+    setSheet(null);
+  }
+  function closePreviewTab(id:number){setPreviewState(old=>{const index=old.tabs.findIndex(tab=>tab.id===id);if(index<0)return old;const tabs=old.tabs.filter(tab=>tab.id!==id);return {tabs,activeId:old.activeId===id?tabs[Math.min(index,tabs.length-1)]?.id??null:old.activeId};});}
   function fail(e:any){setError(e?.message||'操作失败，请重试');}
   function navigate(next:Route,replace=false){
     history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine},'',location.pathname);
-    closePreview();setSheet(null);setThreadMenu(null);setStatusPanel(null);setRoute(next);
+    rememberLocation(next,machine);closePreview();setSheet(null);setThreadMenu(null);setStatusPanel(null);setRoute(next);
   }
   function backToProjects(){navigate(home);}
   function backToSessions(){navigate({...home,project});}
   useEffect(()=>{
-    history.replaceState({cmwRoute:home,cmwMachine:machine},'',location.pathname);
-    const pop=(e:PopStateEvent)=>{closePreview();setSheet(null);setThreadMenu(null);setStatusPanel(null);const next=e.state?.cmwMachine===current.current.machine?e.state.cmwRoute:home;setRoute(next||home);};
+    const pop=(e:PopStateEvent)=>{closePreview();setSheet(null);setThreadMenu(null);setStatusPanel(null);const location=parseLocation(e.state);const next=location?.machine===current.current.machine?location.route:home;rememberLocation(next,current.current.machine);setRoute(next);};
     window.addEventListener('popstate',pop);return()=>window.removeEventListener('popstate',pop);
-  },[machine]);
+  },[]);
+  useEffect(()=>{history.replaceState({cmwRoute:route,cmwMachine:machine},'',location.pathname);rememberLocation(route,machine);},[machine]);
   async function refreshSession(){
     if(refreshing.current){again.current=true;return;}
     const c={...current.current};if(!c.machine||!c.selected||!client.current?.ready)return;
@@ -119,7 +130,7 @@ function App(){
     return()=>{c.close();clearTimeout(refreshTimer.current);};
   },[token]);
   useEffect(()=>client.current?.onPreview(message=>{
-    if(message.type==='preview.disconnected'||message.type==='preview.ended'&&message.sessionId===browserState?.sessionId){setBrowserSession(null);setPreview(old=>old?.kind==='web'?null:old);}
+    if(message.type==='preview.disconnected'||message.type==='preview.ended'&&message.sessionId===browserState?.sessionId){setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});}
   }),[token,browserState?.sessionId]);
   useEffect(()=>{if(!machine&&machines[0])setMachine(machines[0].id);},[machines,machine]);
   useEffect(()=>{setPreferences({machine,values:load(`thread-preferences:${machine}`,{})});setThreadMenu(null);},[machine]);
@@ -127,7 +138,7 @@ function App(){
     setStatusPanel(null);
     imageSequence.current++;imageLoad.current=null;setImageLoading(false);
     closeBrowser();setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
-    sequence.current++;fileSequence.current++;setPreview(null);setView(null);setLoading(Boolean(selected));setLimit(20);setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;
+    sequence.current++;fileSequence.current++;closePreview();setView(null);setLoading(Boolean(selected));setLimit(20);setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;
     setDraft(load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
   },[machine,selected,newChat]);
   useEffect(()=>{void refreshSession();},[limit,connected]);
@@ -141,7 +152,7 @@ function App(){
   function resizeComposer(){const el=composer.current;if(!el)return;el.style.overflowY='hidden';el.style.height='auto';const height=el.scrollHeight;el.style.height=`${Math.min(Math.max(height,44),144)}px`;el.style.overflowY=height>145?'auto':'hidden';}
   useLayoutEffect(resizeComposer,[draft,showThread]);
   useEffect(()=>{const el=composer.current;if(!el)return;let width=el.clientWidth;const observer=new ResizeObserver(()=>{if(width!==el.clientWidth){width=el.clientWidth;resizeComposer();}});observer.observe(el);return()=>observer.disconnect();},[showThread]);
-  useEffect(()=>{if(preview?.kind!=='image')return;const index=images.indexOf(preview.url);if(index<0){closePreview();return;}const title=`待发送图片 ${index+1}/${images.length}`;if(preview.title!==title)setPreview({...preview,title});},[images,preview]);
+  useEffect(()=>{setPreviewState(old=>{let changed=false;const tabs=old.tabs.flatMap(tab=>{if(tab.target.kind!=='image')return [tab];const index=images.indexOf(tab.target.url);if(index<0){changed=true;return [];}const title=`待发送图片 ${index+1}/${images.length}`;if(title!==tab.target.title){changed=true;return [{...tab,target:{...tab.target,title}}];}return [tab];});if(!changed)return old;return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});},[images]);
   useEffect(()=>{
     if(!connected)return;
     const foreground=()=>{if(document.visibilityState!=='visible')return;if(current.current.selected)void refreshSession();else void list();};
@@ -203,21 +214,21 @@ function App(){
   async function openFile(reference:string){
     const {path,line}=fileReference(reference),request=++fileSequence.current;
     const next:PreviewTarget={kind:'file',machineId:machine,threadId:selected,path,line,request};
-    setError('');setSheet(null);setPreview(next);
-    try{const file=await call('file.read',{threadId:selected,path});if(request===fileSequence.current&&stillHere())setPreview({...next,file});}
-    catch(e){if(request===fileSequence.current&&stillHere())setPreview({...next,error:(e as Error)?.message||'文件读取失败'});}
+    setError('');showPreview(next);
+    try{const file=await call('file.read',{threadId:selected,path});if(stillHere())setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,file}}:tab)}));}
+    catch(e){if(stillHere())setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,error:(e as Error)?.message||'文件读取失败'}}:tab)}));}
   }
   async function openBrowser(){
     if(!connected||browserBusy||!selected)return;
-    const owner=machine,request=++fileSequence.current;
+    const owner=machine,request=++browserSequence.current;
     setBrowserRequest(request);setError('');
     try{
-      const result=await openThreadPreview(call,owner,selected,browserUrl.trim(),()=>stillHere()&&request===fileSequence.current);
+      const result=await openThreadPreview(call,owner,selected,browserUrl.trim(),()=>stillHere()&&request===browserSequence.current);
       if(!result)return;
       save(previewUrlKey(owner,selected),browserUrl.trim());setBrowserSession(result);showPreview({kind:'web',session:result});
-    }catch(e){if(stillHere()&&request===fileSequence.current)fail(e);}finally{setBrowserRequest(old=>old===request?null:old);}
+    }catch(e){if(stillHere()&&request===browserSequence.current)fail(e);}finally{setBrowserRequest(old=>old===request?null:old);}
   }
-  function closeBrowser(){const session=browserState;setBrowserSession(null);setPreview(old=>old?.kind==='web'?null:old);if(session)void call('preview.stop',{sessionId:session.sessionId,threadId:session.threadId},session.machineId).catch(()=>{});}
+  function closeBrowser(){const session=browserState;browserSequence.current++;setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});if(session)void call('preview.stop',{sessionId:session.sessionId,threadId:session.threadId},session.machineId).catch(()=>{});}
   async function attach(files:File[],data?:string){
     if(busy||!files.length&&!data)return;
     if(!canImage){setError('当前模型未确认图片能力');return;}
@@ -236,7 +247,7 @@ function App(){
     try{const data=pastedImage(e.clipboardData.getData('text/plain'));if(data){e.preventDefault();void attach([],data);}}
     catch(error){e.preventDefault();fail(error);}
   }
-  function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');setMachine(id);setRoute(home);}
+  function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');history.replaceState({cmwRoute:home,cmwMachine:id},'',location.pathname);rememberLocation(home,id);setMachine(id);setRoute(home);}
   function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);changeMachine('');}
   async function copyId(id:string){
       if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(id);
@@ -329,7 +340,7 @@ function App(){
 
      {threadMenu&&threadMenu.machine===machine&&<ThreadMenu key={`${machine}:${threadMenu.thread.id}`} thread={threadMenu.thread} point={threadMenu.point} preference={preferences[threadMenu.thread.id]||{}} sections={[...new Set(Object.values(preferences).map(p=>p.section).filter((s):s is string=>Boolean(s)))]} archived={threadMenu.archived} compact={threadMenu.compact} connected={connected} close={()=>setThreadMenu(current=>current===threadMenu?null:current)} change={patch=>changePreference(threadMenu.thread.id,patch,threadMenu.thread)} copy={()=>copyId(threadMenu.thread.id)} rename={name=>changeThread('session.rename',threadMenu.thread,{name})} archive={()=>changeThread(threadMenu.archived?'session.unarchive':'session.archive',threadMenu.thread)}/>}
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyId(selected)} read={()=>call('session.status',{threadId:selected})}/>}
-     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',model:'模型与思考程度',approval:'许可',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页'} as const)[sheet]} close={()=>{if(sheet==='browser'){fileSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
+     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',model:'模型与思考程度',approval:'许可',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
        {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
       {sheet==='computer'&&<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setApproval('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
@@ -349,13 +360,18 @@ function App(){
        {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>}
        {sheet==='browser'&&selected&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);save(previewUrlKey(machine,selected),e.target.value);}} placeholder="http://127.0.0.1:5173"/></label><p className="muted">地址仅用于当前聊天。先在电脑启动网页服务，再打开预览。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
      </SheetPanel>}
-     {preview&&(preview.kind!=='web'||belongsToThread(preview.session,machine,selected))&&<PreviewPane title={preview.kind==='file'?preview.file?.name||name(preview.path):preview.kind==='diff'?'本轮修改':preview.kind==='image'?preview.title:'网页预览'} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:undefined} compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel)} close={closePreview}>
-       {preview.kind==='file'&&(preview.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel key={preview.request} file={preview.file} connected={connected} line={preview.line} openFile={openFile}
-         readFile={path=>call('file.read',{threadId:preview.threadId,path},preview.machineId)}
-         read={offset=>call('file.download',{threadId:preview.threadId,path:preview.file!.path,revision:preview.file!.revision,offset},preview.machineId)}/></Suspense>:<div className="preview-empty" role={preview.error?'alert':'status'}><p>{preview.error||'正在读取文件…'}</p>{preview.error&&<button disabled={!connected} onClick={()=>void openFile(preview.path+(preview.line?`:${preview.line}`:''))}>重试</button>}</div>)}
-       {preview.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer key={`${preview.threadId}:${preview.turnId}`} text={preview.text} compact={compactPreview}/></Suspense>}
-       {preview.kind==='web'&&<WebViewer key={preview.session.sessionId} session={preview.session} onEnd={closeBrowser}/>}
-       {preview.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={preview.url} alt={preview.title}/></div>}
+     {preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:undefined}
+       tabs={previewState.tabs.map(tab=>({id:tab.id,title:previewTitle(tab.target)}))} activeTab={previewState.activeId}
+       selectTab={id=>setPreviewState(old=>({...old,activeId:id}))} closeTab={closePreviewTab}
+       compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel)} close={closePreview}>
+       {previewState.tabs.map(({id,target})=><div key={id} id={`preview-panel-${id}`} aria-labelledby={`preview-tab-${id}`} className="preview-tab-panel" role="tabpanel" hidden={id!==previewState.activeId}>
+         {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel key={target.request} file={target.file} connected={connected} line={target.line} openFile={openFile}
+           readFile={path=>call('file.read',{threadId:target.threadId,path},target.machineId)}
+           read={offset=>call('file.download',{threadId:target.threadId,path:target.file!.path,revision:target.file!.revision,offset},target.machineId)}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''))}>重试</button>}</div>)}
+         {target.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer text={target.text} compact={compactPreview}/></Suspense>}
+         {target.kind==='web'&&<WebViewer session={target.session} onEnd={closeBrowser}/>}
+         {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
+       </div>)}
      </PreviewPane>}
   </div>;
 }

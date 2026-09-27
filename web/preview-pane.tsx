@@ -8,7 +8,7 @@ export function useCompactPreview(){
   return compact;
 }
 
-export function PreviewPane({title,subtitle,compact,covered,close,children}:{title:string;subtitle?:string;compact:boolean;covered:boolean;close:()=>void;children:ReactNode}){
+export function PreviewPane({title,subtitle,tabs,activeTab,selectTab,closeTab,compact,covered,close,children}:{title:string;subtitle?:string;tabs:{id:number;title:string}[];activeTab:number|null;selectTab:(id:number)=>void;closeTab:(id:number)=>void;compact:boolean;covered:boolean;close:()=>void;children:ReactNode}){
   const [expanded,setExpanded]=useState(false),[width,setWidth]=useState(520);
   const panel=useRef<HTMLElement>(null),onClose=useRef(close),start=useRef({x:0,y:0,width:0}),dragged=useRef(false);
   const maxWidth=Math.max(320,window.innerWidth-550);
@@ -44,6 +44,11 @@ export function PreviewPane({title,subtitle,compact,covered,close,children}:{tit
         {compact&&<button onClick={()=>setExpanded(v=>!v)}>{expanded?'收起':'全屏'}</button>}
         <button className="icon-button" aria-label="关闭预览" onClick={close}><Icon name="close"/></button>
       </header>
+      <div className="preview-tabs" role="tablist" aria-label="预览内容">{tabs.map((tab,index)=><div className={`preview-tab${tab.id===activeTab?' active':''}`} key={tab.id}>
+        <button type="button" id={`preview-tab-${tab.id}`} role="tab" aria-controls={`preview-panel-${tab.id}`} aria-selected={tab.id===activeTab} tabIndex={tab.id===activeTab?0:-1} title={tab.title} onClick={()=>selectTab(tab.id)}
+          onKeyDown={event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowLeft'?-1:1)+tabs.length)%tabs.length;selectTab(tabs[next].id);panel.current?.querySelector<HTMLElement>(`#preview-tab-${tabs[next].id}`)?.focus();}}>{tab.title}</button>
+        <button type="button" className="preview-tab-close" aria-label={`关闭 ${tab.title}`} onClick={()=>closeTab(tab.id)}><Icon name="close" size={12}/></button>
+      </div>)}</div>
       <div className="preview-body">{children}</div>
     </section>
   </>;

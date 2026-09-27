@@ -7,6 +7,14 @@ export type PreviewTarget =
   | {kind:'image'; url:string; title:string}
   | {kind:'web'; session:PreviewSession};
 
+export function samePreviewTarget(a:PreviewTarget,b:PreviewTarget):boolean{
+  if(a.kind!==b.kind)return false;
+  if(a.kind==='file'&&b.kind==='file')return a.machineId===b.machineId&&a.threadId===b.threadId&&a.path===b.path;
+  if(a.kind==='diff'&&b.kind==='diff')return a.threadId===b.threadId&&a.turnId===b.turnId;
+  if(a.kind==='image'&&b.kind==='image')return a.url===b.url;
+  return a.kind==='web'&&b.kind==='web'&&a.session.sessionId===b.session.sessionId;
+}
+
 export function fileReference(value:string):{path:string;line?:number} {
   let path=value;
   try{path=decodeURIComponent(value);}catch{}

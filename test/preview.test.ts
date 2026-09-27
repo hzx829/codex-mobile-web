@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {fileReference,localDocumentLink,fileViewer} from '../web/preview-target.js';
+import {fileReference,localDocumentLink,fileViewer,samePreviewTarget} from '../web/preview-target.js';
 import {parseTaskDiff,diffCounts,diffTokens} from '../web/diff.js';
 import {DiffFileView} from '../web/diff-viewer.js';
 import {CodeViewer} from '../web/code-viewer.js';
@@ -19,6 +19,15 @@ test('file references preserve Windows paths, encoded spaces and source line loc
   assert.equal(localDocumentLink('images/a%20b.png','/work/docs/README.md'),'/work/docs/images/a b.png');
   assert.equal(localDocumentLink('D:/other/deck.pptx','C:/work/README.md'),'D:/other/deck.pptx');
   for(const url of ['https://example.com/a.png','//example.com/a.png','%2F%2Fexample.com/a.png','javascript:alert(1)','data:text/html,x','file:///C:/x','#section'])assert.equal(localDocumentLink(url,'C:/work/README.md'),null);
+});
+
+test('preview tabs reuse the same asset and keep distinct assets separate',()=>{
+  const file={kind:'file' as const,machineId:'pc',threadId:'a',path:'src/app.ts',request:1};
+  assert.equal(samePreviewTarget(file,{...file,request:2,line:12}),true);
+  assert.equal(samePreviewTarget(file,{...file,path:'src/other.ts'}),false);
+  assert.equal(samePreviewTarget(file,{...file,threadId:'b'}),false);
+  assert.equal(samePreviewTarget({kind:'diff',threadId:'a',turnId:'one',text:'old'},{kind:'diff',threadId:'a',turnId:'two',text:'new'}),false);
+  assert.equal(samePreviewTarget({kind:'image',url:'data:image/png;base64,a',title:'1'},{kind:'image',url:'data:image/png;base64,a',title:'2'}),true);
 });
 
 test('library diff preserves files and line numbers, highlights word edits and supports both layouts',()=>{

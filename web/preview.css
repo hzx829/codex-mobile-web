@@ -5,7 +5,15 @@
 .preview-header small { display: block; margin-top: 5px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-header > button { font-size: 12px; padding: 8px; }
 .preview-header .icon-button { background: #f5f5f5; border-radius: 50%; min-width: 34px; width: 34px; height: 34px; }
-.preview-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; }
+.preview-tabs { display: flex; gap: 4px; padding: 7px 10px; overflow-x: auto; border-bottom: 1px solid var(--line); flex-shrink: 0; scrollbar-width: thin; }
+.preview-tab { display: flex; align-items: center; min-width: 0; max-width: 180px; flex: 0 0 auto; border-radius: 8px; background: #f6f6f6; }
+.preview-tab.active { background: #e9e9e9; }
+.preview-tab > button:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 7px 5px 7px 10px; font-size: 12px; }
+.preview-tab-close { display: flex; align-items: center; justify-content: center; padding: 6px; margin-right: 3px; border-radius: 6px; }
+.preview-tab-close:hover { background: #ddd; }
+.preview-body { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.preview-tab-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.preview-tab-panel[hidden] { display: none; }
 .preview-resizer { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; touch-action: none; z-index: 1; }
 .preview-resizer:hover, .preview-resizer:focus-visible { background: #aaa4; }
 .preview-empty { padding: 40px 24px; text-align: center; color: var(--muted); margin: auto; }
