@@ -70,21 +70,22 @@ function App(){
   function closePreview(){browserSequence.current++;setPreviewState({tabs:[],activeId:null});}
   function showPreview(next:PreviewTarget){
     const id=++previewIds.current;
-    setPreviewState(old=>{const existing=old.tabs.find(tab=>samePreviewTarget(tab.target,next));return existing
-      ?{tabs:old.tabs.map(tab=>tab.id===existing.id?{...tab,target:next}:tab),activeId:existing.id}
-      :{tabs:[...old.tabs,{id,target:next}],activeId:id};});
+    setPreviewState(old=>{const tabs=next.kind==='web'?old.tabs.filter(tab=>tab.target.kind!=='web'||tab.target.session.sessionId===next.session.sessionId):old.tabs;
+      const existing=tabs.find(tab=>samePreviewTarget(tab.target,next));return existing
+      ?{tabs:tabs.map(tab=>tab.id===existing.id?{...tab,target:next}:tab),activeId:existing.id}
+      :{tabs:[...tabs,{id,target:next}],activeId:id};});
     setSheet(null);
   }
   function closePreviewTab(id:number){setPreviewState(old=>{const index=old.tabs.findIndex(tab=>tab.id===id);if(index<0)return old;const tabs=old.tabs.filter(tab=>tab.id!==id);return {tabs,activeId:old.activeId===id?tabs[Math.min(index,tabs.length-1)]?.id??null:old.activeId};});}
   function fail(e:any){setError(e?.message||'操作失败，请重试');}
   function navigate(next:Route,replace=false){
     history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine},'',location.pathname);
-    rememberLocation(next,machine);closePreview();setSheet(null);setThreadMenu(null);setStatusPanel(null);setRoute(next);
+    rememberLocation(next,machine);setSheet(null);setThreadMenu(null);setStatusPanel(null);setRoute(next);
   }
   function backToProjects(){navigate(home);}
   function backToSessions(){navigate({...home,project});}
   useEffect(()=>{
-    const pop=(e:PopStateEvent)=>{closePreview();setSheet(null);setThreadMenu(null);setStatusPanel(null);const location=parseLocation(e.state);const next=location?.machine===current.current.machine?location.route:home;rememberLocation(next,current.current.machine);setRoute(next);};
+    const pop=(e:PopStateEvent)=>{setSheet(null);setThreadMenu(null);setStatusPanel(null);const location=parseLocation(e.state);const next=location?.machine===current.current.machine?location.route:home;rememberLocation(next,current.current.machine);setRoute(next);};
     window.addEventListener('popstate',pop);return()=>window.removeEventListener('popstate',pop);
   },[]);
   useEffect(()=>{history.replaceState({cmwRoute:route,cmwMachine:machine},'',location.pathname);rememberLocation(route,machine);},[machine]);
@@ -137,8 +138,8 @@ function App(){
   useEffect(()=>{
     setStatusPanel(null);
     imageSequence.current++;imageLoad.current=null;setImageLoading(false);
-    closeBrowser();setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
-    sequence.current++;fileSequence.current++;closePreview();setView(null);setLoading(Boolean(selected));setLimit(20);setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;
+    setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
+    sequence.current++;setView(null);setLoading(Boolean(selected));setLimit(20);setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;
     setDraft(load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
   },[machine,selected,newChat]);
   useEffect(()=>{void refreshSession();},[limit,connected]);
@@ -211,12 +212,12 @@ function App(){
     }else if(current.current.machine===machine&&current.current.selected===id)setNotice('结果待核实，系统不会自动重发。');
     setBusy(false);scheduleRefresh();void list();
   }
-  async function openFile(reference:string){
+  async function openFile(reference:string,ownerMachine=machine,ownerThread=selected){
     const {path,line}=fileReference(reference),request=++fileSequence.current;
-    const next:PreviewTarget={kind:'file',machineId:machine,threadId:selected,path,line,request};
+    const next:PreviewTarget={kind:'file',machineId:ownerMachine,threadId:ownerThread,path,line,request};
     setError('');showPreview(next);
-    try{const file=await call('file.read',{threadId:selected,path});if(stillHere())setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,file}}:tab)}));}
-    catch(e){if(stillHere())setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,error:(e as Error)?.message||'文件读取失败'}}:tab)}));}
+    try{const file=await call('file.read',{threadId:ownerThread,path},ownerMachine);setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,file}}:tab)}));}
+    catch(e){setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,error:(e as Error)?.message||'文件读取失败'}}:tab)}));}
   }
   async function openBrowser(){
     if(!connected||browserBusy||!selected)return;
@@ -365,9 +366,9 @@ function App(){
        selectTab={id=>setPreviewState(old=>({...old,activeId:id}))} closeTab={closePreviewTab}
        compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel)} close={closePreview}>
        {previewState.tabs.map(({id,target})=><div key={id} id={`preview-panel-${id}`} aria-labelledby={`preview-tab-${id}`} className="preview-tab-panel" role="tabpanel" hidden={id!==previewState.activeId}>
-         {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel key={target.request} file={target.file} connected={connected} line={target.line} openFile={openFile}
+         {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel key={target.request} file={target.file} connected={connected} line={target.line} openFile={path=>void openFile(path,target.machineId,target.threadId)}
            readFile={path=>call('file.read',{threadId:target.threadId,path},target.machineId)}
-           read={offset=>call('file.download',{threadId:target.threadId,path:target.file!.path,revision:target.file!.revision,offset},target.machineId)}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''))}>重试</button>}</div>)}
+           read={offset=>call('file.download',{threadId:target.threadId,path:target.file!.path,revision:target.file!.revision,offset},target.machineId)}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''),target.machineId,target.threadId)}>重试</button>}</div>)}
          {target.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer text={target.text} compact={compactPreview}/></Suspense>}
          {target.kind==='web'&&<WebViewer session={target.session} onEnd={closeBrowser}/>}
          {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
