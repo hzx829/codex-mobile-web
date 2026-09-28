@@ -19,7 +19,7 @@ export function ThreadRow({thread,selected,disabled,preference={},time,open,menu
   </button>;
 }
 
-export function ThreadMenu({thread,point,preference,sections,archived,connected,close,change,copy,rename,archive,compact=false}:{thread:Json;point:MenuPoint;preference:ThreadPreference;sections:string[];archived:boolean;connected:boolean;close:()=>void;change:(patch:ThreadPreference)=>void;copy:()=>Promise<void>;rename:(name:string)=>Promise<void>;archive:()=>Promise<void>;compact?:boolean}){
+export function ThreadMenu({thread,point,preference,sections,archived,connected,close,change,copy,rename,archive,openPreview,compact=false}:{thread:Json;point:MenuPoint;preference:ThreadPreference;sections:string[];archived:boolean;connected:boolean;close:()=>void;change:(patch:ThreadPreference)=>void;copy:()=>Promise<void>;rename:(name:string)=>Promise<void>;archive:()=>Promise<void>;openPreview?:()=>void;compact?:boolean}){
   const [mode,setMode]=useState<'menu'|'rename'|'sections'>('menu'),[name,setName]=useState(thread.title),[section,setSection]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   async function run(action:()=>Promise<void>){if(busy)return;setBusy(true);setError('');try{await action();close();}catch(e){setError((e as Error).message||'操作失败，请刷新后重试');}finally{setBusy(false);}}
   function choose(patch:ThreadPreference){change(patch);close();}
@@ -27,6 +27,7 @@ export function ThreadMenu({thread,point,preference,sections,archived,connected,
   return <Popover point={point} title={thread.title} label="会话操作" close={close} className={compact?'thread-menu-compact':''} focusSelector={mode==='menu'?'.menu-item:not(:disabled)':'input'}>
       {error&&<p role="alert" className="error">{error}</p>}
       {mode==='menu'?<>
+        {compact&&openPreview&&item('browser','打开本机网页',()=>{close();openPreview();},!connected)}
         {item('pin',preference.pinned?'取消置顶':'置顶',()=>choose({pinned:!preference.pinned}))}
         {!compact&&item('folder','移至分区',()=>setMode('sections'))}
         {!compact&&item('unread',preference.unread?'标为已读':'标为未读',()=>choose({unread:!preference.unread}))}
