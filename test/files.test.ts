@@ -14,7 +14,7 @@ import {FilePreviewPanel} from '../web/file-preview.js';
 import {fileReference,fileViewer} from '../web/preview-target.js';
 
 test('Windows drive links remain file actions; unsafe protocols and embedded images stay inert',()=>{
-  const render=(text:string)=>renderToStaticMarkup(createElement(SafeMarkdown,{text,openFile:()=>{},onFollowup:()=>{}}));
+  const render=(text:string)=>renderToStaticMarkup(createElement(SafeMarkdown,{text,openFile:()=>{},openPreview:()=>{},onFollowup:()=>{}}));
   for(const path of ['D:/project/Pitch-v2.2.pptx','C:/project/My%20Deck.pptx',String.raw`C:\project\deck.pptx`,'C:%5Cproject%5Cdeck.pptx','<D:/project/My Deck.pptx>','/project/deck.pptx','/C:/Users/NINGMEI/Documents/delegate/codex-mobile-web/.local/config.json','/D:/lingan/lyz-editor-backend/docs/features/organization/WORKSPACE_REVIEW_2026-09-26.md','docs/deck.pptx','C:/project/app.ts:12:3']) {
     assert.match(render(`[文件](${path})`),/<button class="inline-link">文件<\/button>/);
   }
@@ -24,6 +24,10 @@ test('Windows drive links remain file actions; unsafe protocols and embedded ima
   assert.match(render('![演示视频](D:/grab-fin/deliverables/demo-video/Shop-Agent-GrabMart-Clay-v2.mp4)'),/<button class="inline-link" type="button">\[视频：演示视频\]<\/button>/);
   assert.match(render('![成品图](images/cover.png)'),/<button class="inline-link" type="button">\[图片：成品图\]<\/button>/);
   assert.match(render('[官网](https://example.com)'),/<a href="https:\/\/example.com" target="_blank" rel="noreferrer noopener">/);
+  assert.match(render('**http://127.0.0.1:5191/**'),/<button class="inline-link" type="button">http:\/\/127\.0\.0\.1:5191\/ · 打开预览<\/button>/);
+  assert.match(render('[本机页面](http://localhost:5173/app)'),/<button class="inline-link" type="button">本机页面 · 打开预览<\/button>/);
+  assert.match(render('[IPv6 页面](http://[::1]:5173/)'),/<button class="inline-link" type="button">IPv6 页面 · 打开预览<\/button>/);
+  assert.doesNotMatch(render('[其他主机](http://localhost.example.com/)'),/打开预览/);
   assert.doesNotMatch(render('![image](https://example.com/image.png)\n<script>alert(1)</script>'),/<img|<script/);
 });
 

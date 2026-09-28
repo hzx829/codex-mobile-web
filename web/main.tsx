@@ -219,14 +219,15 @@ function App(){
     try{const file=await call('file.read',{threadId:ownerThread,path},ownerMachine);setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,file}}:tab)}));}
     catch(e){setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,error:(e as Error)?.message||'文件读取失败'}}:tab)}));}
   }
-  async function openBrowser(){
+  async function openBrowser(url=browserUrl){
     if(!connected||browserBusy||!selected)return;
     const owner=machine,request=++browserSequence.current;
+    const address=url.trim();setBrowserUrl(address);
     setBrowserRequest(request);setError('');
     try{
-      const result=await openThreadPreview(call,owner,selected,browserUrl.trim(),()=>stillHere()&&request===browserSequence.current);
+      const result=await openThreadPreview(call,owner,selected,address,()=>stillHere()&&request===browserSequence.current);
       if(!result)return;
-      save(previewUrlKey(owner,selected),browserUrl.trim());setBrowserSession(result);showPreview({kind:'web',session:result});
+      save(previewUrlKey(owner,selected),address);setBrowserSession(result);showPreview({kind:'web',session:result});
     }catch(e){if(stillHere()&&request===browserSequence.current)fail(e);}finally{setBrowserRequest(old=>old===request?null:old);}
   }
   function closeBrowser(){const session=browserState;browserSequence.current++;setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});if(session)void call('preview.stop',{sessionId:session.sessionId,threadId:session.threadId},session.machineId).catch(()=>{});}
@@ -318,7 +319,7 @@ function App(){
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={limit>=100} onClick={()=>{sticky.current=false;const el=timeline.current;if(el)scrollAnchor.current={height:el.scrollHeight,top:el.scrollTop,limit:Math.min(100,limit+20),ready:false};setLimit(n=>Math.min(100,n+20));}}>查看更早内容{limit>=100?'（最近 100 轮）':''}</button>}
         {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:view?.turns.map(turn=><section className="turn" key={turn.id}>
-          {groupItems(turn.items).map((group,index)=>group[0].role==='activity'?<details className="activity-group" key={`activity-${index}`}><summary>{turn.status==='inProgress'?'正在处理':'运行记录'} · {group.length} 项<span className="activity-excerpt">{activityLabel[group.at(-1)!.type]||'任务活动'}</span></summary><div className="activity-list">{group.map(item=><details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>)}</div></details>:group.map((item:MessageItem)=><article className={`message ${item.role}`} key={item.id}><SafeMarkdown text={item.text} openFile={openFile} onFollowup={insertFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</article>))}
+          {groupItems(turn.items).map((group,index)=>group[0].role==='activity'?<details className="activity-group" key={`activity-${index}`}><summary>{turn.status==='inProgress'?'正在处理':'运行记录'} · {group.length} 项<span className="activity-excerpt">{activityLabel[group.at(-1)!.type]||'任务活动'}</span></summary><div className="activity-list">{group.map(item=><details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>)}</div></details>:group.map((item:MessageItem)=><article className={`message ${item.role}`} key={item.id}><SafeMarkdown text={item.text} openFile={openFile} openPreview={url=>void openBrowser(url)} onFollowup={insertFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</article>))}
           <div className="turn-status">{turn.status!=='completed'&&(statusLabel[turn.status]||turn.status)}{turn.diff&&<button onClick={()=>showPreview({kind:'diff',threadId:selected,turnId:turn.id,text:turn.diff!})}><Icon name="file" size={14}/>查看修改</button>}</div>{turn.error&&<p className="error">{turn.error}</p>}
         </section>)}
       </div>

@@ -9,9 +9,18 @@ function localMediaPath(value:string|undefined) {
   let decoded=value;try{decoded=decodeURIComponent(value);}catch{}
   return !decoded.startsWith('#')&&!/^[\\/]{2}/.test(decoded)&&(!/^[a-z][a-z\d+.-]*:/i.test(decoded)||/^[a-z]:[\\/]/i.test(decoded));
 }
-export function SafeMarkdown({text,openFile,onFollowup}:{text:string;openFile:(path:string)=>void;onFollowup:(prompt:string)=>void}){
+function localPreviewLink(value:string) {
+  const address=value.replace(/^(https?:\/\/)%5b::1%5d(?=[:/?#]|$)/i,'$1[::1]');
+  try {
+    const url=new URL(address);
+    return (url.protocol==='http:'||url.protocol==='https:')&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)&&!url.username&&!url.password?address:null;
+  }catch{return null;}
+}
+export function SafeMarkdown({text,openFile,openPreview,onFollowup}:{text:string;openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(prompt:string)=>void}){
   return splitFollowups(text).map((part,index)=>part.kind==='followup'?<button className="followup" type="button" key={index} onClick={()=>onFollowup(part.prompt)}>{part.label} ↗</button>:<Markdown key={index} remarkPlugins={[remarkGfm]} urlTransform={(url,key)=>(key==='href'||key==='src')&&windowsFilePath.test(url)?url:defaultUrlTransform(url)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
     if(!href)return <span>{children}</span>;
+    const previewUrl=localPreviewLink(href);
+    if(previewUrl)return <button className="inline-link" type="button" onClick={()=>openPreview(previewUrl)}>{children} · 打开预览</button>;
     if(/^https?:\/\//i.test(href))return <a href={href} target="_blank" rel="noreferrer noopener">{children} ↗</a>;
     if(/^[a-z]+:/i.test(href)&&!windowsFilePath.test(href))return <span>{children}</span>;
     return <button className="inline-link" onClick={()=>openFile(href)}>{children}</button>;
