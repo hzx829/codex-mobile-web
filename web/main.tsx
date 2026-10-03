@@ -312,7 +312,7 @@ function App(){
   const inheritedApproval=newChat?info?.approvalPolicy:view?.approvalPolicy;
   const approvalLabel=inheritedApproval==='never'?'不提示':inheritedApproval==='on-request'?'按需审批':'电脑配置';
   const canWrite=connected&&!busy&&!pending&&!imageLoading&&(newChat?Boolean(newCwd):Boolean(view?.canControl));
-  const effortLabel=({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'极高',max:'最高'} as Json)[effort||(newChat?info?.effort:'')||''];
+  const effortLabel=({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'极高',max:'最高',ultra:'超高'} as Json)[effort||(newChat?info?.effort:'')||''];
   const activeApproval=approval||inheritedApproval;
   const listedThreads=visibleThreads(sessions,preferences,project,archived,searchQuery);
   const visibleTitle=newChat?'新聊天':view?.title||sessions.find(s=>s.id===selected)?.title||'正在打开…';
@@ -380,7 +380,7 @@ function App(){
            {customModel&&<option value={model}>{model}</option>}
          </select></label>
          <details className="other-project"><summary>输入其他模型 ID</summary><label>同一提供商的模型 ID<input disabled={Boolean(view?.activeTurnId)||busy} value={model} onChange={e=>{setModel(e.target.value);setEffort('');}} placeholder="例如自定义模型 ID"/></label></details>
-         <label>思考程度<select disabled={Boolean(view?.activeTurnId)||busy||!modelInfo} value={effort} onChange={e=>setEffort(e.target.value)}><option value="">沿用当前设置</option>{modelInfo?.supportedReasoningEfforts?.map((r:Json)=><option key={r.reasoningEffort} value={r.reasoningEffort}>{({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'更多',max:'最多'} as Json)[r.reasoningEffort]||r.reasoningEffort}</option>)}</select></label>
+         <label>思考程度<select disabled={Boolean(view?.activeTurnId)||busy||!modelInfo} value={effort} onChange={e=>setEffort(e.target.value)}><option value="">沿用当前设置</option>{modelInfo?.supportedReasoningEfforts?.map((r:Json)=><option key={r.reasoningEffort} value={r.reasoningEffort}>{({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'更多',max:'最多',ultra:'超高'} as Json)[r.reasoningEffort]||r.reasoningEffort}</option>)}</select></label>
          <button className="primary" onClick={()=>setSheet(null)}>完成</button>
        </>}
        {sheet==='approval'&&<><p className="muted">{view?.activeTurnId?'当前任务沿用正在使用的许可，结束后可以更换。':'下次发送时使用所选许可。'}</p><label>审批策略<select disabled={Boolean(view?.activeTurnId)||busy} value={approval} onChange={e=>setApproval(e.target.value)}><option value="">沿用当前设置 · {approvalLabel}</option><option value="on-request">按需审批</option><option value="never">不提示审批</option></select></label><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}

@@ -51,7 +51,7 @@ This shows the recommended public HTTPS deployment. TLS ends at the reverse prox
 
 The connector uses local desktop IPC for existing desktop sessions, and a Codex app-server child process for sessions it creates or resumes. If a live owner cannot be reached, it shows history and asks you to confirm that the original task has ended before resuming it here. Active standalone CLI sessions cannot be taken over.
 
-On Windows, an unset `codexBin` uses the newest Codex in the desktop installation before checking PATH. Restart the connector after a desktop update when its tasks are idle. An explicit binary path remains pinned until changed.
+On Windows, an unset `codexBin` uses the newest Codex in the desktop installation before checking PATH. Restart the connector after a desktop update when its tasks are idle. An explicit execution binary path remains pinned until changed. Model and reasoning options are read from the current desktop installation, including when execution stays pinned for compatibility with existing sessions.
 
 The relay keeps connection routes in memory; the connector stores operation IDs and receipts in local SQLite. After reconnecting, the browser fetches current state and checks earlier operations. Uncertain results remain pending rather than triggering an automatic retry. Restarting the connector may interrupt its own app-server tasks; its stop script does not stop the separate Codex desktop process.
 

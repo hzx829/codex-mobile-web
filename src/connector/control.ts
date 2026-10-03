@@ -11,6 +11,7 @@ import { readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus } from '../shared/types.js';
 import {imageDataUrl,MAX_IMAGES} from '../shared/images.js';
 import {contextUsage,accountLimits} from './usage.js';
+import {readModels,reasoningEffort} from './models.js';
 
 function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   if(value===undefined||value===null||value==='')return undefined;
@@ -51,7 +52,7 @@ export class Control extends EventEmitter {
     if(req.action==='info') {
       const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
       const config=await this.runtime.rpc('config/read',{includeLayers:false,cwd});
-      const models=await this.runtime.rpc('model/list',{}).catch(()=>({data:[]}));
+      const models=await readModels(this.runtime);
       const c=config.config||{};
       const projects=await this.projects(c);
       return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',models:models.data||[],generation:this.generation};
@@ -247,7 +248,7 @@ export class Control extends EventEmitter {
       const input:Json[]=text?[{type:'text',text,text_elements:[]}]:[];
       if(images.length) {
         // Unknown/custom providers remain text-first; only expose images when native metadata confirms them.
-        const models=await this.runtime.rpc('model/list',{});
+        const models=await readModels(this.runtime);
         const model=models.data?.find((m:Json)=>m.model===(!session.activeTurnId&&p.model||session.model));
         if(!model?.inputModalities?.includes('image'))throw new BridgeError('unsupported','当前模型未确认图片能力');
         input.push(...images.map((url:string)=>({type:'image',url})));
@@ -260,7 +261,7 @@ export class Control extends EventEmitter {
       } else {
         const request:Json={threadId:id,input};
         if(p.model)request.model=textRequired(p.model,'模型',200);
-        if(p.effort){if(!['none','minimal','low','medium','high','xhigh','max'].includes(p.effort))throw new BridgeError('invalid','推理档位无效');request.effort=p.effort;}
+        if(p.effort)request.effort=await reasoningEffort(this.runtime,p.effort,request.model||session.model);
         const policy=approvalPolicy(p.approvalPolicy);if(policy)request.approvalPolicy=policy;
         if(session.source==='desktop')result=await this.desktop.request('thread-follower-start-turn',{...context,turnStart:{request:{...request,clientUserMessageId:p.opId},context:{inheritThreadSettings:true}}});
         else {result=await this.runtime.rpc('turn/start',request);if(result?.turn?.id)this.starting.set(id,result.turn.id);}
