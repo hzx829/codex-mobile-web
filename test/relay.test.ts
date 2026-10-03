@@ -78,6 +78,12 @@ test('token gate, machine routing and receipt recovery after phone disconnect',a
     const second=await peer('phone');const response=waitFrame(second,m=>m.id==='retry');second.send(JSON.stringify({...request,id:'retry'}));
     assert.equal((await response).result.state,'accepted');assert.equal(executions,1);
     const offline=waitFrame(second,m=>m.id==='no-pc');second.send(JSON.stringify({...request,id:'no-pc',machineId:'missing'}));assert.equal((await offline).error.code,'offline');
+    const image=`data:image/png;base64,${Buffer.alloc(2*1024*1024).toString('base64')}`;
+    const imageRequest=JSON.stringify({...request,id:'image',payload:{opId:`${Date.now()}:${randomUUID()}`,images:[image,image]}});
+    assert.ok(Buffer.byteLength(imageRequest)<MAX_FRAME);
+    const received=waitFrame(second,m=>m.type==='received'&&m.id==='image'),imageResult=waitFrame(second,m=>m.type==='response'&&m.id==='image');
+    second.send(imageRequest);
+    await received;assert.equal((await imageResult).result.state,'accepted');
     assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status,200);
   }finally{await relay.close();ledger.close();}
 });

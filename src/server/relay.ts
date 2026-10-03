@@ -65,6 +65,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       }
       if(p.role==='phone'&&m.type==='request') {
         if(typeof m.id!=='string'||m.id.length>100||typeof m.action!=='string'||!m.payload||typeof m.payload!=='object'){ws.close(4400);return;}
+        if(m.action==='turn.send'&&Array.isArray(m.payload.images)&&m.payload.images.length)send(ws,{type:'received',id:m.id});
         if(m.action==='preview.start'||m.action==='preview.stop')try{
           m.payload.threadId=textRequired(m.payload.threadId,'会话');
           if(m.action==='preview.stop')m.payload.sessionId=textRequired(m.payload.sessionId,'预览会话');

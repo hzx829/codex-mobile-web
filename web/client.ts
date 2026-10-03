@@ -17,6 +17,12 @@ export class Client {
     ws.onmessage=e=>{
       let m:Json;try{m=JSON.parse(e.data);}catch{return;}
       if(m.type==='ready'){this.ready=true;this.retry=0;this.status('online');}
+      if(m.type==='received'){
+        const p=this.pending.get(m.id);if(!p)return;
+        clearTimeout(p.timer);
+        p.timer=setTimeout(()=>{this.pending.delete(m.id);p.reject({code:'timeout',message:'回执超时，请核实操作结果',uncertain:true});},45_000);
+        return;
+      }
       if(m.type==='response') {
         const p=this.pending.get(m.id);if(!p)return;clearTimeout(p.timer);this.pending.delete(m.id);
         if(m.error)p.reject(m.error);else p.resolve(m.result);return;
@@ -36,8 +42,13 @@ export class Client {
   request(action:RequestAction,payload:Json,machineId:string):Promise<any> {
     if(!this.ready)return Promise.reject({code:'offline',message:'电脑尚未连接'});
     return new Promise((resolve,reject)=>{
-      const id=uuid();const timer=setTimeout(()=>{this.pending.delete(id);reject({code:'timeout',message:'回执超时，请核实操作结果',uncertain:true});},45_000);
-      this.pending.set(id,{resolve,reject,timer});this.ws!.send(JSON.stringify({type:'request',id,machineId,action,payload}));
+      // The timer starts before the browser finishes sending the WebSocket frame.
+      // Image data can spend much of the ordinary 45 seconds on a slow uplink.
+      const timeout=action==='turn.send'&&Array.isArray(payload.images)&&payload.images.length?240_000:45_000;
+      const id=uuid();const timer=setTimeout(()=>{this.pending.delete(id);reject({code:'timeout',message:'回执超时，请核实操作结果',uncertain:true});},timeout);
+      this.pending.set(id,{resolve,reject,timer});
+      try{this.ws!.send(JSON.stringify({type:'request',id,machineId,action,payload}));}
+      catch(e){clearTimeout(timer);this.pending.delete(id);reject(e);}
     });
   }
   onPreview(listener:(message:Json)=>void){this.previewListeners.add(listener);return()=>{this.previewListeners.delete(listener);};}
