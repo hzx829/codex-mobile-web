@@ -34,7 +34,7 @@ export function normalizeSession(raw:Json,source:SessionView['source'],requests:
     const id=t.turnId||t.id;
     const items:MessageItem[]=(t.items||[]).map(normalizeItem);
     if(t.params?.input?.length&&!items.some(i=>i.role==='user'))items.unshift(normalizeItem({id:id+':input',type:'userMessage',content:t.params.input}));
-    return {id:id||`historical-${index}`,status:t.status,items,diff:bounded(t.diff)||undefined,error:t.error?.message};
+    return {id:id||`historical-${index}`,status:t.status,items,canFork:Boolean(id)&&t.status==='completed',diff:bounded(t.diff)||undefined,error:t.error?.message};
   });
   const runtimeActive=raw.threadRuntimeStatus?.type==='active'||raw.status?.type==='active';
   const unresolvedActive=runtimeActive&&!active;

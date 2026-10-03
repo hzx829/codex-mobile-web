@@ -17,7 +17,7 @@ import {ThreadMenu,ThreadRow} from './thread-menu';
 import type {MenuPoint} from './popover';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {groupThreads,visibleThreads,rememberThreads,saveThread,type ThreadPreferences,type ThreadPreference} from './thread-preferences';
-import type {Json,SessionView,RequestAction,MessageItem} from '../src/shared/types';
+import type {Json,SessionView,RequestAction,MessageItem,TurnView} from '../src/shared/types';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -166,12 +166,17 @@ function App(){
   function insertFollowup(prompt:string){if(!draft.trimEnd().endsWith(prompt))editDraft(draft.trim()?`${draft.trimEnd()}\n\n${prompt}`:prompt);setNotice('已填入输入框，确认后发送。');composer.current?.focus();}
   function setOperation(value:Json|null){save(pendingKey,value);if(stillHere())setPending(value);}
   function accepted(record:Json,result:Json){
+    if(record.action==='session.fork'&&result.threadId){
+      setOperation(null);
+      if(stillHere())navigate({...route,thread:result.threadId,newChat:false});
+      void list();return;
+    }
     if(record.action==='session.create'&&record.submittedText!==undefined&&result.threadId){
       save(`draft:${machine}:${result.threadId}`,record.submittedText);save(draftKey,'');
       setOperation(null);if(stillHere()){setDraft('');navigate({...route,thread:result.threadId,newChat:false},true);setNotice(record.imageCount?'会话已建立，文字已保留；附图请重新选择后发送。':'会话已建立，输入已保留，请点击发送。');}return;
     }
     if(record.action==='turn.send'&&load(draftKey,'')===record.submittedText){save(draftKey,'');if(stillHere()){setDraft('');setImages([]);}}
-    setOperation(null);if(!stillHere())return;setNotice(result.kind==='stop_requested'?'已请求停止':result.kind==='response_submitted'?'回应已提交':'Codex 已接受');
+    setOperation(null);if(!stillHere())return;setNotice(result.kind==='stop_requested'?'已请求停止':result.kind==='response_submitted'?'回应已提交':result.kind==='edited'?'已重新发送':'Codex 已接受');
     scheduleRefresh();void list();
   }
   async function checkPending(){
@@ -180,7 +185,7 @@ function App(){
   }
   async function mutate(action:RequestAction,payload:Json){
     if(busy||pending)return;
-    const record={opId:operationId(),action,submittedText:action==='turn.send'?payload.text:undefined};
+    const record={opId:operationId(),action,submittedText:action==='turn.send'||action==='turn.edit'?payload.text:undefined};
     setBusy(true);setError('');setNotice('正在提交…');setOperation(record);
     try{
       const result=await call(action,{...payload,opId:record.opId});
@@ -251,12 +256,23 @@ function App(){
   }
   function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');history.replaceState({cmwRoute:home,cmwMachine:id},'',location.pathname);rememberLocation(home,id);setMachine(id);setRoute(home);}
   function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);changeMachine('');}
-  async function copyId(id:string){
-      if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(id);
+  async function copyText(text:string){
+      if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
       else {
-        const input=document.createElement('textarea');input.value=id;input.style.position='fixed';input.style.opacity='0';document.body.append(input);input.select();
+        const input=document.createElement('textarea');input.value=text;input.style.position='fixed';input.style.opacity='0';document.body.append(input);input.select();
         try{if(!document.execCommand('copy'))throw Error('copy failed');}finally{input.remove();}
       }
+  }
+  function renderMessage(item:MessageItem,turn:TurnView){
+    const body=<><SafeMarkdown text={item.text} openFile={openFile} openPreview={url=>void openBrowser(url)} onFollowup={insertFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</>;
+    if(item.role!=='user')return <article className={`message ${item.role}`} key={item.id}>{body}</article>;
+    const latestUserTurn=view?.turns.filter(value=>value.items.some(entry=>entry.role==='user')).at(-1)?.id;
+    const forkReason=turn.canFork?'':turn.status==='completed'?'连接器尚未更新，请稍后刷新页面':'请等这一轮完成后再分叉';
+    const editReason=!turn.canFork?turn.status==='completed'?'连接器尚未更新，请稍后刷新页面':'请等这一轮完成后再改写':view?.running?'请等当前任务结束后再改写':view?.source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(value=>value.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':view?.source==='desktop'&&turn.id!==latestUserTurn?'桌面会话目前只能改写最近一条用户消息':'';
+    return <UserMessage key={item.id} text={item.text} forkReason={forkReason} editReason={editReason} disabled={!connected||busy||Boolean(pending)} blocked={setNotice}
+      copy={()=>void copyText(item.text).then(()=>setNotice('已复制消息文字')).catch(()=>setError('复制失败，请长按消息选择文字'))}
+      fork={()=>void mutate('session.fork',{threadId:selected,lastTurnId:turn.id})}
+      resend={text=>mutate('turn.edit',{...target(),turnId:turn.id,itemId:item.id,text})}>{body}</UserMessage>;
   }
   function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
   function openStatus(element:HTMLElement){if(selected)setStatusPanel({machine,thread:selected,point:headerPoint(element)});}
@@ -319,7 +335,7 @@ function App(){
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={limit>=100} onClick={()=>{sticky.current=false;const el=timeline.current;if(el)scrollAnchor.current={height:el.scrollHeight,top:el.scrollTop,limit:Math.min(100,limit+20),ready:false};setLimit(n=>Math.min(100,n+20));}}>查看更早内容{limit>=100?'（最近 100 轮）':''}</button>}
         {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:view?.turns.map(turn=><section className="turn" key={turn.id}>
-          {groupItems(turn.items).map((group,index)=>group[0].role==='activity'?<details className="activity-group" key={`activity-${index}`}><summary>{turn.status==='inProgress'?'正在处理':'运行记录'} · {group.length} 项<span className="activity-excerpt">{activityLabel[group.at(-1)!.type]||'任务活动'}</span></summary><div className="activity-list">{group.map(item=><details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>)}</div></details>:group.map((item:MessageItem)=><article className={`message ${item.role}`} key={item.id}><SafeMarkdown text={item.text} openFile={openFile} openPreview={url=>void openBrowser(url)} onFollowup={insertFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</article>))}
+          {groupItems(turn.items).map((group,index)=>group[0].role==='activity'?<details className="activity-group" key={`activity-${index}`}><summary>{turn.status==='inProgress'?'正在处理':'运行记录'} · {group.length} 项<span className="activity-excerpt">{activityLabel[group.at(-1)!.type]||'任务活动'}</span></summary><div className="activity-list">{group.map(item=><details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>)}</div></details>:group.map((item:MessageItem)=>renderMessage(item,turn)))}
           <div className="turn-status">{turn.status!=='completed'&&(statusLabel[turn.status]||turn.status)}{turn.diff&&<button onClick={()=>showPreview({kind:'diff',threadId:selected,turnId:turn.id,text:turn.diff!})}><Icon name="file" size={14}/>查看修改</button>}</div>{turn.error&&<p className="error">{turn.error}</p>}
         </section>)}
       </div>
@@ -340,8 +356,8 @@ function App(){
       </div>
     </>}</main>
 
-     {threadMenu&&threadMenu.machine===machine&&<ThreadMenu key={`${machine}:${threadMenu.thread.id}`} thread={threadMenu.thread} point={threadMenu.point} preference={preferences[threadMenu.thread.id]||{}} sections={[...new Set(Object.values(preferences).map(p=>p.section).filter((s):s is string=>Boolean(s)))]} archived={threadMenu.archived} compact={threadMenu.compact} connected={connected} close={()=>setThreadMenu(current=>current===threadMenu?null:current)} change={patch=>changePreference(threadMenu.thread.id,patch,threadMenu.thread)} copy={()=>copyId(threadMenu.thread.id)} rename={name=>changeThread('session.rename',threadMenu.thread,{name})} archive={()=>changeThread(threadMenu.archived?'session.unarchive':'session.archive',threadMenu.thread)} openPreview={threadMenu.compact?()=>setSheet('browser'):undefined}/>}
-     {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyId(selected)} read={()=>call('session.status',{threadId:selected})}/>}
+     {threadMenu&&threadMenu.machine===machine&&<ThreadMenu key={`${machine}:${threadMenu.thread.id}`} thread={threadMenu.thread} point={threadMenu.point} preference={preferences[threadMenu.thread.id]||{}} sections={[...new Set(Object.values(preferences).map(p=>p.section).filter((s):s is string=>Boolean(s)))]} archived={threadMenu.archived} compact={threadMenu.compact} connected={connected} close={()=>setThreadMenu(current=>current===threadMenu?null:current)} change={patch=>changePreference(threadMenu.thread.id,patch,threadMenu.thread)} copy={()=>copyText(threadMenu.thread.id)} rename={name=>changeThread('session.rename',threadMenu.thread,{name})} archive={()=>changeThread(threadMenu.archived?'session.unarchive':'session.archive',threadMenu.thread)} openPreview={threadMenu.compact?()=>setSheet('browser'):undefined}/>}
+     {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
      {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',model:'模型与思考程度',approval:'许可',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
        {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
       {sheet==='computer'&&<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>}
@@ -378,6 +394,22 @@ function App(){
   </div>;
 }
 function IconButton({icon,label,onClick,disabled=false,className=''}:{icon:IconName;label:string;onClick:()=>void;disabled?:boolean;className?:string}){return <button type="button" className={`icon-button ${className}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}><Icon name={icon}/></button>;}
+function UserMessage({text,forkReason,editReason,disabled,blocked,copy,fork,resend,children}:{text:string;forkReason:string;editReason:string;disabled:boolean;blocked:(reason:string)=>void;copy:()=>void;fork:()=>void;resend:(text:string)=>Promise<void>;children:ReactNode}){
+  const [editing,setEditing]=useState(false),[draft,setDraft]=useState(text);
+  const submitting=useRef(false);
+  return <div className="user-entry">{editing?<form className="edit-message" onSubmit={e=>{e.preventDefault();if(!draft.trim()||submitting.current)return;submitting.current=true;void resend(draft).finally(()=>{submitting.current=false;});}}>
+    <textarea aria-label="编辑消息" autoFocus value={draft} onChange={e=>setDraft(e.target.value)} disabled={disabled} rows={4}/>
+    <p>将覆盖这条消息及后续聊天；原附件会保留，文件改动不会撤销。</p>
+    <div><button type="button" disabled={disabled} onClick={()=>setEditing(false)}>取消</button><button className="primary" disabled={disabled||!draft.trim()}>重发</button></div>
+  </form>:<>
+    <article className="message user">{children}</article>
+    {text&&<div className="user-actions">
+      <IconButton icon="copy" label="复制消息文字" onClick={copy}/>
+      <IconButton icon="fork" label={forkReason||'从这轮分叉'} disabled={disabled} onClick={()=>forkReason?blocked(forkReason):fork()}/>
+      <IconButton icon="edit" label={editReason||'编辑并重发消息'} disabled={disabled} onClick={()=>{if(editReason){blocked(editReason);return;}setDraft(text);setEditing(true);}}/>
+    </div>}
+  </>}</div>;
+}
 function MenuItem({icon,children,onClick,disabled=false}:{icon:IconName;children:ReactNode;onClick:()=>void;disabled?:boolean}){return <button className="menu-item" onClick={onClick} disabled={disabled}><Icon name={icon} size={21}/><span className="menu-copy">{children}</span></button>;}
 function SheetPanel({title,close,children,className=''}:{title:string;close:()=>void;children:ReactNode;className?:string}){
   const panel=useRef<HTMLElement>(null);

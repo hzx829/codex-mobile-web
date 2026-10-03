@@ -1,5 +1,5 @@
 import type {ReactNode} from 'react';
-export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield';
+export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit';
 export function Icon({name,size=24}:{name:IconName;size?:number}) {
   const paths:Record<IconName,ReactNode>={
     back:<><path d="m11 5-7 7 7 7M4 12h16"/></>,
@@ -26,6 +26,8 @@ export function Icon({name,size=24}:{name:IconName;size?:number}) {
     archive:<><rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v13h14V8M9 12h6"/></>,
     unread:<circle cx="12" cy="12" r="9"/>,
     shield:<><path d="m12 2 9 4v6c0 5-9 10-9 10S3 17 3 12V6l9-4Z"/><path d="m8 12 3 3 5-6"/></>,
+    fork:<><path d="M7 3v7a5 5 0 0 0 5 5h5M7 21v-6a5 5 0 0 1 5-5h5"/><circle cx="19" cy="10" r="2"/><circle cx="19" cy="15" r="2"/></>,
+    edit:<><path d="M4 20h4l11-11a2.1 2.1 0 0 0-4-4L4 16v4ZM13 7l4 4"/></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }

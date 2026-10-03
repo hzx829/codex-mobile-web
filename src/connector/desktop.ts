@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { BridgeError, type Json } from '../shared/types.js';
 
 // Protocol versions verified against Codex Desktop 26.901.6511.0. See SOURCES.md.
-const versions: Record<string, number> = { 'thread-stream-state-changed': 11, 'thread-follower-start-turn': 2, 'thread-follower-interrupt-turn': 4 };
+const versions: Record<string, number> = { 'thread-stream-state-changed': 11, 'thread-follower-start-turn': 2, 'thread-follower-interrupt-turn': 4, 'thread-follower-edit-last-user-turn': 2 };
 export function applyPatches(state: Json, patches: Json[]) {
   const next = structuredClone(state);
   for (const p of patches) {

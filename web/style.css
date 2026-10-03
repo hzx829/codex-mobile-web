@@ -106,6 +106,15 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
 .turn { margin-bottom: 28px; }
 .message { font-size: 15px; line-height: 1.8; overflow-wrap: anywhere; margin: 0 0 25px; }
 .message.user { margin-left: auto; width: fit-content; max-width: 88%; background: #f0f0f0; border-radius: 23px; padding: 11px 18px; }
+.user-entry { margin-bottom: 25px; }
+.user-entry .message { margin-bottom: 0; }
+.user-actions { display: flex; justify-content: flex-end; padding-top: 5px; color: #777; }
+.user-actions .icon-button { min-width: 36px; width: 36px; height: 32px; padding: 7px; }
+.edit-message { width: min(100%, 640px); margin-left: auto; padding: 12px; border: 1px solid #e5e5e5; border-radius: 18px; background: #fff; }
+.edit-message textarea { width: 100%; min-height: 110px; resize: vertical; border: 0; outline: 0; font: inherit; line-height: 1.6; }
+.edit-message p { margin: 5px 0 12px; color: #777; font-size: 12px; }
+.edit-message > div { display: flex; justify-content: flex-end; align-items: center; gap: 12px; }
+.edit-message .primary { padding: 8px 16px; }
 .message.user p { margin: 0; }
 .message.assistant > :first-child { margin-top: 0; }
 .message.assistant > :last-child { margin-bottom: 0; }
@@ -128,7 +137,7 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
 .activity pre { color: #555; margin-bottom: 8px; }
 .file-link { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; font-size: 12px; background: #f4f4f4; margin: 3px; }
 .followup { border: 1px solid #e5e5e5; background: #fff; font-size: 13px; line-height: 1.4; padding: 9px 13px; margin: 5px 0 12px; }
-.turn-status { display: flex; align-items: center; gap: 14px; color: #969696; font-size: 11px; }
+.turn-status { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; color: #969696; font-size: 11px; }
 .turn-status:empty { display: none; }
 .turn-status button { font-size: 12px; padding: 2px 0; color: #777; display: flex; gap: 5px; align-items: center; }
 .inline-link { border: 0; padding: 0; background: none; font: inherit; text-decoration: underline; display: inline; }

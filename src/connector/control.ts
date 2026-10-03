@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { AppServer } from './app-server.js';
 import { Desktop } from './desktop.js';
 import { Ledger } from './ledger.js';
-import { normalizeSession } from './normalize.js';
+import { desktopTurns, normalizeSession } from './normalize.js';
 import { approvalResult } from './approvals.js';
 import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
 import { nativeProjects, indexedSessions } from './projects.js';
@@ -44,7 +44,7 @@ export class Control extends EventEmitter {
   async handle(req:BridgeRequest):Promise<any> {
     const p=req.payload||{};
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
-    if(['session.create','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.stop','request.respond'].includes(req.action)) {
+    if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.edit','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,()=>this.mutate(req.action,p)));
     }
@@ -141,6 +141,26 @@ export class Control extends EventEmitter {
       }
     }
   }
+  private editedInput(raw:Json,turnId:string,itemId:string,text:string):{input:Json[];numTurns:number} {
+    const turns:Json[]=raw.turnHistory?.kind==='canonical'?desktopTurns(raw):raw.turns||[];
+    const index=turns.findIndex(value=>(value.turnId||value.id)===turnId),turn=turns[index];
+    if(!turn||turn.status!=='completed')throw new BridgeError('changed','原消息已变化，请刷新后重试');
+    if(turns.slice(index).some(value=>value.status==='inProgress'))throw new BridgeError('active','请等当前任务结束后再编辑');
+    if(turn.items?.filter((value:Json)=>value.type==='userMessage').length>1)throw new BridgeError('unsupported','这轮有多条用户消息，暂不能编辑');
+    const item=turn.items?.find((value:Json)=>value.id===itemId&&value.type==='userMessage');
+    const original=item?.content||(itemId===`${turnId}:input`?turn.params?.input:null);
+    if(!Array.isArray(original)||!original.length)throw new BridgeError('changed','原消息已变化，请刷新后重试');
+    const allowed=new Set(['text','image','localImage','audio','localAudio','skill','mention']);
+    if(original.some((value:Json)=>!allowed.has(value.type)))throw new BridgeError('unsupported','这条消息包含暂不能重发的附件');
+    let replaced=false;
+    const input=original.flatMap((value:Json)=>{
+      if(value.type!=='text')return [value];
+      if(replaced)return [];
+      replaced=true;return [{type:'text',text,text_elements:[]}];
+    });
+    if(!replaced)input.unshift({type:'text',text,text_elements:[]});
+    return {input,numTurns:turns.length-index};
+  }
   private async mutate(action:string,p:Json):Promise<Json> {
     if(action==='session.create') {
       const cwd=await projectDirectory(textRequired(p.cwd,'项目目录'));
@@ -151,6 +171,15 @@ export class Control extends EventEmitter {
       this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider};
     }
     const id=textRequired(p.threadId,'会话');
+    if(action==='session.fork') {
+      const lastTurnId=textRequired(p.lastTurnId,'分叉位置',200);
+      const r=await this.runtime.rpc('thread/fork',{threadId:id,lastTurnId});
+      if(!r?.thread?.id)throw new BridgeError('unexpected','分叉结果未返回新会话，请刷新列表核实',true);
+      const forkId=r.thread.id;
+      this.loaded.add(forkId);this.ledger.claim(forkId);
+      this.settings.set(forkId,{model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy,sessionId:r.thread.sessionId||forkId});
+      this.emit('change',forkId);return {threadId:forkId};
+    }
     if(action==='session.rename') {
       const name=textRequired(p.name,'会话名称',200);
       await this.runtime.rpc('thread/name/set',{threadId:id,name});
@@ -178,6 +207,25 @@ export class Control extends EventEmitter {
     if(p.generation!==this.generation||p.source!==session.source)throw new BridgeError('changed','连接状态已改变，请刷新任务后重试');
     const context={conversationId:id,hostId:this.desktop.states.get(id)?.hostId||'local'};
     if(session.source==='desktop')await this.desktop.request('thread-owner-discovery',context,1500);
+    if(action==='turn.edit') {
+      if(session.running||p.expectedTurnId!==session.activeTurnId)throw new BridgeError('active','请等当前任务结束后再编辑');
+      const turnId=textRequired(p.turnId,'轮次',200),itemId=textRequired(p.itemId,'消息',200),text=textRequired(p.text,'输入');
+      if(session.source==='desktop') {
+        const latest=session.turns.filter(turn=>turn.items.some(item=>item.role==='user')).at(-1);
+        if(latest?.id!==turnId)throw new BridgeError('unsupported','桌面会话目前只能编辑最近一条用户消息');
+        await this.desktop.request('thread-follower-edit-last-user-turn',{...context,turnId,message:text});
+      } else {
+        const {raw}=await this.runtimeThread(id,100);
+        if(raw.historyMode==='paginated')throw new BridgeError('unsupported','当前 Codex 版本暂不能原地编辑分页会话');
+        const {input,numTurns}=this.editedInput(raw,turnId,itemId,text);
+        await this.runtime.rpc('thread/rollback',{threadId:id,numTurns});
+        this.contexts.delete(id);
+        for(const turn of raw.turns.slice(-numTurns))this.diffs.delete(turn.id||turn.turnId);
+        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);}
+        catch {this.emit('change',id);throw new BridgeError('partial','后续聊天已回退，但重发未获确认。请刷新会话核实后再发送。',true);}
+      }
+      this.emit('change',id);return {threadId:id,kind:'edited'};
+    }
     if(action==='turn.send'||action==='turn.stop') {
       if(p.expectedTurnId!==session.activeTurnId)throw new BridgeError('changed','任务已发生变化，输入已保留，请刷新后发送');
       if(action==='turn.stop') {

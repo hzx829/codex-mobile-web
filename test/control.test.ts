@@ -127,6 +127,104 @@ test('thread rename/archive/unarchive use native metadata methods and replay the
   }finally{control.close();}
 });
 
+test('fork creates a managed thread through the selected completed turn and replays its receipt',async()=>{
+  class Runtime extends EventEmitter{
+    requests=new Map();calls:any[]=[];
+    async rpc(method:string,params:any){
+      this.calls.push({method,params});
+      if(method==='thread/fork')return {thread:{id:'branch',sessionId:'branch-session'},model:'model-a',modelProvider:'openai',approvalPolicy:'on-request'};
+      if(method==='thread/read')return {thread:{id:'branch',sessionId:'branch-session',turns:[{id:'t1',status:'completed',items:[]}]}};
+      assert.fail(method);
+    }
+    close(){}
+  }
+  class Desktop extends EventEmitter{clientId='desktop';states=new Map();async follow(){assert.fail('fork should leave the source desktop session untouched');}close(){}}
+  const runtime=new Runtime(),ledger=new Ledger(':memory:'),control=new Control(ledger,runtime as any,new Desktop() as any);
+  try{
+    const request={id:'fork',action:'session.fork' as const,payload:{threadId:'source',lastTurnId:'t1',opId:`${Date.now()}:${randomUUID()}`}};
+    const first=await control.handle(request);
+    assert.deepEqual(first,{state:'accepted',threadId:'branch'});
+    assert.deepEqual(await control.handle(request),first);
+    assert.deepEqual(runtime.calls,[{method:'thread/fork',params:{threadId:'source',lastTurnId:'t1'}}]);
+    assert.equal(ledger.owns('branch'),true);
+    const branch=await control.read('branch');
+    assert.equal(branch.source,'connector');assert.equal(branch.sessionId,'branch-session');assert.equal(branch.canControl,true);
+    assert.equal(branch.turns[0].canFork,true);
+  }finally{control.close();}
+});
+
+test('editing a connector thread rolls back the selected turn and later history before resending',async()=>{
+  class Runtime extends EventEmitter{
+    requests=new Map();calls:any[]=[];
+    turns=[{id:'earlier',status:'completed',items:[{id:'first',type:'userMessage',content:[{type:'text',text:'first',text_elements:[]}]}]},{id:'chosen',status:'completed',items:[{id:'prompt',type:'userMessage',content:[{type:'text',text:'old',text_elements:[]},{type:'localImage',path:'C:/image.png'}]}]},{id:'later',status:'completed',items:[{id:'last',type:'userMessage',content:[{type:'text',text:'later',text_elements:[]}]}]}];
+    async rpc(method:string,params:any){
+      this.calls.push({method,params});
+      if(method==='thread/read')return {thread:{id:'s',historyMode:'legacy',turns:this.turns}};
+      if(method==='thread/rollback'){this.turns=this.turns.slice(0,-params.numTurns);return {thread:{id:'s',turns:this.turns}};}
+      if(method==='turn/start')return {turn:{id:'edited-turn'}};
+      assert.fail(method);
+    }
+    close(){}
+  }
+  class Desktop extends EventEmitter{clientId='';states=new Map();async follow(){assert.fail('connector-owned edit must not use desktop');}close(){}}
+  const runtime=new Runtime(),control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any);
+  try{
+    (control as any).loaded.add('s');
+    const request={id:'edit',action:'turn.edit' as const,payload:{threadId:'s',source:'connector',generation:control.generation,expectedTurnId:null,turnId:'chosen',itemId:'prompt',text:'revised',opId:`${Date.now()}:${randomUUID()}`}};
+    const sent=await control.handle(request);
+    assert.deepEqual(sent,{state:'accepted',threadId:'s',kind:'edited'});
+    assert.deepEqual(await control.handle(request),sent);
+    assert.deepEqual(runtime.calls.filter(call=>call.method==='thread/rollback'||call.method==='turn/start'),[
+      {method:'thread/rollback',params:{threadId:'s',numTurns:2}},
+      {method:'turn/start',params:{threadId:'s',input:[{type:'text',text:'revised',text_elements:[]},{type:'localImage',path:'C:/image.png'}]}},
+    ]);
+    assert.deepEqual(runtime.turns.map(turn=>turn.id),['earlier']);
+  }finally{control.close();}
+});
+
+test('a failed resend after editing leaves an uncertain receipt and never rolls back twice',async()=>{
+  class Runtime extends EventEmitter{
+    requests=new Map();calls:string[]=[];
+    async rpc(method:string){
+      this.calls.push(method);
+      if(method==='thread/read')return {thread:{id:'s',historyMode:'legacy',turns:[{id:'t',status:'completed',items:[{id:'u',type:'userMessage',content:[{type:'text',text:'old'}]}]}]}};
+      if(method==='thread/rollback')return {thread:{id:'s',turns:[]}};
+      if(method==='turn/start')throw new Error('connection lost');
+      assert.fail(method);
+    }
+    close(){}
+  }
+  class Desktop extends EventEmitter{clientId='';states=new Map();close(){}}
+  const runtime=new Runtime(),control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any);
+  try{
+    (control as any).loaded.add('s');
+    const request={id:'edit',action:'turn.edit' as const,payload:{threadId:'s',source:'connector',generation:control.generation,expectedTurnId:null,turnId:'t',itemId:'u',text:'new',opId:`${Date.now()}:${randomUUID()}`}};
+    const result=await control.handle(request);
+    assert.equal(result.state,'uncertain');
+    assert.match(result.error.message,/后续聊天已回退/);
+    assert.deepEqual(await control.handle(request),result);
+    assert.equal(runtime.calls.filter(method=>method==='thread/rollback').length,1);
+    assert.equal(runtime.calls.filter(method=>method==='turn/start').length,1);
+  }finally{control.close();}
+});
+
+test('editing a desktop thread uses its owner and rejects older messages',async()=>{
+  class Runtime extends EventEmitter{requests=new Map();rpc(){assert.fail('desktop edit must not mutate a shadow runtime');}close(){}}
+  class Desktop extends EventEmitter{
+    clientId='desktop';states=new Map([['s',{hostId:'local'}]]);calls:any[]=[];
+    async follow(){return {id:'s',turns:[{id:'old',status:'completed',items:[{id:'u1',type:'userMessage',content:[{type:'text',text:'first'}]}]},{id:'latest',status:'completed',items:[{id:'u2',type:'userMessage',content:[{type:'text',text:'second'}]}]}]};}
+    async request(method:string,params:any){this.calls.push({method,params});return {ok:true};}close(){}
+  }
+  const desktop=new Desktop(),control=new Control(new Ledger(':memory:'),new Runtime() as any,desktop as any);
+  const edit=(turnId:string,itemId:string)=>control.handle({id:randomUUID(),action:'turn.edit',payload:{threadId:'s',source:'desktop',generation:control.generation,expectedTurnId:null,turnId,itemId,text:'revised',opId:`${Date.now()}:${randomUUID()}`}});
+  try{
+    const older=await edit('old','u1');assert.equal(older.state,'failed');assert.equal(older.error.code,'unsupported');
+    assert.equal(desktop.calls.some(call=>call.method==='thread-follower-edit-last-user-turn'),false);
+    const latest=await edit('latest','u2');assert.equal(latest.state,'accepted');
+    assert.deepEqual(desktop.calls.at(-1),{method:'thread-follower-edit-last-user-turn',params:{conversationId:'s',hostId:'local',turnId:'latest',message:'revised'}});
+  }finally{control.close();}
+});
+
 test('archive rejects a running thread even before its active turn is available',async()=>{
   class Runtime extends EventEmitter{requests=new Map();rpc(){assert.fail('must not archive a running thread');}close(){}}
   class Desktop extends EventEmitter{clientId='desktop';states=new Map();turns:any[]=[];async follow(){return {id:'s',status:{type:'active'},turns:this.turns,requests:[]};}close(){}}
