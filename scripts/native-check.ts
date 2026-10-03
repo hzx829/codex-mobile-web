@@ -10,6 +10,7 @@ import {randomUUID} from 'node:crypto';
 import {AppServer,resolveCodex} from '../src/connector/app-server.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
+import {indexedSessions} from '../src/connector/projects.js';
 import type {Json} from '../src/shared/types.js';
 const dir=await mkdtemp(join(tmpdir(),'cmw-native-')),home=join(dir,'codex'),project=join(dir,'project');await mkdir(home);await mkdir(project);
 const localConfig=JSON.parse(await readFile('.local/config.json','utf8').catch(()=>'{}'));
@@ -54,16 +55,37 @@ try{
   const final=await control.read(view.id);assert.equal(final.activeTurnId,null);assert.equal(final.canControl,true);
   const original=final.turns.at(-1)!,message=original.items.find(item=>item.role==='user')!;
   assert.equal(original.canFork,true);
+  const laterDone=event('turn/completed',p=>p.threadId===view.id);
+  const later=await control.handle({id:'later',action:'turn.send',payload:{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null,text:'Later fixture response.',opId:`${Date.now()}:${randomUUID()}`}});
+  assert.equal(later.state,'accepted');await laterDone;
+  hang=true;const reachedManagedFixture=new Promise<void>(resolve=>{onRequest=resolve;});
+  const interrupted=await runtime.rpc('turn/start',{threadId:view.id,input:[{type:'text',text:'Interrupted fixture response.'}]});await reachedManagedFixture;
+  const interruptedDone=event('turn/completed',p=>p.threadId===view.id);
+  await runtime.rpc('turn/interrupt',{threadId:view.id,turnId:interrupted.turn.id});await interruptedDone;hang=false;
+  const beforeEdit=await control.read(view.id);assert.equal(beforeEdit.turns.length,3);assert.equal(beforeEdit.turns[2].status,'interrupted');
+  assert.equal(beforeEdit.turns[2].canFork,true,'An interrupted turn has finished and can be forked.');
   const forked=await control.handle({id:'fork',action:'session.fork',payload:{threadId:view.id,lastTurnId:original.id,opId:`${Date.now()}:${randomUUID()}`}});
   assert.equal(forked.state,'accepted',JSON.stringify(forked));assert.notEqual(forked.threadId,view.id);
+  const branch=await control.read(forked.threadId);assert.equal(branch.turns.length,1,'Forking an earlier turn must exclude later turns.');
+  assert.match(branch.title,/（分叉）$/);
+  const listed=await runtime.rpc('thread/list',{limit:100});assert.ok(listed.data.some((thread:Json)=>thread.id===forked.threadId),'The fork must appear in the native thread list.');
+  assert.ok(indexedSessions({archived:false},home).data.some(thread=>thread.id===forked.threadId),'The named fork must appear in the mobile thread list.');
+  const stoppedFork=await control.handle({id:'fork-interrupted',action:'session.fork',payload:{threadId:view.id,lastTurnId:interrupted.turn.id,opId:`${Date.now()}:${randomUUID()}`}});
+  assert.equal(stoppedFork.state,'accepted',JSON.stringify(stoppedFork));assert.equal((await control.read(stoppedFork.threadId)).turns.length,3);
+  const stoppedMessage=beforeEdit.turns[2].items.find(item=>item.role==='user')!;
+  const stoppedEditDone=event('turn/completed',p=>p.threadId===view.id);
+  const stoppedEdit=await control.handle({id:'edit-interrupted',action:'turn.edit',payload:{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null,turnId:interrupted.turn.id,itemId:stoppedMessage.id,text:'Revised interrupted response.',opId:`${Date.now()}:${randomUUID()}`}});
+  assert.equal(stoppedEdit.state,'accepted',JSON.stringify(stoppedEdit));await stoppedEditDone;
+  assert.match((await control.read(view.id)).turns.at(-1)!.items.find(item=>item.role==='user')?.text||'',/Revised interrupted response/);
   const editedDone=event('turn/completed',p=>p.threadId===view.id);
   const edited=await control.handle({id:'edit',action:'turn.edit',payload:{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null,turnId:original.id,itemId:message.id,text:'Revised fixture response.',opId:`${Date.now()}:${randomUUID()}`}});
   assert.equal(edited.state,'accepted',JSON.stringify(edited));assert.equal(edited.threadId,view.id);await editedDone;
   const revised=await control.read(view.id);
   assert.equal(revised.turns.length,1);assert.match(revised.turns[0].items.find(item=>item.role==='user')?.text||'',/Revised fixture response/);
+  assert.equal((await control.read(stoppedFork.threadId)).turns.length,3,'Editing the original must preserve the fork.');
   const profiled=new AppServer(nativeBin,{...process.env,CODEX_HOME:home,CMW_TEST_KEY:fixtureKey,CODEX_PROFILE:'mobile'});
   try{await assert.rejects(profiled.start(),/不支持/);}finally{profiled.close();}
-  console.log(JSON.stringify({result:'passed',nativeBinary:nativeBin,checks:['custom provider inherited','model and env credential reached local fixture','existing access policy inherited','thread start/read including empty session','streamed reply','steer expected turn','interrupt same turn','connector create/read/send','fork creates a new thread','edit rolls back and resends in the same thread','unsupported profile rejected explicitly'],deepseekLiveTest:false}));
+  console.log(JSON.stringify({result:'passed',nativeBinary:nativeBin,checks:['custom provider inherited','model and env credential reached local fixture','existing access policy inherited','thread start/read including empty session','streamed reply','steer expected turn','interrupt same turn','connector create/read/send','earlier-turn fork excludes later history and appears in mobile list','interrupted turn can be forked and edited','earlier edit replaces later history in the same thread and preserves forks','unsupported profile rejected explicitly'],deepseekLiveTest:false}));
 }finally{
   control.close();api.closeAllConnections();await new Promise<void>(r=>api.close(()=>r()));
   // Wait only for this isolated child to release its temporary database on Windows.

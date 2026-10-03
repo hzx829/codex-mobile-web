@@ -127,25 +127,26 @@ test('thread rename/archive/unarchive use native metadata methods and replay the
   }finally{control.close();}
 });
 
-test('fork creates a managed thread through the selected completed turn and replays its receipt',async()=>{
+test('fork creates and names a managed thread through a finished turn even when a later turn is running',async()=>{
   class Runtime extends EventEmitter{
     requests=new Map();calls:any[]=[];
     async rpc(method:string,params:any){
       this.calls.push({method,params});
       if(method==='thread/fork')return {thread:{id:'branch',sessionId:'branch-session'},model:'model-a',modelProvider:'openai',approvalPolicy:'on-request'};
+      if(method==='thread/name/set')return {};
       if(method==='thread/read')return {thread:{id:'branch',sessionId:'branch-session',turns:[{id:'t1',status:'completed',items:[]}]}};
       assert.fail(method);
     }
     close(){}
   }
-  class Desktop extends EventEmitter{clientId='desktop';states=new Map();async follow(){assert.fail('fork should leave the source desktop session untouched');}close(){}}
+  class Desktop extends EventEmitter{clientId='desktop';states=new Map();async follow(){return {id:'source',title:'Source task',cwd:'C:/work',turns:[{id:'t1',status:'interrupted',items:[]},{id:'later',status:'inProgress',items:[]}]};}close(){}}
   const runtime=new Runtime(),ledger=new Ledger(':memory:'),control=new Control(ledger,runtime as any,new Desktop() as any);
   try{
     const request={id:'fork',action:'session.fork' as const,payload:{threadId:'source',lastTurnId:'t1',opId:`${Date.now()}:${randomUUID()}`}};
     const first=await control.handle(request);
-    assert.deepEqual(first,{state:'accepted',threadId:'branch'});
+    assert.deepEqual(first,{state:'accepted',threadId:'branch',title:'Source task（分叉）',cwd:'C:/work'});
     assert.deepEqual(await control.handle(request),first);
-    assert.deepEqual(runtime.calls,[{method:'thread/fork',params:{threadId:'source',lastTurnId:'t1'}}]);
+    assert.deepEqual(runtime.calls,[{method:'thread/fork',params:{threadId:'source',lastTurnId:'t1'}},{method:'thread/name/set',params:{threadId:'branch',name:'Source task（分叉）'}}]);
     assert.equal(ledger.owns('branch'),true);
     const branch=await control.read('branch');
     assert.equal(branch.source,'connector');assert.equal(branch.sessionId,'branch-session');assert.equal(branch.canControl,true);
@@ -156,7 +157,7 @@ test('fork creates a managed thread through the selected completed turn and repl
 test('editing a connector thread rolls back the selected turn and later history before resending',async()=>{
   class Runtime extends EventEmitter{
     requests=new Map();calls:any[]=[];
-    turns=[{id:'earlier',status:'completed',items:[{id:'first',type:'userMessage',content:[{type:'text',text:'first',text_elements:[]}]}]},{id:'chosen',status:'completed',items:[{id:'prompt',type:'userMessage',content:[{type:'text',text:'old',text_elements:[]},{type:'localImage',path:'C:/image.png'}]}]},{id:'later',status:'completed',items:[{id:'last',type:'userMessage',content:[{type:'text',text:'later',text_elements:[]}]}]}];
+    turns=[{id:'earlier',status:'completed',items:[{id:'first',type:'userMessage',content:[{type:'text',text:'first',text_elements:[]}]}]},{id:'chosen',status:'interrupted',items:[{id:'prompt',type:'userMessage',content:[{type:'text',text:'old',text_elements:[]},{type:'localImage',path:'C:/image.png'}]}]},{id:'later',status:'completed',items:[{id:'last',type:'userMessage',content:[{type:'text',text:'later',text_elements:[]}]}]}];
     async rpc(method:string,params:any){
       this.calls.push({method,params});
       if(method==='thread/read')return {thread:{id:'s',historyMode:'legacy',turns:this.turns}};

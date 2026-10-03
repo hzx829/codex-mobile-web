@@ -3,6 +3,7 @@ export type RequestAction = 'info' | 'sessions.list' | 'session.read' | 'session
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
 export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string }
+export const turnFinished=(status:unknown)=>status==='completed'||status==='interrupted'||status==='failed';
 export interface ContextUsage { usedTokens: number; windowTokens: number | null }
 export interface UsageLimit { id: string; name: string | null; usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
 export interface ThreadStatus { threadId: string; limits: UsageLimit[]; limitsNotice?: string }

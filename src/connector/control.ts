@@ -8,7 +8,7 @@ import { approvalResult } from './approvals.js';
 import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
 import { nativeProjects, indexedSessions } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
-import { BridgeError, textRequired, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus } from '../shared/types.js';
+import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus } from '../shared/types.js';
 import {imageDataUrl,MAX_IMAGES} from '../shared/images.js';
 import {contextUsage,accountLimits} from './usage.js';
 
@@ -144,7 +144,7 @@ export class Control extends EventEmitter {
   private editedInput(raw:Json,turnId:string,itemId:string,text:string):{input:Json[];numTurns:number} {
     const turns:Json[]=raw.turnHistory?.kind==='canonical'?desktopTurns(raw):raw.turns||[];
     const index=turns.findIndex(value=>(value.turnId||value.id)===turnId),turn=turns[index];
-    if(!turn||turn.status!=='completed')throw new BridgeError('changed','原消息已变化，请刷新后重试');
+    if(!turn||!turnFinished(turn.status))throw new BridgeError('changed','原消息已变化，请刷新后重试');
     if(turns.slice(index).some(value=>value.status==='inProgress'))throw new BridgeError('active','请等当前任务结束后再编辑');
     if(turn.items?.filter((value:Json)=>value.type==='userMessage').length>1)throw new BridgeError('unsupported','这轮有多条用户消息，暂不能编辑');
     const item=turn.items?.find((value:Json)=>value.id===itemId&&value.type==='userMessage');
@@ -173,12 +173,18 @@ export class Control extends EventEmitter {
     const id=textRequired(p.threadId,'会话');
     if(action==='session.fork') {
       const lastTurnId=textRequired(p.lastTurnId,'分叉位置',200);
+      const source=await this.read(id,100);
+      const selected=source.turns.find(turn=>turn.id===lastTurnId);
+      if(!selected||!selected.canFork)throw new BridgeError('changed','分叉位置已变化，请刷新后重试');
       const r=await this.runtime.rpc('thread/fork',{threadId:id,lastTurnId});
       if(!r?.thread?.id)throw new BridgeError('unexpected','分叉结果未返回新会话，请刷新列表核实',true);
       const forkId=r.thread.id;
       this.loaded.add(forkId);this.ledger.claim(forkId);
       this.settings.set(forkId,{model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy,sessionId:r.thread.sessionId||forkId});
-      this.emit('change',forkId);return {threadId:forkId};
+      const title=`${source.title.slice(0,180)}（分叉）`;
+      try {await this.runtime.rpc('thread/name/set',{threadId:forkId,name:title});}
+      catch {this.emit('change',forkId);throw new BridgeError('partial',`分叉已创建，但标题保存未获确认。新会话：${forkId}`,true);}
+      this.emit('change',forkId);return {threadId:forkId,title,cwd:r.thread.cwd||source.cwd};
     }
     if(action==='session.rename') {
       const name=textRequired(p.name,'会话名称',200);

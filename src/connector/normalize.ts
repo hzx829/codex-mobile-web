@@ -1,4 +1,4 @@
-import type { Json, SessionView, MessageItem, TurnView } from '../shared/types.js';
+import {turnFinished,type Json,type SessionView,type MessageItem,type TurnView} from '../shared/types.js';
 import {contextUsage} from './usage.js';
 
 const bounded=(s:unknown)=>typeof s==='string'?(s.length>120_000?s.slice(0,120_000)+'\n\n[内容较长，剩余部分请在电脑查看]':s):'';
@@ -34,7 +34,7 @@ export function normalizeSession(raw:Json,source:SessionView['source'],requests:
     const id=t.turnId||t.id;
     const items:MessageItem[]=(t.items||[]).map(normalizeItem);
     if(t.params?.input?.length&&!items.some(i=>i.role==='user'))items.unshift(normalizeItem({id:id+':input',type:'userMessage',content:t.params.input}));
-    return {id:id||`historical-${index}`,status:t.status,items,canFork:Boolean(id)&&t.status==='completed',diff:bounded(t.diff)||undefined,error:t.error?.message};
+    return {id:id||`historical-${index}`,status:t.status,items,canFork:Boolean(id)&&turnFinished(t.status),diff:bounded(t.diff)||undefined,error:t.error?.message};
   });
   const runtimeActive=raw.threadRuntimeStatus?.type==='active'||raw.status?.type==='active';
   const unresolvedActive=runtimeActive&&!active;

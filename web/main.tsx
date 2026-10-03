@@ -17,7 +17,7 @@ import {ThreadMenu,ThreadRow} from './thread-menu';
 import type {MenuPoint} from './popover';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {groupThreads,visibleThreads,rememberThreads,saveThread,type ThreadPreferences,type ThreadPreference} from './thread-preferences';
-import type {Json,SessionView,RequestAction,MessageItem,TurnView} from '../src/shared/types';
+import {turnFinished,type Json,type SessionView,type RequestAction,type MessageItem,type TurnView} from '../src/shared/types';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -168,8 +168,11 @@ function App(){
   function accepted(record:Json,result:Json){
     if(record.action==='session.fork'&&result.threadId){
       setOperation(null);
-      if(stillHere())navigate({...route,thread:result.threadId,newChat:false});
-      void list();return;
+      if(stillHere()){
+        setSearch('');setSearchQuery('');setArchived(false);
+        navigate({...home,project:result.cwd||view?.cwd||project,thread:result.threadId,newChat:false});
+      }
+      listLoader.current.invalidate();void list(false,true);return;
     }
     if(record.action==='session.create'&&record.submittedText!==undefined&&result.threadId){
       save(`draft:${machine}:${result.threadId}`,record.submittedText);save(draftKey,'');
@@ -267,12 +270,15 @@ function App(){
     const body=<><SafeMarkdown text={item.text} openFile={openFile} openPreview={url=>void openBrowser(url)} onFollowup={insertFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</>;
     if(item.role!=='user')return <article className={`message ${item.role}`} key={item.id}>{body}</article>;
     const latestUserTurn=view?.turns.filter(value=>value.items.some(entry=>entry.role==='user')).at(-1)?.id;
-    const forkReason=turn.canFork?'':turn.status==='completed'?'连接器尚未更新，请稍后刷新页面':'请等这一轮完成后再分叉';
-    const editReason=!turn.canFork?turn.status==='completed'?'连接器尚未更新，请稍后刷新页面':'请等这一轮完成后再改写':view?.running?'请等当前任务结束后再改写':view?.source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(value=>value.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':view?.source==='desktop'&&turn.id!==latestUserTurn?'桌面会话目前只能改写最近一条用户消息':'';
-    return <UserMessage key={item.id} text={item.text} forkReason={forkReason} editReason={editReason} disabled={!connected||busy||Boolean(pending)} blocked={setNotice}
+    const editReason=view?.running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':view?.source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(value=>value.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':view?.source==='desktop'&&turn.id!==latestUserTurn?'桌面会话目前只能改写最近一条用户消息':'';
+    return <UserMessage key={item.id} text={item.text} editReason={editReason} disabled={!connected||busy||Boolean(pending)} blocked={setNotice}
       copy={()=>void copyText(item.text).then(()=>setNotice('已复制消息文字')).catch(()=>setError('复制失败，请长按消息选择文字'))}
-      fork={()=>void mutate('session.fork',{threadId:selected,lastTurnId:turn.id})}
       resend={text=>mutate('turn.edit',{...target(),turnId:turn.id,itemId:item.id,text})}>{body}</UserMessage>;
+  }
+  function fork(turn:TurnView){
+    if(turn.status==='inProgress'){setNotice('请等这一轮结束后再分叉');return;}
+    if(!turn.canFork){setNotice('此轮状态尚未同步，请刷新后重试');return;}
+    void mutate('session.fork',{threadId:selected,lastTurnId:turn.id});
   }
   function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
   function openStatus(element:HTMLElement){if(selected)setStatusPanel({machine,thread:selected,point:headerPoint(element)});}
@@ -337,6 +343,10 @@ function App(){
         {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:view?.turns.map(turn=><section className="turn" key={turn.id}>
           {groupItems(turn.items).map((group,index)=>group[0].role==='activity'?<details className="activity-group" key={`activity-${index}`}><summary>{turn.status==='inProgress'?'正在处理':'运行记录'} · {group.length} 项<span className="activity-excerpt">{activityLabel[group.at(-1)!.type]||'任务活动'}</span></summary><div className="activity-list">{group.map(item=><details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>)}</div></details>:group.map((item:MessageItem)=>renderMessage(item,turn)))}
           <div className="turn-status">{turn.status!=='completed'&&(statusLabel[turn.status]||turn.status)}{turn.diff&&<button onClick={()=>showPreview({kind:'diff',threadId:selected,turnId:turn.id,text:turn.diff!})}><Icon name="file" size={14}/>查看修改</button>}</div>{turn.error&&<p className="error">{turn.error}</p>}
+          {turn.items.some(item=>item.role==='assistant')&&<div className="assistant-actions">
+            <IconButton icon="copy" label="复制回复文字" onClick={()=>void copyText(turn.items.filter(item=>item.role==='assistant').at(-1)!.text).then(()=>setNotice('已复制回复文字')).catch(()=>setError('复制失败，请长按回复选择文字'))}/>
+            <IconButton icon="fork" label="从这轮回复分叉" disabled={!connected||busy||Boolean(pending)} onClick={()=>fork(turn)}/>
+          </div>}
         </section>)}
       </div>
       <div className="composer-area"><div className="request-stack">{!newChat&&view?.requests.map(req=><RequestCard key={`${view.generation}:${req.id}`} request={req} disabled={!canWrite} respond={response=>void mutate('request.respond',{...target(),requestId:req.id,response})}/>)}</div>{feedback}
@@ -394,7 +404,7 @@ function App(){
   </div>;
 }
 function IconButton({icon,label,onClick,disabled=false,className=''}:{icon:IconName;label:string;onClick:()=>void;disabled?:boolean;className?:string}){return <button type="button" className={`icon-button ${className}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}><Icon name={icon}/></button>;}
-function UserMessage({text,forkReason,editReason,disabled,blocked,copy,fork,resend,children}:{text:string;forkReason:string;editReason:string;disabled:boolean;blocked:(reason:string)=>void;copy:()=>void;fork:()=>void;resend:(text:string)=>Promise<void>;children:ReactNode}){
+function UserMessage({text,editReason,disabled,blocked,copy,resend,children}:{text:string;editReason:string;disabled:boolean;blocked:(reason:string)=>void;copy:()=>void;resend:(text:string)=>Promise<void>;children:ReactNode}){
   const [editing,setEditing]=useState(false),[draft,setDraft]=useState(text);
   const submitting=useRef(false);
   return <div className="user-entry">{editing?<form className="edit-message" onSubmit={e=>{e.preventDefault();if(!draft.trim()||submitting.current)return;submitting.current=true;void resend(draft).finally(()=>{submitting.current=false;});}}>
@@ -405,7 +415,6 @@ function UserMessage({text,forkReason,editReason,disabled,blocked,copy,fork,rese
     <article className="message user">{children}</article>
     {text&&<div className="user-actions">
       <IconButton icon="copy" label="复制消息文字" onClick={copy}/>
-      <IconButton icon="fork" label={forkReason||'从这轮分叉'} disabled={disabled} onClick={()=>forkReason?blocked(forkReason):fork()}/>
       <IconButton icon="edit" label={editReason||'编辑并重发消息'} disabled={disabled} onClick={()=>{if(editReason){blocked(editReason);return;}setDraft(text);setEditing(true);}}/>
     </div>}
   </>}</div>;

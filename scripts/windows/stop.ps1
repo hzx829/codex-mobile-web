@@ -10,7 +10,7 @@ foreach($entry in @('connector','relay')){
   if($proc -and $proc.CommandLine -and $proc.CommandLine.Contains($modulePath)){
     # Only this connector's child runtime is stopped; the official desktop is independent.
     if($entry -eq 'connector'){
-      Get-CimInstance Win32_Process -Filter "ParentProcessId=$recordedId" | Where-Object {$_.Name -eq 'codex.exe' -and $_.CommandLine -and $_.CommandLine.Contains('app-server')} | ForEach-Object {
+      Get-CimInstance Win32_Process -Filter "ParentProcessId=$recordedId" | Where-Object {$_.Name -like 'codex*.exe' -and $_.CommandLine -and $_.CommandLine.Contains('app-server')} | ForEach-Object {
         Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
         Wait-Process -Id $_.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
       }

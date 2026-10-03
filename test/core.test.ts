@@ -62,6 +62,15 @@ test('current Windows canonical history exposes the real active turn and pending
   assert.equal(v.sessionId,'s');
   assert.equal(normalizeSession({id:'s',status:{type:'active'},turns:[]},'connector',[]).canControl,false);
 });
+
+test('completed, interrupted and failed turns can be forked while an active turn cannot',()=>{
+  const turns=['completed','interrupted','failed','inProgress'].map((status,index)=>({id:`t${index}`,status,items:[]}));
+  for(const source of ['connector','desktop','history'] as const){
+    const view=normalizeSession({id:'s',turns},source,[]);
+    assert.deepEqual(view.turns.map(turn=>turn.canFork),[true,true,true,false]);
+    assert.equal(view.activeTurnId,'t3');
+  }
+});
 test('approval responders preserve native IDs, decisions and permission scope',()=>{
   const amended={acceptWithExecpolicyAmendment:{execpolicy_amendment:['git','status']}};
   assert.deepEqual(approvalResult({method:'item/commandExecution/requestApproval',params:{availableDecisions:['decline',amended]}},{decision:amended}).result,{decision:amended});
