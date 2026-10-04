@@ -12,6 +12,7 @@ import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {indexedSessions} from '../src/connector/projects.js';
 import type {Json} from '../src/shared/types.js';
+import {submitTurn,editTurn} from '../web/turn-request.js';
 const dir=await mkdtemp(join(tmpdir(),'cmw-native-')),home=join(dir,'codex'),project=join(dir,'project');await mkdir(home);await mkdir(project);
 const localConfig=JSON.parse(await readFile('.local/config.json','utf8').catch(()=>'{}'));
 const nativeBin=resolveCodex(process.env.CODEX_BIN||localConfig.codexBin);
@@ -34,6 +35,7 @@ api.listen(0,'127.0.0.1');await once(api,'listening');const port=(api.address() 
 await writeFile(join(home,'config.toml'),`model = "mobile-fixture"\nmodel_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n[model_providers.fixture]\nname = "Local test fixture"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nenv_key = "CMW_TEST_KEY"\n[projects.${JSON.stringify(project)}]\ntrust_level = "trusted"\n`);
 const runtime=new AppServer(nativeBin,{...process.env,CODEX_HOME:home,CMW_TEST_KEY:fixtureKey,CODEX_PROFILE:'',CODEX_LEGACY_BIN:process.env.CODEX_LEGACY_BIN||localConfig.legacyCodexBin});
 const control=new Control(new Ledger(':memory:'),runtime);
+const call=(action:any,payload:Json)=>control.handle({id:randomUUID(),action,payload:{...payload,opId:`${Date.now()}:${randomUUID()}`}});
 function event(method:string,predicate:(p:Json)=>boolean=()=>true):Promise<Json>{return new Promise((resolve,reject)=>{
   const timer=setTimeout(()=>{runtime.off('event',listener);reject(new Error(`Native event timeout: ${method}`));},20_000);
   const listener=(e:Json)=>{if(e.method===method&&predicate(e.params)){clearTimeout(timer);runtime.off('event',listener);resolve(e.params);}};runtime.on('event',listener);
@@ -52,7 +54,8 @@ try{
   const managed=await control.handle({id:'create',action:'session.create',payload:{cwd:project,opId:`${Date.now()}:${randomUUID()}`}});assert.equal(managed.state,'accepted');
   const view=await control.read(managed.threadId);assert.equal(view.canControl,true);assert.equal(view.turns.length,0);assert.equal(view.model,'mobile-fixture');
   const managedDone=event('turn/completed',p=>p.threadId===managed.threadId);
-  const submitted=await control.handle({id:'send',action:'turn.send',payload:{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null,text:'Return fixture response.',opId:`${Date.now()}:${randomUUID()}`}});assert.equal(submitted.state,'accepted');await managedDone;
+  const submitted=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},'Return fixture response.',[],{model:'gpt-6-astra',effort:'high',approvalPolicy:''});assert.equal(submitted.state,'accepted');await managedDone;
+  assert.equal(receivedModel,'gpt-6-astra');assert.equal(receivedEffort,'high');
   const final=await control.read(view.id);assert.equal(final.activeTurnId,null);assert.equal(final.canControl,true);
   const original=final.turns.at(-1)!,message=original.items.find(item=>item.role==='user')!;
   assert.equal(original.canFork,true);
@@ -75,12 +78,12 @@ try{
   assert.equal(stoppedFork.state,'accepted',JSON.stringify(stoppedFork));assert.equal((await control.read(stoppedFork.threadId)).turns.length,3);
   const stoppedMessage=beforeEdit.turns[2].items.find(item=>item.role==='user')!;
   const stoppedEditDone=event('turn/completed',p=>p.threadId===view.id);
-  const stoppedEdit=await control.handle({id:'edit-interrupted',action:'turn.edit',payload:{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null,turnId:interrupted.turn.id,itemId:stoppedMessage.id,text:'Revised interrupted response.',model:'gpt-6-astra',effort:'high',opId:`${Date.now()}:${randomUUID()}`}});
+  const stoppedEdit=await editTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},{turnId:interrupted.turn.id,itemId:stoppedMessage.id,text:'Revised interrupted response.'},{model:'gpt-6-astra',effort:'high',approvalPolicy:''});
   assert.equal(stoppedEdit.state,'accepted',JSON.stringify(stoppedEdit));await stoppedEditDone;
   assert.match((await control.read(view.id)).turns.at(-1)!.items.find(item=>item.role==='user')?.text||'',/Revised interrupted response/);
   assert.equal(receivedModel,'gpt-6-astra');assert.equal(receivedEffort,'high');
   const editedDone=event('turn/completed',p=>p.threadId===view.id);
-  const edited=await control.handle({id:'edit',action:'turn.edit',payload:{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null,turnId:original.id,itemId:message.id,text:'Revised fixture response.',model:'gpt-6.1-sol',effort:'medium',opId:`${Date.now()}:${randomUUID()}`}});
+  const edited=await editTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},{turnId:original.id,itemId:message.id,text:'Revised fixture response.'},{model:'gpt-6.1-sol',effort:'medium',approvalPolicy:''});
   assert.equal(edited.state,'accepted',JSON.stringify(edited));assert.equal(edited.threadId,view.id);await editedDone;
   const revised=await control.read(view.id);
   assert.equal(receivedModel,'gpt-6.1-sol');assert.equal(receivedEffort,'medium');assert.equal(revised.model,'gpt-6.1-sol');assert.equal(revised.effort,'medium');
@@ -88,7 +91,7 @@ try{
   assert.equal((await control.read(stoppedFork.threadId)).turns.length,3,'Editing the original must preserve the fork.');
   const profiled=new AppServer(nativeBin,{...process.env,CODEX_HOME:home,CMW_TEST_KEY:fixtureKey,CODEX_PROFILE:'mobile'});
   try{await assert.rejects(profiled.start(),/不支持/);}finally{profiled.close();}
-  console.log(JSON.stringify({result:'passed',nativeBinary:nativeBin,checks:['custom provider inherited','model and env credential reached local fixture','existing access policy inherited','thread start/read including empty session','streamed reply','steer expected turn','interrupt same turn','connector create/read/send','earlier-turn fork excludes later history and appears in mobile list','interrupted turn can be forked and edited','earlier edit replaces later history in the same thread and preserves forks','edited model and reasoning effort reached the local fixture','unsupported profile rejected explicitly'],deepseekLiveTest:false}));
+  console.log(JSON.stringify({result:'passed',layer:'native-fixture',nativeBinary:nativeBin,nativeVersion:runtime.version,checks:['custom provider inherited','model and env credential reached local fixture','existing access policy inherited','thread start/read including empty session','streamed reply','steer expected turn','interrupt same turn','connector create/read/send','earlier-turn fork excludes later history and appears in mobile list','interrupted turn can be forked and edited','earlier edit replaces later history in the same thread and preserves forks','web send/edit actions preserve selected model and effort through the native HTTP request','unsupported profile rejected explicitly'],liveChatGPT:false,uiAcceptance:false}));
 }finally{
   control.close();api.closeAllConnections();await new Promise<void>(r=>api.close(()=>r()));
   // Wait only for this isolated child to release its temporary database on Windows.

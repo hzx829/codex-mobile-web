@@ -43,10 +43,11 @@ export async function checkConnection(installDir, timeoutMs = 20000) {
       if (m.type === 'machines' && authenticated) readInfo(m.data);
       if (m.type !== 'response' || m.id !== 'setup-info' || !requested) return;
       if (m.error || !m.result || !Array.isArray(m.result.projects)) { finish('codex_info_failed'); return; }
-      const text = value => typeof value === 'string' ? value.slice(0, 120).split(config.token).join('[redacted]') : '';
+      const text = (value,limit=120) => typeof value === 'string' ? value.slice(0, limit).split(config.token).join('[redacted]') : '';
       finish(null, {online: true, relayUrl, machineName: text(config.machineName), machineId: config.machineId,
         model: text(m.result.model), provider: text(m.result.provider), projectCount: m.result.projects.length,
-        desktopOnline: m.result.desktopOnline === true});
+        desktopOnline: m.result.desktopOnline === true,
+        ...(m.result.runtime?{runtime:{bin:text(m.result.runtime.bin,4096),version:text(m.result.runtime.version)}}:{})});
     });
   });
 }

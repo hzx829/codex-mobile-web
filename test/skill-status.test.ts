@@ -13,6 +13,7 @@ test('skill status authenticates, waits for its own connector and only reads inf
   const dir=await mkdtemp(join(tmpdir(),'cmw-skill-status-'));
   const server=new WebSocketServer({port:0,host:'127.0.0.1'});await once(server,'listening');
   const port=(server.address() as {port:number}).port,token='status-test-token-with-enough-characters',requests:any[]=[];
+  const runtime={bin:'C:/'+('long-install-directory/'.repeat(10))+'codex.exe',version:'0.160.0'};
   try {
     await mkdir(join(dir,'.local'));
     await writeFile(join(dir,'.local','config.json'),JSON.stringify({relayUrl:`http://127.0.0.1:${port}`,token,machineId:'new-pc',machineName:'Second PC'}));
@@ -23,10 +24,11 @@ test('skill status authenticates, waits for its own connector and only reads inf
         ws.send(JSON.stringify({type:'ready',machines:[{id:'other-pc'}]}));
         ws.send(JSON.stringify({type:'machines',data:[{id:'other-pc'},{id:'new-pc'}]}));
         ws.send(JSON.stringify({type:'machines',data:[{id:'new-pc'}]}));
-      } else ws.send(JSON.stringify({type:'response',id:m.id,result:{model:'fixture',provider:'fixture',projects:[{path:'private-path'}],desktopOnline:false}}));
+      } else ws.send(JSON.stringify({type:'response',id:m.id,result:{model:'fixture',provider:'fixture',projects:[{path:'private-path'}],desktopOnline:false,runtime}}));
     }));
     const result=await checkConnection(dir,1000);
     assert.equal(result.online,true);assert.equal(result.desktopOnline,false);assert.equal(result.projectCount,1);
+    assert.deepEqual(result.runtime,runtime);
     assert.deepEqual(requests.map(m=>m.type),['hello','request']);
     assert.deepEqual(requests[1],{type:'request',id:'setup-info',machineId:'new-pc',action:'info',payload:{}});
     assert.ok(!JSON.stringify(result).includes(token));assert.ok(!JSON.stringify(result).includes('private-path'));

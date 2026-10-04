@@ -53,6 +53,8 @@ The connector uses local desktop IPC for existing desktop sessions, and a Codex 
 
 On Windows, an unset `codexBin` uses the newest Codex in the desktop installation before checking PATH. Restart the connector after a desktop update when its tasks are idle. An explicit execution binary path remains pinned until changed. Model and reasoning options come from the execution runtime. With CLI 0.160.0, set `legacyCodexBin` to CLI 0.146.0 if you need to edit legacy conversations: it only rolls back history; all model requests use the current execution runtime.
 
+`npm run check` requires an installed Codex and includes the isolated native protocol fixture. After deploying, run `npm run check:deployed`: it reads the running connector through the relay and fails when its executable or native version differs from the current desktop installation, or when provenance is missing. Its receipt is `.local/runtime-check.json`. These checks do not call ChatGPT or exercise the page; live model replies and page interactions still require manual acceptance. No background upgrade or adaptation watcher is installed by this repository.
+
 The relay keeps connection routes in memory; the connector stores operation IDs and receipts in local SQLite. After reconnecting, the browser fetches current state and checks earlier operations. Uncertain results remain pending rather than triggering an automatic retry. Restarting the connector may interrupt its own app-server tasks; its stop script does not stop the separate Codex desktop process.
 
 Implementation: [web/](web/), [relay.ts](src/server/relay.ts), [control.ts](src/connector/control.ts), [desktop.ts](src/connector/desktop.ts), and [ledger.ts](src/connector/ledger.ts). More detail is in [DESIGN.md](DESIGN.md) (Chinese).

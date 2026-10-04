@@ -56,7 +56,7 @@ export class Control extends EventEmitter {
       const models=await readModels(this.runtime);
       const c=config.config||{};
       const projects=await this.projects(c);
-      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',models:models.data||[],generation:this.generation};
+      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',models:models.data||[],runtime:{bin:this.runtime.bin,version:this.runtime.version},generation:this.generation};
     }
     if(req.action==='sessions.list') {
       const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;

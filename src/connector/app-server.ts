@@ -45,6 +45,7 @@ export function resolveWindowsCodex(pathValue: string, localAppData: string): st
 
 export class AppServer extends EventEmitter {
   child: ChildProcessWithoutNullStreams | null = null;
+  version='';
   private next = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   requests = new Map<string, Json>();
@@ -66,7 +67,8 @@ export class AppServer extends EventEmitter {
     });
     child.on('error', e => { if(this.child===child)this.disconnected(e); });
     child.on('exit', () => { if(this.child===child)this.disconnected(new BridgeError('offline','Codex 运行进程已退出',true)); });
-    await this.rpc('initialize', { clientInfo: { name: 'codex_mobile_web', title: 'Codex Mobile Web', version: '0.1.3' }, capabilities: { experimentalApi: true } });
+    const initialized=await this.rpc('initialize', { clientInfo: { name: 'codex_mobile_web', title: 'Codex Mobile Web', version: '0.1.3' }, capabilities: { experimentalApi: true } });
+    this.version=String(initialized.userAgent||'').match(/\/(\d+\.\d+\.\d+[^\s;)]*)/)?.[1]||'';
     this.write({ method: 'initialized' });
   }
   private receive(m: Json) {
@@ -112,7 +114,7 @@ export class AppServer extends EventEmitter {
     this.child.stdin.write(JSON.stringify(value) + '\n');
   }
   private disconnected(error: Error) {
-    this.child = null; this.requests.clear();this.responding.clear();
+    this.child = null; this.version='';this.requests.clear();this.responding.clear();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
     this.pending.clear(); this.emit('offline');
   }

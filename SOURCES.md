@@ -26,6 +26,8 @@ Remodex 的协议思路可参考，但其被检查版本仍主要从 `conversati
 
 2026-10-04 核对桌面 26.930.3748.0 的安装包与附带 CLI 0.160.0 的生成协议，并运行隔离 Responses 夹具：模型目录与推理请求使用同一执行端；编辑重发的模型、推理档位到达 HTTP 请求。新版 `thread/revert` 仅支持分页历史，旧历史通过单独的 0.146.0 进程回退后由新版重新接入并发送；夹具验证原会话 ID、早期轮次编辑、分叉保留、补充与中断。桌面编辑先通过 owner 的 `thread-follower-update-thread-settings` 确认设置，再调用编辑接口；真实 ChatGPT 模型调用与页面操作由人类复验。
 
+本次更新回归的记录核对：2026-09-26 聊天 `01a0d77f-6b60-7d52-9b22-40782c707b99` 实现启动时选择最新版，并明确需空闲后重启；未实现常驻适配触发器。2026-10-03 聊天 `01a0f20b-e6e6-7bc1-8dd0-d0cdc97ea20a` 为旧历史编辑把执行端重新固定到 0.146.0，其部署回执只验证在线和会话恢复。之后目录与执行端分离，产生本次 400；编辑路径另外漏传所选参数。当前 `check` 包含原生夹具，并从 Web 的发送/编辑动作检查最终 HTTP 参数；`check:deployed` 读取实际执行端握手版本，拒绝版本偏差或缺失证据。夹具、部署版本检查、人工真实账号/页面验收分别记录，不能互相替代。
+
 2026-09-27 核对本地生成的 `ThreadTokenUsage`、`ThreadTokenUsageUpdatedNotification`、`GetAccountRateLimitsResponse`、`RateLimitWindow`，以及桌面研究副本中的 `latestTokenUsageInfo` 映射。上下文取最近一次用量；额度优先 `rateLimitsByLimitId`，`resetsAt` 为 Unix 秒。本机 `account/rateLimits/read` 只读调用实际返回 7 天额度窗口；未请求额度重置或购买操作。
 
 额外兼容边界：CLI 0.146.0 的 `--profile` 仅支持其列出的运行命令，不支持 app-server，旧式 `-c profile=...` 同样拒绝。第一版明确拒绝连接器命名 profile 配置；不自行合并 TOML 或降级到不同模型。

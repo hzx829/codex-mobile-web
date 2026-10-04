@@ -18,6 +18,7 @@ import type {MenuPoint} from './popover';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {groupThreads,visibleThreads,rememberThreads,saveThread,type ThreadPreferences,type ThreadPreference} from './thread-preferences';
 import {turnFinished,type Json,type SessionView,type RequestAction,type MessageItem,type TurnView} from '../src/shared/types';
+import {submitTurn,editTurn} from './turn-request';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -203,7 +204,7 @@ function App(){
   async function submit(){
     if(!connected||busy||pending||imageLoading||!draft.trim()&&!images.length)return;
     if(images.length&&!canImage){setError('当前模型未确认图片能力，请更换模型或移除图片');return;}
-    if(!newChat){if(view?.canControl)await mutate('turn.send',{...target(),text:draft,images,...(!view.activeTurnId?{model:model||undefined,effort:effort||undefined,approvalPolicy:approval||undefined}:{})});return;}
+    if(!newChat){if(view?.canControl)await submitTurn(mutate,target(),draft,images,{model,effort,approvalPolicy:approval});return;}
     const createId=operationId(),sendId=operationId(),text=draft,creating={opId:createId,action:'session.create',submittedText:text,imageCount:images.length};
     setBusy(true);setError('');setNotice('正在发送…');setOperation(creating);
     const result=await createFirstTurn((action,payload)=>call(action,payload),{cwd:newCwd,text,images,model,effort,approvalPolicy:approval,createId,sendId},id=>{
@@ -273,7 +274,7 @@ function App(){
     const editReason=view?.running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':view?.source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(value=>value.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':view?.source==='desktop'&&turn.id!==latestUserTurn?'桌面会话目前只能改写最近一条用户消息':'';
     return <UserMessage key={item.id} text={item.text} editReason={editReason} disabled={!connected||busy||Boolean(pending)} blocked={setNotice}
       copy={()=>void copyText(item.text).then(()=>setNotice('已复制消息文字')).catch(()=>setError('复制失败，请长按消息选择文字'))}
-      resend={text=>mutate('turn.edit',{...target(),turnId:turn.id,itemId:item.id,text,model:model||undefined,effort:effort||undefined,approvalPolicy:approval||undefined})}>{body}</UserMessage>;
+      resend={text=>editTurn(mutate,target(),{turnId:turn.id,itemId:item.id,text},{model,effort,approvalPolicy:approval})}>{body}</UserMessage>;
   }
   function fork(turn:TurnView){
     if(turn.status==='inProgress'){setNotice('请等这一轮结束后再分叉');return;}
