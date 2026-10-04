@@ -161,6 +161,7 @@ test('editing a connector thread rolls back the selected turn and later history 
     async rpc(method:string,params:any){
       this.calls.push({method,params});
       if(method==='thread/read')return {thread:{id:'s',historyMode:'legacy',turns:this.turns}};
+      if(method==='model/list')return {data:[{model:'gpt-6-astra',supportedReasoningEfforts:[{reasoningEffort:'ultra'}]}]};
       if(method==='thread/rollback'){this.turns=this.turns.slice(0,-params.numTurns);return {thread:{id:'s',turns:this.turns}};}
       if(method==='turn/start')return {turn:{id:'edited-turn'}};
       assert.fail(method);
@@ -171,15 +172,19 @@ test('editing a connector thread rolls back the selected turn and later history 
   const runtime=new Runtime(),control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any);
   try{
     (control as any).loaded.add('s');
-    const request={id:'edit',action:'turn.edit' as const,payload:{threadId:'s',source:'connector',generation:control.generation,expectedTurnId:null,turnId:'chosen',itemId:'prompt',text:'revised',opId:`${Date.now()}:${randomUUID()}`}};
+    const request={id:'edit',action:'turn.edit' as const,payload:{threadId:'s',source:'connector',generation:control.generation,expectedTurnId:null,turnId:'chosen',itemId:'prompt',text:'revised',model:'gpt-6-astra',effort:'ultra',opId:`${Date.now()}:${randomUUID()}`}};
+    const invalid=await control.handle({...request,payload:{...request.payload,effort:'max',opId:`${Date.now()}:${randomUUID()}`}});
+    assert.equal(invalid.state,'failed');assert.equal(invalid.error.code,'invalid');
+    assert.equal(runtime.calls.some(call=>call.method==='thread/rollback'),false);
     const sent=await control.handle(request);
     assert.deepEqual(sent,{state:'accepted',threadId:'s',kind:'edited'});
     assert.deepEqual(await control.handle(request),sent);
     assert.deepEqual(runtime.calls.filter(call=>call.method==='thread/rollback'||call.method==='turn/start'),[
       {method:'thread/rollback',params:{threadId:'s',numTurns:2}},
-      {method:'turn/start',params:{threadId:'s',input:[{type:'text',text:'revised',text_elements:[]},{type:'localImage',path:'C:/image.png'}]}},
+      {method:'turn/start',params:{threadId:'s',input:[{type:'text',text:'revised',text_elements:[]},{type:'localImage',path:'C:/image.png'}],model:'gpt-6-astra',effort:'ultra'}},
     ]);
     assert.deepEqual(runtime.turns.map(turn=>turn.id),['earlier']);
+    const view=await control.read('s');assert.equal(view.model,'gpt-6-astra');assert.equal(view.effort,'ultra');
   }finally{control.close();}
 });
 
@@ -223,6 +228,26 @@ test('editing a desktop thread uses its owner and rejects older messages',async(
     assert.equal(desktop.calls.some(call=>call.method==='thread-follower-edit-last-user-turn'),false);
     const latest=await edit('latest','u2');assert.equal(latest.state,'accepted');
     assert.deepEqual(desktop.calls.at(-1),{method:'thread-follower-edit-last-user-turn',params:{conversationId:'s',hostId:'local',turnId:'latest',message:'revised'}});
+  }finally{control.close();}
+});
+
+test('desktop edit confirms selected settings with the owner before editing',async()=>{
+  class Runtime extends EventEmitter{requests=new Map();async rpc(method:string){assert.equal(method,'model/list');return {data:[{model:'gpt-6-astra',supportedReasoningEfforts:[{reasoningEffort:'ultra'}]}]};}close(){}}
+  class Desktop extends EventEmitter{
+    clientId='desktop';states=new Map();calls:any[]=[];applied=true;
+    async follow(){return {id:'s',turns:[{id:'t',status:'completed',items:[{id:'u',type:'userMessage',content:[{type:'text',text:'old'}]}]}]};}
+    async request(method:string,params:any){this.calls.push({method,params});return {applied:this.applied};}close(){}
+  }
+  const desktop=new Desktop(),control=new Control(new Ledger(':memory:'),new Runtime() as any,desktop as any);
+  const edit=()=>control.handle({id:randomUUID(),action:'turn.edit',payload:{threadId:'s',source:'desktop',generation:control.generation,expectedTurnId:null,turnId:'t',itemId:'u',text:'new',model:'gpt-6-astra',effort:'ultra',opId:`${Date.now()}:${randomUUID()}`}});
+  try{
+    desktop.applied=false;assert.equal((await edit()).state,'failed');
+    assert.equal(desktop.calls.some(call=>call.method==='thread-follower-edit-last-user-turn'),false);
+    desktop.applied=true;assert.equal((await edit()).state,'accepted');
+    assert.deepEqual(desktop.calls.slice(-2),[
+      {method:'thread-follower-update-thread-settings',params:{conversationId:'s',hostId:'local',threadSettings:{model:'gpt-6-astra',effort:'ultra'}}},
+      {method:'thread-follower-edit-last-user-turn',params:{conversationId:'s',hostId:'local',turnId:'t',message:'new'}},
+    ]);
   }finally{control.close();}
 });
 

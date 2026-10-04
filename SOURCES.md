@@ -24,6 +24,8 @@ Remodex 的协议思路可参考，但其被检查版本仍主要从 `conversati
 
 `.research/` 保存本地研究副本与生成协议，不参与构建或分发。构建依赖由 `package-lock.json` 固定，便携包附依赖许可证。真实桌面写操作与 DeepSeek 实际服务仍待人工验证；第三方协议夹具通过不等于真实服务通过。
 
+2026-10-04 核对桌面 26.930.3748.0 的安装包与附带 CLI 0.160.0 的生成协议，并运行隔离 Responses 夹具：模型目录与推理请求使用同一执行端；编辑重发的模型、推理档位到达 HTTP 请求。新版 `thread/revert` 仅支持分页历史，旧历史通过单独的 0.146.0 进程回退后由新版重新接入并发送；夹具验证原会话 ID、早期轮次编辑、分叉保留、补充与中断。桌面编辑先通过 owner 的 `thread-follower-update-thread-settings` 确认设置，再调用编辑接口；真实 ChatGPT 模型调用与页面操作由人类复验。
+
 2026-09-27 核对本地生成的 `ThreadTokenUsage`、`ThreadTokenUsageUpdatedNotification`、`GetAccountRateLimitsResponse`、`RateLimitWindow`，以及桌面研究副本中的 `latestTokenUsageInfo` 映射。上下文取最近一次用量；额度优先 `rateLimitsByLimitId`，`resetsAt` 为 Unix 秒。本机 `account/rateLimits/read` 只读调用实际返回 7 天额度窗口；未请求额度重置或购买操作。
 
 额外兼容边界：CLI 0.146.0 的 `--profile` 仅支持其列出的运行命令，不支持 app-server，旧式 `-c profile=...` 同样拒绝。第一版明确拒绝连接器命名 profile 配置；不自行合并 TOML 或降级到不同模型。

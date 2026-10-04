@@ -273,7 +273,7 @@ function App(){
     const editReason=view?.running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':view?.source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(value=>value.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':view?.source==='desktop'&&turn.id!==latestUserTurn?'桌面会话目前只能改写最近一条用户消息':'';
     return <UserMessage key={item.id} text={item.text} editReason={editReason} disabled={!connected||busy||Boolean(pending)} blocked={setNotice}
       copy={()=>void copyText(item.text).then(()=>setNotice('已复制消息文字')).catch(()=>setError('复制失败，请长按消息选择文字'))}
-      resend={text=>mutate('turn.edit',{...target(),turnId:turn.id,itemId:item.id,text})}>{body}</UserMessage>;
+      resend={text=>mutate('turn.edit',{...target(),turnId:turn.id,itemId:item.id,text,model:model||undefined,effort:effort||undefined,approvalPolicy:approval||undefined})}>{body}</UserMessage>;
   }
   function fork(turn:TurnView){
     if(turn.status==='inProgress'){setNotice('请等这一轮结束后再分叉');return;}
@@ -312,7 +312,7 @@ function App(){
   const inheritedApproval=newChat?info?.approvalPolicy:view?.approvalPolicy;
   const approvalLabel=inheritedApproval==='never'?'不提示':inheritedApproval==='on-request'?'按需审批':'电脑配置';
   const canWrite=connected&&!busy&&!pending&&!imageLoading&&(newChat?Boolean(newCwd):Boolean(view?.canControl));
-  const effortLabel=({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'极高',max:'最高',ultra:'超高'} as Json)[effort||(newChat?info?.effort:'')||''];
+  const effortLabel=({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'极高',max:'最高',ultra:'超高'} as Json)[effort||view?.effort||(newChat?info?.effort:'')||''];
   const activeApproval=approval||inheritedApproval;
   const listedThreads=visibleThreads(sessions,preferences,project,archived,searchQuery);
   const visibleTitle=newChat?'新聊天':view?.title||sessions.find(s=>s.id===selected)?.title||'正在打开…';

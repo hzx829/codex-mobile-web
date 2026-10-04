@@ -6,16 +6,11 @@ import {readModels,reasoningEffort} from '../src/connector/models.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
 
-test('a pinned runtime discovers models from the current desktop binary without replacing execution',async()=>{
+test('model options come from the same runtime that executes turns',async()=>{
   const calls:string[]=[];
-  const runtime={bin:'old',async rpc(){calls.push('old');return {data:['old']};}};
-  const current={bin:'new',async start(){calls.push('start');},async rpc(method:string){assert.equal(method,'model/list');calls.push('catalog');return {data:['gpt-6-astra']};},close(){calls.push('close');}};
-  const create=(bin:string)=>{assert.equal(bin,'new');return current;};
-  assert.deepEqual(await readModels(runtime,()=> 'new',create),{data:['gpt-6-astra']});
-  assert.deepEqual(calls,['start','catalog','close']);assert.equal(runtime.bin,'old');
-  current.rpc=async()=>{throw Error('catalog failed');};
-  await assert.rejects(readModels(runtime,()=> 'new',create),/catalog failed/);assert.equal(calls.at(-1),'close');
-  assert.deepEqual(await readModels(runtime,()=> 'old',create),{data:['old']});
+  const runtime={async rpc(method:string){calls.push(method);return {data:['gpt-6-astra']};}};
+  assert.deepEqual(await readModels(runtime),{data:['gpt-6-astra']});
+  assert.deepEqual(calls,['model/list']);
 });
 
 test('reasoning effort follows the runtime catalog, including ultra and future values',async()=>{

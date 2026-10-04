@@ -12,6 +12,7 @@ import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest,
 import {imageDataUrl,MAX_IMAGES} from '../shared/images.js';
 import {contextUsage,accountLimits} from './usage.js';
 import {readModels,reasoningEffort} from './models.js';
+import {revertThread} from './revert.js';
 
 function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   if(value===undefined||value===null||value==='')return undefined;
@@ -84,7 +85,7 @@ export class Control extends EventEmitter {
     let view:SessionView;
     if(this.loaded.has(id)) {
       const {raw,hasMore,notice,resumeUnavailable}=await this.runtimeThread(id,limit);
-      Object.assign(raw,this.settings.get(id));
+      for(const [key,value] of Object.entries(this.settings.get(id)||{}))if(raw[key]===undefined||raw[key]===null||raw[key]==='')raw[key]=value;
       view=normalizeSession(raw,'connector',[...this.runtime.requests.values()].filter(r=>r.params?.threadId===id),limit);
       view.contextUsage=this.contexts.get(id)||null;
       view.hasMore=hasMore||view.hasMore;
@@ -112,7 +113,7 @@ export class Control extends EventEmitter {
   private async runtimeThread(id:string,limit:number):Promise<{raw:Json;hasMore:boolean;notice?:string;resumeUnavailable?:boolean}> {
     try {
       const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:true});
-      return {raw:r.thread,hasMore:false,resumeUnavailable:r.thread.historyMode==='paginated'&&!this.loaded.has(id)};
+      return {raw:r.thread,hasMore:false};
     } catch(e) {
       const paginated=e instanceof BridgeError&&/paginated[_\s]threads?.*(?:do not support|is not supported)/i.test(e.message);
       const unsupportedTurns=e instanceof BridgeError&&/list_turns is not supported yet/i.test(e.message);
@@ -217,18 +218,22 @@ export class Control extends EventEmitter {
     if(action==='turn.edit') {
       if(session.running||p.expectedTurnId!==session.activeTurnId)throw new BridgeError('active','请等当前任务结束后再编辑');
       const turnId=textRequired(p.turnId,'轮次',200),itemId=textRequired(p.itemId,'消息',200),text=textRequired(p.text,'输入');
+      const settings=await this.turnSettings(p,session.model);
       if(session.source==='desktop') {
         const latest=session.turns.filter(turn=>turn.items.some(item=>item.role==='user')).at(-1);
         if(latest?.id!==turnId)throw new BridgeError('unsupported','桌面会话目前只能编辑最近一条用户消息');
+        if(Object.keys(settings).length) {
+          const updated=await this.desktop.request('thread-follower-update-thread-settings',{...context,threadSettings:settings});
+          if(updated?.applied!==true)throw new BridgeError('changed','模型设置未获确认，请刷新后重试');
+        }
         await this.desktop.request('thread-follower-edit-last-user-turn',{...context,turnId,message:text});
       } else {
         const {raw}=await this.runtimeThread(id,100);
-        if(raw.historyMode==='paginated')throw new BridgeError('unsupported','当前 Codex 版本暂不能原地编辑分页会话');
         const {input,numTurns}=this.editedInput(raw,turnId,itemId,text);
-        await this.runtime.rpc('thread/rollback',{threadId:id,numTurns});
+        await revertThread(this.runtime,raw,turnId,numTurns);
         this.contexts.delete(id);
         for(const turn of raw.turns.slice(-numTurns))this.diffs.delete(turn.id||turn.turnId);
-        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);}
+        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input,...settings});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);this.rememberSettings(id,settings);}
         catch {this.emit('change',id);throw new BridgeError('partial','后续聊天已回退，但重发未获确认。请刷新会话核实后再发送。',true);}
       }
       this.emit('change',id);return {threadId:id,kind:'edited'};
@@ -259,13 +264,11 @@ export class Control extends EventEmitter {
         const params={input,expectedTurnId:session.activeTurnId};
         result=session.source==='desktop'?await this.desktop.request('thread-follower-steer-turn',{...context,...params}):await this.runtime.rpc('turn/steer',{threadId:id,...params});
       } else {
-        const request:Json={threadId:id,input};
-        if(p.model)request.model=textRequired(p.model,'模型',200);
-        if(p.effort)request.effort=await reasoningEffort(this.runtime,p.effort,request.model||session.model);
-        const policy=approvalPolicy(p.approvalPolicy);if(policy)request.approvalPolicy=policy;
+        const settings=await this.turnSettings(p,session.model);
+        const request:Json={threadId:id,input,...settings};
         if(session.source==='desktop')result=await this.desktop.request('thread-follower-start-turn',{...context,turnStart:{request:{...request,clientUserMessageId:p.opId},context:{inheritThreadSettings:true}}});
         else {result=await this.runtime.rpc('turn/start',request);if(result?.turn?.id)this.starting.set(id,result.turn.id);}
-        if(session.source==='connector'&&(p.model||policy))this.settings.set(id,{...this.settings.get(id),...(p.model?{model:p.model}:{}),...(policy?{approvalPolicy:policy}:{})});
+        if(session.source==='connector')this.rememberSettings(id,settings);
       }
       this.emit('change',id);
       return {threadId:id,turnId:result?.result?.turn?.id||result?.turn?.id||session.activeTurnId||null,kind:session.activeTurnId?'steer_accepted':'turn_accepted'};
@@ -284,6 +287,16 @@ export class Control extends EventEmitter {
     const previous=this.locks.get(key)||Promise.resolve();
     const next=previous.catch(()=>{}).then(fn);this.locks.set(key,next);
     try{return await next;}finally{if(this.locks.get(key)===next)this.locks.delete(key);}
+  }
+  private async turnSettings(p:Json,currentModel:string):Promise<Json> {
+    const settings:Json={};
+    if(p.model)settings.model=textRequired(p.model,'模型',200);
+    if(p.effort)settings.effort=await reasoningEffort(this.runtime,p.effort,settings.model||currentModel);
+    const policy=approvalPolicy(p.approvalPolicy);if(policy)settings.approvalPolicy=policy;
+    return settings;
+  }
+  private rememberSettings(id:string,settings:Json) {
+    this.settings.set(id,{...this.settings.get(id),...settings,...(settings.effort?{reasoningEffort:settings.effort}:{})});
   }
   close(){this.desktop.close();this.runtime.close();this.ledger.close();}
 }

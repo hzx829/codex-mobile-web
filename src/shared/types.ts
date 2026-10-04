@@ -8,7 +8,7 @@ export interface ContextUsage { usedTokens: number; windowTokens: number | null 
 export interface UsageLimit { id: string; name: string | null; usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
 export interface ThreadStatus { threadId: string; limits: UsageLimit[]; limitsNotice?: string }
 export interface SessionView {
-  id: string; sessionId: string; title: string; cwd: string; model: string; provider: string; approvalPolicy?: string;
+  id: string; sessionId: string; title: string; cwd: string; model: string; provider: string; effort?: string; approvalPolicy?: string;
   source: 'desktop' | 'connector' | 'history'; activeTurnId: string | null; running?: boolean; contextUsage?: ContextUsage | null;
   turns: TurnView[]; requests: Json[]; canControl: boolean; hasMore?: boolean; notice?: string; generation?: string; resumeUnavailable?: boolean;
 }

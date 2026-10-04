@@ -9,6 +9,7 @@ import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
+if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
 if(config.codexHome)process.env.CODEX_HOME=config.codexHome;
 if(config.profile)process.env.CODEX_PROFILE=config.profile;
 mkdirSync(config.dataDir,{recursive:true});

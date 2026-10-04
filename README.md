@@ -51,7 +51,7 @@ This shows the recommended public HTTPS deployment. TLS ends at the reverse prox
 
 The connector uses local desktop IPC for existing desktop sessions, and a Codex app-server child process for sessions it creates or resumes. If a live owner cannot be reached, it shows history and asks you to confirm that the original task has ended before resuming it here. Active standalone CLI sessions cannot be taken over.
 
-On Windows, an unset `codexBin` uses the newest Codex in the desktop installation before checking PATH. Restart the connector after a desktop update when its tasks are idle. An explicit execution binary path remains pinned until changed. Model and reasoning options are read from the current desktop installation, including when execution stays pinned for compatibility with existing sessions.
+On Windows, an unset `codexBin` uses the newest Codex in the desktop installation before checking PATH. Restart the connector after a desktop update when its tasks are idle. An explicit execution binary path remains pinned until changed. Model and reasoning options come from the execution runtime. With CLI 0.160.0, set `legacyCodexBin` to CLI 0.146.0 if you need to edit legacy conversations: it only rolls back history; all model requests use the current execution runtime.
 
 The relay keeps connection routes in memory; the connector stores operation IDs and receipts in local SQLite. After reconnecting, the browser fetches current state and checks earlier operations. Uncertain results remain pending rather than triggering an automatic retry. Restarting the connector may interrupt its own app-server tasks; its stop script does not stop the separate Codex desktop process.
 
@@ -112,7 +112,7 @@ Use `configure.cmd` to change settings after stopping this installation. `stop.c
 | Component | Version |
 | --- | --- |
 | Computer | Windows x64; portable package includes Node 24.11.1 |
-| Codex CLI | 0.146.0 |
+| Codex CLI | 0.160.0; 0.146.0 for legacy history rollback |
 | Codex desktop | 26.901.6511.0 IPC adaptation; desktop upgrades may require changes |
 
 Models use your existing local Codex configuration. The connector is currently available for Windows; macOS and Linux connectors are not supported.

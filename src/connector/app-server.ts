@@ -50,9 +50,13 @@ export class AppServer extends EventEmitter {
   requests = new Map<string, Json>();
   private responding=new Set<string>();
   constructor(public bin = resolveCodex(), private env: NodeJS.ProcessEnv = process.env) { super(); }
+  legacyRuntime() {
+    const bin=this.env.CODEX_LEGACY_BIN;
+    return bin&&bin!==this.bin&&existsSync(bin)?new AppServer(resolveCodex(bin),this.env):undefined;
+  }
   async start() {
     if (this.child) return;
-    if(this.env.CODEX_PROFILE)throw new BridgeError('unsupported_profile','当前验证的 Codex 0.146.0 不支持为 app-server 选择命名 profile。请使用默认配置，或连接已经使用该配置的官方桌面会话；不会自动换用其他模型。');
+    if(this.env.CODEX_PROFILE)throw new BridgeError('unsupported_profile','连接器暂不支持为 app-server 选择命名 profile。请使用默认配置，或连接已经使用该配置的官方桌面会话；不会自动换用其他模型。');
     const args = ['app-server', '--stdio'];
     const child = spawn(this.bin, args, { cwd: this.env.CODEX_HOME || join(homedir(), '.codex'), env: { ...this.env }, windowsHide: true, stdio: 'pipe' });
     this.child = child;
