@@ -88,10 +88,14 @@ try{
   const revised=await control.read(view.id);
   assert.equal(receivedModel,'gpt-6.1-sol');assert.equal(receivedEffort,'medium');assert.equal(revised.model,'gpt-6.1-sol');assert.equal(revised.effort,'medium');
   assert.equal(revised.turns.length,1);assert.match(revised.turns[0].items.find(item=>item.role==='user')?.text||'',/Revised fixture response/);
+  const reloaded=await control.handle({id:'reload',action:'runtime.reload',payload:{generation:control.generation,expectedBin:nativeBin}});
+  assert.equal(reloaded.restored,3);
+  const restored=await control.read(view.id);assert.equal(restored.source,'connector');assert.equal(restored.turns.length,1);
+  assert.equal((await control.read(forked.threadId)).turns.length,1);assert.equal((await control.read(stoppedFork.threadId)).turns.length,3);
   assert.equal((await control.read(stoppedFork.threadId)).turns.length,3,'Editing the original must preserve the fork.');
   const profiled=new AppServer(nativeBin,{...process.env,CODEX_HOME:home,CMW_TEST_KEY:fixtureKey,CODEX_PROFILE:'mobile'});
   try{await assert.rejects(profiled.start(),/不支持/);}finally{profiled.close();}
-  console.log(JSON.stringify({result:'passed',layer:'native-fixture',nativeBinary:nativeBin,nativeVersion:runtime.version,checks:['custom provider inherited','model and env credential reached local fixture','existing access policy inherited','thread start/read including empty session','streamed reply','steer expected turn','interrupt same turn','connector create/read/send','earlier-turn fork excludes later history and appears in mobile list','interrupted turn can be forked and edited','earlier edit replaces later history in the same thread and preserves forks','web send/edit actions preserve selected model and effort through the native HTTP request','unsupported profile rejected explicitly'],liveChatGPT:false,uiAcceptance:false}));
+  console.log(JSON.stringify({result:'passed',layer:'native-fixture',nativeBinary:nativeBin,nativeVersion:runtime.version,checks:['custom provider inherited','model and env credential reached local fixture','existing access policy inherited','thread start/read including empty session','streamed reply','steer expected turn','interrupt same turn','connector create/read/send','earlier-turn fork excludes later history and appears in mobile list','interrupted turn can be forked and edited','earlier edit replaces later history in the same thread and preserves forks','web send/edit actions preserve selected model and effort through the native HTTP request','idle runtime reload restores the original and forked histories','unsupported profile rejected explicitly'],liveChatGPT:false,uiAcceptance:false}));
 }finally{
   control.close();api.closeAllConnections();await new Promise<void>(r=>api.close(()=>r()));
   // Wait only for this isolated child to release its temporary database on Windows.

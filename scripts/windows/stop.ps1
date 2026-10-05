@@ -1,10 +1,13 @@
+param([ValidateSet('all','connector','relay')][string]$Mode='all',[int]$ExpectedPid=0)
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-foreach($entry in @('connector','relay')){
+$entries=if($Mode -eq 'all'){@('connector','relay')}else{@($Mode)}
+foreach($entry in $entries){
   $pidFile=Join-Path $projectRoot ".local\$entry.pid"
   if(-not(Test-Path -LiteralPath $pidFile)){continue}
   $recordedId=Get-Content -LiteralPath $pidFile
   if($recordedId -notmatch '^\d+$'){throw 'Invalid process record'}
+  if($entry -eq 'connector' -and $ExpectedPid -and [int]$recordedId -ne $ExpectedPid){throw 'Connector process changed; check again before stopping'}
   $proc=Get-CimInstance Win32_Process -Filter "ProcessId=$recordedId" -ErrorAction SilentlyContinue
   $modulePath=Join-Path $projectRoot "build\$entry.mjs"
   if($proc -and $proc.CommandLine -and $proc.CommandLine.Contains($modulePath)){

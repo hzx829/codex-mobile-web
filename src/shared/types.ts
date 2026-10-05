@@ -1,5 +1,5 @@
 export type Json = Record<string, any>;
-export type RequestAction = 'info' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'preview.start' | 'preview.stop';
+export type RequestAction = 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'preview.start' | 'preview.stop';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
 export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string }

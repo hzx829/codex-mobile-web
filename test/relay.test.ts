@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {once,EventEmitter} from 'node:events';
 import {WebSocket} from 'ws';
 import {randomUUID} from 'node:crypto';
-import {createServer} from 'node:http';
+import {createServer,request} from 'node:http';
 import {WebSocketServer} from 'ws';
 import {createRelay} from '../src/server/relay.js';
 import {Ledger} from '../src/connector/ledger.js';
@@ -20,6 +20,19 @@ function waitFrame(ws:WebSocket,predicate:(v:any)=>boolean):Promise<any>{return 
   const timer=setTimeout(()=>{ws.off('message',listen);reject(Error('frame timeout'));},3000);
   const listen=(b:any)=>{const value=JSON.parse(b.toString());if(predicate(value)){clearTimeout(timer);ws.off('message',listen);resolve(value);}};ws.on('message',listen);
 });}
+
+async function httpRequest(url:string,options:{method?:string;headers?:Record<string,string>;body?:string;redirect?:string}={}){
+  // These are protocol tests. Node HTTP accepts Windows' low ephemeral ports.
+  return new Promise<{status:number;headers:Headers;text:()=>Promise<string>;json:()=>Promise<any>}>((resolve,reject)=>{
+    const req=request(url,{method:options.method,headers:options.headers},async res=>{
+      try{
+        const chunks:Buffer[]=[];for await(const chunk of res)chunks.push(Buffer.from(chunk));const body=Buffer.concat(chunks).toString();
+        const headers=new Headers();for(const [key,value] of Object.entries(res.headers))if(value!==undefined)headers.set(key,Array.isArray(value)?value.join(','):value);
+        resolve({status:res.statusCode!,headers,text:async()=>body,json:async()=>JSON.parse(body)});
+      }catch(error){reject(error);}
+    });req.on('error',reject);req.end(options.body);
+  });
+}
 
 test('a binary result larger than one frame downloads intact through the selected machine and session',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'cmw-download-')),name='演示 deck.pptx',source=Buffer.alloc(MAX_FRAME+137);
@@ -84,7 +97,7 @@ test('token gate, machine routing and receipt recovery after phone disconnect',a
     const received=waitFrame(second,m=>m.type==='received'&&m.id==='image'),imageResult=waitFrame(second,m=>m.type==='response'&&m.id==='image');
     second.send(imageRequest);
     await received;assert.equal((await imageResult).result.state,'accepted');
-    assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status,200);
+    assert.equal((await httpRequest(`http://127.0.0.1:${port}/health`)).status,200);
   }finally{await relay.close();ledger.close();}
 });
 
@@ -117,50 +130,50 @@ test('preview tunnels HTTP and WebSocket only for its owner',async()=>{
       }else if(message.type==='preview.stop')local.stop(message.sessionId,message.threadId);
       else if(message.type?.startsWith('proxy.'))local.handle(message);
     });
-    assert.equal((await fetch(proxy)).status,401);
+    assert.equal((await httpRequest(proxy)).status,401);
     const response=waitFrame(owner,m=>m.type==='response'&&m.id==='open');
     owner.send(JSON.stringify({type:'request',id:'open',machineId:'pc',action:'preview.start',payload:{threadId:'thread-a',url:`http://127.0.0.1:${(app.address() as any).port}/`}}));
     const session=(await response).result;
     assert.equal(session.threadId,'thread-a');
     assert.equal(session.previewPort,(relay.previewServer.address() as any).port);
-    const entry=await fetch(`${proxy}/_bridge/enter?ticket=${session.ticket}`,{redirect:'manual'});
+    const entry=await httpRequest(`${proxy}/_bridge/enter?ticket=${session.ticket}`,{redirect:'manual'});
     assert.equal(entry.status,302);const cookie=entry.headers.get('set-cookie')!.split(';')[0];
-    assert.equal((await fetch(`${proxy}/_bridge/enter?ticket=${session.ticket}`)).status,401);
-    assert.equal((await fetch(`${proxy}/_bridge/enter?session=${session.sessionId}&ticket=${session.ticket}`,{headers:{cookie},redirect:'manual'})).status,302);
-    assert.equal((await fetch(`${proxy}/_bridge/enter?session=another&ticket=${session.ticket}`,{headers:{cookie},redirect:'manual'})).status,401);
-    const restricted=await fetch(`${proxy}/no-frame`,{headers:{cookie}});assert.equal(restricted.headers.get('x-frame-options'),'DENY');assert.equal(restricted.headers.get('content-security-policy'),"frame-ancestors 'none'");
-    const policy=(await fetch(`http://127.0.0.1:${(relay.server.address() as any).port}/health`)).headers.get('content-security-policy')!;
+    assert.equal((await httpRequest(`${proxy}/_bridge/enter?ticket=${session.ticket}`)).status,401);
+    assert.equal((await httpRequest(`${proxy}/_bridge/enter?session=${session.sessionId}&ticket=${session.ticket}`,{headers:{cookie},redirect:'manual'})).status,302);
+    assert.equal((await httpRequest(`${proxy}/_bridge/enter?session=another&ticket=${session.ticket}`,{headers:{cookie},redirect:'manual'})).status,401);
+    const restricted=await httpRequest(`${proxy}/no-frame`,{headers:{cookie}});assert.equal(restricted.headers.get('x-frame-options'),'DENY');assert.equal(restricted.headers.get('content-security-policy'),"frame-ancestors 'none'");
+    const policy=(await httpRequest(`http://127.0.0.1:${(relay.server.address() as any).port}/health`)).headers.get('content-security-policy')!;
     assert.ok(policy.includes(`frame-src ${proxy};`));assert.ok(policy.includes("script-src 'self';"));
-    assert.match(await (await fetch(proxy,{headers:{cookie}})).text(),/Local app/);
-    assert.deepEqual(await (await fetch(`${proxy}/api`,{headers:{cookie}})).json(),{ok:true});
-    assert.equal(await (await fetch(`${proxy}/echo`,{method:'POST',headers:{cookie},body:'hello'})).text(),'hello');
-    assert.equal((await fetch(`${proxy}/redirect`,{headers:{cookie},redirect:'manual'})).headers.get('location'),`${proxy}/api`);
+    assert.match(await (await httpRequest(proxy,{headers:{cookie}})).text(),/Local app/);
+    assert.deepEqual(await (await httpRequest(`${proxy}/api`,{headers:{cookie}})).json(),{ok:true});
+    assert.equal(await (await httpRequest(`${proxy}/echo`,{method:'POST',headers:{cookie},body:'hello'})).text(),'hello');
+    assert.equal((await httpRequest(`${proxy}/redirect`,{headers:{cookie},redirect:'manual'})).headers.get('location'),`${proxy}/api`);
     const socket=new WebSocket(`${proxy.replace('http','ws')}/hot`,{headers:{cookie,origin:proxy}});await once(socket,'open');
     const echoed=once(socket,'message');socket.send('hot reload');assert.equal((await echoed)[0].toString(),'hot reload');socket.close();
     assert.equal(wsOrigin,`http://127.0.0.1:${(app.address() as any).port}`);
     const wrongThread=waitFrame(other,m=>m.type==='response'&&m.id==='wrong-thread');
     other.send(JSON.stringify({type:'request',id:'wrong-thread',machineId:'pc',action:'preview.stop',payload:{sessionId:session.sessionId,threadId:'thread-b'}}));
     assert.equal((await wrongThread).result.stopped,false);
-    assert.match(await (await fetch(proxy,{headers:{cookie}})).text(),/Local app/);
+    assert.match(await (await httpRequest(proxy,{headers:{cookie}})).text(),/Local app/);
     const missingThread=waitFrame(other,m=>m.type==='response'&&m.id==='missing-thread');
     other.send(JSON.stringify({type:'request',id:'missing-thread',machineId:'pc',action:'preview.start',payload:{url:'http://localhost:5173'}}));
     assert.equal((await missingThread).error.code,'invalid');
     owner.close();
-    assert.match(await (await fetch(proxy,{headers:{cookie}})).text(),/Local app/);
+    assert.match(await (await httpRequest(proxy,{headers:{cookie}})).text(),/Local app/);
     const stopped=waitFrame(other,m=>m.type==='response'&&m.id==='stop');
     other.send(JSON.stringify({type:'request',id:'stop',machineId:'pc',action:'preview.stop',payload:{sessionId:session.sessionId,threadId:'thread-a'}}));
     await stopped;
-    assert.equal((await fetch(proxy,{headers:{cookie}})).status,401);
+    assert.equal((await httpRequest(proxy,{headers:{cookie}})).status,401);
     const nextResponse=waitFrame(other,m=>m.type==='response'&&m.id==='open-b');
     other.send(JSON.stringify({type:'request',id:'open-b',machineId:'pc',action:'preview.start',payload:{threadId:'thread-b',url:`http://127.0.0.1:${(app.address() as any).port}/api`}}));
     const next=(await nextResponse).result;assert.equal(next.threadId,'thread-b');
-    const nextEntry=await fetch(`${proxy}/_bridge/enter?session=${next.sessionId}&ticket=${next.ticket}`,{redirect:'manual'});
+    const nextEntry=await httpRequest(`${proxy}/_bridge/enter?session=${next.sessionId}&ticket=${next.ticket}`,{redirect:'manual'});
     assert.equal(nextEntry.headers.get('location'),'/api');const nextCookie=nextEntry.headers.get('set-cookie')!.split(';')[0];
     const staleStop=waitFrame(other,m=>m.type==='response'&&m.id==='stale-stop');
     other.send(JSON.stringify({type:'request',id:'stale-stop',machineId:'pc',action:'preview.stop',payload:{sessionId:session.sessionId,threadId:'thread-a'}}));
     assert.equal((await staleStop).result.stopped,false);
-    assert.equal((await fetch(proxy,{headers:{cookie}})).status,401);
-    assert.deepEqual(await (await fetch(`${proxy}/api`,{headers:{cookie:nextCookie}})).json(),{ok:true});
+    assert.equal((await httpRequest(proxy,{headers:{cookie}})).status,401);
+    assert.deepEqual(await (await httpRequest(`${proxy}/api`,{headers:{cookie:nextCookie}})).json(),{ok:true});
     other.close();connector.close();
   }finally{await relay.close();appWs.close();await new Promise<void>(resolve=>app.close(()=>resolve()));}
 });
@@ -189,7 +202,7 @@ test('a disconnected pending preview only cleans up its own session, leaving the
     connector.send(JSON.stringify({type:'response',id:requestA.id,result:{sessionId:'preview-a',threadId:'a',url:'http://localhost:5173'}}));
     assert.equal((await cleaned).threadId,'a');
     assert.deepEqual(stops,[{type:'preview.stop',sessionId:'preview-a',threadId:'a'}]);
-    const entry=await fetch(`${proxy}/_bridge/enter?session=${sessionB.sessionId}&ticket=${sessionB.ticket}`,{redirect:'manual'});
+    const entry=await httpRequest(`${proxy}/_bridge/enter?session=${sessionB.sessionId}&ticket=${sessionB.ticket}`,{redirect:'manual'});
     assert.equal(entry.status,302);
   }finally{await relay.close();}
 });

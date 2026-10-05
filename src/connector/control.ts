@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { AppServer } from './app-server.js';
+import { AppServer, resolveCodex } from './app-server.js';
+import { resolve } from 'node:path';
 import { Desktop } from './desktop.js';
 import { Ledger } from './ledger.js';
 import { desktopTurns, normalizeSession } from './normalize.js';
@@ -21,6 +22,7 @@ function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
 }
 
 export class Control extends EventEmitter {
+  bundleHash='';
   generation=randomUUID();
   private loaded=new Set<string>();
   private settings=new Map<string,Json>();
@@ -28,6 +30,8 @@ export class Control extends EventEmitter {
   private starting=new Map<string,string>();
   private contexts=new Map<string,ContextUsage|null>();
   private locks=new Map<string,Promise<unknown>>();
+  private reloading=false;
+  private reloadLease?:NodeJS.Timeout;
   constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions) {
     super();
     runtime.on('event',(e:Json)=>{
@@ -46,6 +50,8 @@ export class Control extends EventEmitter {
   async handle(req:BridgeRequest):Promise<any> {
     const p=req.payload||{};
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
+    if(req.action==='runtime.reload')return this.reloadRuntime(p);
+    if(this.reloading)throw new BridgeError('maintenance','连接器正在适配 Codex 更新，请稍后刷新');
     if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.edit','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,()=>this.mutate(req.action,p)));
@@ -56,7 +62,7 @@ export class Control extends EventEmitter {
       const models=await readModels(this.runtime);
       const c=config.config||{};
       const projects=await this.projects(c);
-      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',models:models.data||[],runtime:{bin:this.runtime.bin,version:this.runtime.version},generation:this.generation};
+      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',models:models.data||[],runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},generation:this.generation};
     }
     if(req.action==='sessions.list') {
       const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
@@ -298,5 +304,46 @@ export class Control extends EventEmitter {
   private rememberSettings(id:string,settings:Json) {
     this.settings.set(id,{...this.settings.get(id),...settings,...(settings.effort?{reasoningEffort:settings.effort}:{})});
   }
-  close(){this.desktop.close();this.runtime.close();this.ledger.close();}
+  private async reloadRuntime(p:Json):Promise<Json> {
+    if(p.generation!==this.generation)throw new BridgeError('changed','连接器已变化，请重新检查');
+    const bin=resolveCodex(),path=(value:string)=>process.platform==='win32'?resolve(value).toLowerCase():resolve(value);
+    if(typeof p.expectedBin!=='string'||path(p.expectedBin)!==path(bin))throw new BridgeError('changed','Codex 安装或执行端配置已变化，请重新检查');
+    if(this.reloading||this.locks.size||this.starting.size||this.runtime.requests.size||this.ledger.db.prepare("SELECT COUNT(*) AS n FROM operations WHERE state='pending'").get()?.n)
+      throw new BridgeError('active','连接器有任务或操作尚未结束，稍后再适配');
+    // Set this before the first await, so a new turn cannot race the idle check.
+    this.reloading=true;
+    const previousBin=this.runtime.bin,savedSettings=new Map(this.settings),ids=[...this.loaded];
+    let stopped=false,prepared=false;
+    const restore=async()=>{
+      for(const id of ids){
+        const r=await this.runtime.rpc('thread/resume',{threadId:id});
+        this.loaded.add(id);this.settings.set(id,{...savedSettings.get(id),model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy});
+      }
+    };
+    try {
+      for(const id of ids){
+        const view=await this.read(id,5);
+        if(view.running||view.activeTurnId||view.requests.length)throw new BridgeError('active','连接器任务仍在运行，稍后再适配');
+        if(!view.turns.length)throw new BridgeError('active','连接器有尚未保存首轮的空会话，完成首轮后再适配');
+      }
+      if(p.prepareOnly===true){
+        prepared=true;
+        this.reloadLease=setTimeout(()=>{this.reloading=false;this.reloadLease=undefined;this.emit('change',null);},60000);
+        this.reloadLease.unref();
+        return {prepared:true,generation:this.generation,threadIds:ids,runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},leaseMs:60000};
+      }
+      await this.runtime.stop();stopped=true;
+      this.runtime.bin=bin;await this.runtime.start();await restore();
+      this.emit('change',null);
+      return {runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},generation:this.generation,restored:ids.length};
+    }catch(error){
+      if(stopped){
+        try{await this.runtime.stop();this.runtime.bin=previousBin;await this.runtime.start();await restore();}
+        catch{throw new BridgeError('runtime_error','Codex 切换与原运行端恢复失败，需要核实连接器状态',true);}
+        throw new BridgeError('runtime_error','Codex 切换失败，已恢复原运行端；请修复适配后重试');
+      }
+      throw error;
+    }finally{if(!prepared)this.reloading=false;}
+  }
+  close(){clearTimeout(this.reloadLease);this.desktop.close();this.runtime.close();this.ledger.close();}
 }

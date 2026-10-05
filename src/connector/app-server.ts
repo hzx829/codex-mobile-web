@@ -118,5 +118,13 @@ export class AppServer extends EventEmitter {
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
     this.pending.clear(); this.emit('offline');
   }
-  close() { this.child?.stdin.end(); this.child?.kill(); }
+  async stop():Promise<void> {
+    const child=this.child;if(!child)return;
+    await new Promise<void>((resolve,reject)=>{
+      const timer=setTimeout(()=>{child.off('exit',ended);reject(new Error('Codex 进程未结束，不能切换运行端'));},10000);
+      const ended=()=>{clearTimeout(timer);resolve();};
+      child.once('exit',ended);child.stdin.end();child.kill();
+    });
+  }
+  close() { void this.stop().catch(()=>{}); }
 }

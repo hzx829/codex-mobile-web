@@ -1,4 +1,6 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -14,6 +16,7 @@ if(config.codexHome)process.env.CODEX_HOME=config.codexHome;
 if(config.profile)process.env.CODEX_PROFILE=config.profile;
 mkdirSync(config.dataDir,{recursive:true});
 const control=new Control(new Ledger(join(config.dataDir,'operations.sqlite')));
+control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
 await control.start();
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
