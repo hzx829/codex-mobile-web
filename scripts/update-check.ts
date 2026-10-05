@@ -1,4 +1,4 @@
-// Invoked by the chat heartbeat. Changed installations receive real compatibility checks.
+// Invoked on demand. Changed installations receive real compatibility checks.
 import {execFileSync,spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {createReadStream,existsSync,openSync,closeSync} from 'node:fs';

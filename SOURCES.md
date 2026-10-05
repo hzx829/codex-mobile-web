@@ -30,6 +30,8 @@ Remodex 的协议思路可参考，但其被检查版本仍主要从 `conversati
 
 2026-10-05 补上更新检测与聊天定时适配：检测 WindowsApps 中桌面安装包及 `app.asar` 内容、附带 CLI 路径/版本/内容和当前适配代码。CLI 仍为 0.160.0，但桌面已从 26.930.3748.0 更新至 26.930.4958.0，此变化不能按 CLI 版本相同跳过。检查失败不推进通过基线，部署构建通过握手中的启动时文件摘要核对；运行端切换在连接器内部阻止新操作、核查所有已接入会话并恢复，失败尝试回退。原生夹具验证重新接入后保留原会话及分叉历史，未使用真实账号或浏览器页面。
 
+同日按用户要求停用聊天定时自动化，改为桌面脚本按需检查与切换；保留原生检查、部署身份核对及空闲保护。
+
 2026-09-27 核对本地生成的 `ThreadTokenUsage`、`ThreadTokenUsageUpdatedNotification`、`GetAccountRateLimitsResponse`、`RateLimitWindow`，以及桌面研究副本中的 `latestTokenUsageInfo` 映射。上下文取最近一次用量；额度优先 `rateLimitsByLimitId`，`resetsAt` 为 Unix 秒。本机 `account/rateLimits/read` 只读调用实际返回 7 天额度窗口；未请求额度重置或购买操作。
 
 额外兼容边界：CLI 0.146.0 的 `--profile` 仅支持其列出的运行命令，不支持 app-server，旧式 `-c profile=...` 同样拒绝。第一版明确拒绝连接器命名 profile 配置；不自行合并 TOML 或降级到不同模型。
