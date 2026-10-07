@@ -33,6 +33,8 @@ try {
     }
     return $result
   }
+  Write-Host '正在启动 Codex Web…'
+  & (Join-Path $PSScriptRoot 'start.ps1') -NoOpen 2>&1 | Out-File -LiteralPath $launcherLog -Append -Encoding UTF8
   Write-Host '正在检查 Codex Web 更新，请稍候…'
   $result=Read-UpdateResult
   if($result.action -eq 'deploy-connector') {

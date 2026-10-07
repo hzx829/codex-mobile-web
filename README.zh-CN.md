@@ -52,7 +52,7 @@ flowchart LR
 
 Windows 上未指定 `codexBin` 时，连接器优先使用桌面安装目录中最近的 Codex。模型和思考程度目录与模型请求使用同一个执行端。旧历史编辑所需的 `legacyCodexBin` 仅负责回退历史，模型请求仍由当前执行端处理。
 
-源码目录执行 `npm run update:check -- --apply` 检测桌面程序、CLI 文件和适配代码的变化。变化后运行类型检查、回归、原生夹具和构建，核对实际部署的连接器构建；需要切换运行端时，只在所有自管会话、审批和操作空闲后执行，切换期间阻止新操作并恢复会话，失败则尝试回退。尚未保存首轮的空会话也会延后切换。检查失败或部署构建过旧时返回需修复的动作，不更新通过基线；`--retry` 可重跑失败的检查。记录在 `.local/update-check.json`、`.local/update-check-last.json` 和 `.local/update-check.log`。本机改为按需双击桌面的“Codex Web 更新检查.cmd”，调用 `scripts/windows/update.ps1` 完成检查及已通过检查的连接器更新，结果窗口会保留；原定时自动化已停用。需要改代码或部署中继网页时，脚本显示原因及日志，交给 Codex 继续处理。真实账号回复与页面操作仍由人类验证。
+源码目录执行 `npm run update:check -- --apply` 检测桌面程序、CLI 文件和适配代码的变化。变化后运行类型检查、回归、原生夹具和构建，核对实际部署的连接器构建；需要切换运行端时，只在所有自管会话、审批和操作空闲后执行，切换期间阻止新操作并恢复会话，失败则尝试回退。尚未保存首轮的空会话也会延后切换。检查失败或部署构建过旧时返回需修复的动作，不更新通过基线；`--retry` 可重跑失败的检查。记录在 `.local/update-check.json`、`.local/update-check-last.json` 和 `.local/update-check.log`。本机改为按需双击桌面的“Codex Web 更新检查.cmd”，调用 `scripts/windows/update.ps1`：先按现有配置启动未运行的服务，再完成检查及已通过检查的连接器更新；已运行的服务不会重复启动，结果窗口会保留。原定时自动化已停用。需要改代码或部署中继网页时，脚本显示原因及日志，交给 Codex 继续处理。真实账号回复与页面操作仍由人类验证。
 
 返回 `deploy-connector` 时运行 `npm run update:deploy`：连接器先锁定空闲状态 60 秒，只停止已核对的本机连接器进程，部署通过检查的构建并恢复全部已接入会话。必须有与实际运行构建相符的已确认备份，部署失败则回退；回执为 `.local/connector-update-receipt.json`。之后再运行 `update:check -- --apply` 和 `check:deployed` 更新通过基线。检测器也比较中继实际网页入口与通过检查的网页构建，不符时返回 `deploy-web`；交由 Codex 部署静态资源后才推进通过基线。
 
