@@ -29,5 +29,6 @@ test('desktop framing handles fragmented snapshots and rejects patch gaps',async
     await desktop.request('thread-follower-interrupt-turn',{});assert.equal(requests.at(-1).version,4);
     await desktop.request('thread-follower-start-turn',{});assert.equal(requests.at(-1).version,2);
     await desktop.request('thread-follower-edit-last-user-turn',{});assert.equal(requests.at(-1).version,2);
+    await desktop.request('thread-follower-update-thread-settings',{});assert.equal(requests.at(-1).version,2);
   }finally{desktop.close();remote?.destroy();await new Promise<void>(r=>server.close(()=>r()));if(original===undefined)delete process.env.CODEX_IPC_PATH;else process.env.CODEX_IPC_PATH=original;}
 });

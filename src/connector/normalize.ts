@@ -14,7 +14,8 @@ export function desktopTurns(state:Json):Json[] {
 export function normalizeItem(item:Json):MessageItem {
   const result:MessageItem={id:item.id,type:item.type,role:'activity',text:''};
   switch(item.type) {
-    case 'userMessage': result.role='user';result.text=contentText(item.content);result.images=(item.content||[]).filter((x:Json)=>x.type==='image'&&/^data:image\/(png|jpeg|webp|gif);base64,/.test(x.url||'')).map((x:Json)=>x.url);break;
+    case 'steeringUserMessage':
+    case 'userMessage': result.role='user';result.text=contentText(item.content||item.input);result.images=(item.content||item.input||[]).filter((x:Json)=>x.type==='image'&&/^data:image\/(png|jpeg|webp|gif);base64,/.test(x.url||'')).map((x:Json)=>x.url);break;
     case 'agentMessage': result.role='assistant';result.text=bounded(item.text);break;
     case 'reasoning': result.text=contentText(item.summary);break;
     case 'plan': result.text=bounded(item.text)||contentText(item.plan?.map((p:Json)=>`${p.status}: ${p.step}`));break;
@@ -37,8 +38,9 @@ export function normalizeSession(raw:Json,source:SessionView['source'],requests:
     return {id:id||`historical-${index}`,status:t.status,items,canFork:Boolean(id)&&turnFinished(t.status),diff:bounded(t.diff)||undefined,error:t.error?.message};
   });
   const runtimeActive=raw.threadRuntimeStatus?.type==='active'||raw.status?.type==='active';
-  const unresolvedActive=runtimeActive&&!active;
+  const unresolvedActive=runtimeActive&&!active||Boolean(active&&!active.turnId&&!active.id);
   return {id:raw.id,sessionId:typeof raw.sessionId==='string'&&raw.sessionId?raw.sessionId:raw.id,title:raw.title||raw.name||raw.preview?.slice(0,80)||'新会话',cwd:raw.cwd||'',model:raw.latestModel||raw.model||'',provider:raw.modelProvider||'',effort:raw.latestReasoningEffort||raw.reasoningEffort||'',approvalPolicy:raw.approvalPolicy||raw.threadSettings?.approvalPolicy||'',source,
+    serviceTier:raw.latestThreadSettings?.serviceTier!==undefined?raw.latestThreadSettings.serviceTier:raw.threadSettings?.serviceTier!==undefined?raw.threadSettings.serviceTier:raw.serviceTier,
     activeTurnId:active?.turnId||active?.id||null,running:Boolean(active||runtimeActive),contextUsage:contextUsage(raw.latestTokenUsageInfo),turns,requests:requests.filter(r=>!r.completed),canControl:source!=='history'&&!unresolvedActive,hasMore:all.length>limit,
     notice:unresolvedActive?'正在同步运行中的任务，暂不能操作':undefined};
 }

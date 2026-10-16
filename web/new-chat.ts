@@ -9,7 +9,7 @@ export async function createFirstTurn(call:Call,input:Json,onCreated:(threadId:s
     const session=await call('session.read',{threadId});
     if(!session.canControl||session.activeTurnId)return {stage,threadId,result:{state:'failed',error:{message:'会话已建立，请确认当前状态后发送。'}}};
     sent=true;
-    const result=await call('turn.send',{threadId,source:session.source,generation:session.generation,expectedTurnId:null,text:input.text,images:input.images,model:input.model||undefined,effort:input.effort||undefined,approvalPolicy:input.approvalPolicy||undefined,opId:input.sendId});
+    const result=await call('turn.send',{threadId,source:session.source,generation:session.generation,expectedTurnId:null,text:input.text,images:input.images,model:input.model||undefined,effort:input.effort||undefined,approvalPolicy:input.approvalPolicy||undefined,serviceTier:input.serviceTier,opId:input.sendId});
     return {stage,threadId,result};
   }catch(e:any){
     return {stage,threadId,result:{state:(stage==='create'||sent)&&e.uncertain?'uncertain':'failed',error:{message:e.message||'连接失败，输入已保留'}}};

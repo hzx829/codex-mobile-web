@@ -1,5 +1,7 @@
 # 来源与版本基线
 
+2026-10-15 对照本机桌面 26.1007.9446.0 的 `app.asar`：`thread-follower-steer-turn` 的处理函数直接读取 `restoreMessage.cwd` 与 `restoreMessage.context`，旧连接器遗漏该对象；`thread-follower-update-thread-settings` 的 IPC 版本为 2。已补齐追加消息上下文和版本，并识别桌面的 `steeringUserMessage`。运行端模型目录提供极速档位，`turn/start.serviceTier` 控制开启或显式清除。CLI 0.162.0-alpha.17.2 的隔离 Responses 夹具验证极速参数到达 HTTP、关闭恢复普通速度，以及 Web 追加和排队在当前轮结束后只发送一次；真实账号调用和界面操作仍由人类验收。
+
 核对日期：2026-09-06。项目代码独立实现；未整体 fork 候选项目，也没有把它们的账号、配对、E2EE 或浏览器控制组件带入本项目。
 
 | 来源 | 固定版本 | 本项目用途 |

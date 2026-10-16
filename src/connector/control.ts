@@ -14,6 +14,7 @@ import {imageDataUrl,MAX_IMAGES} from '../shared/images.js';
 import {contextUsage,accountLimits} from './usage.js';
 import {readModels,reasoningEffort} from './models.js';
 import {revertThread} from './revert.js';
+import {fastTier} from '../shared/models.js';
 
 function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   if(value===undefined||value===null||value==='')return undefined;
@@ -32,6 +33,9 @@ export class Control extends EventEmitter {
   private locks=new Map<string,Promise<unknown>>();
   private reloading=false;
   private reloadLease?:NodeJS.Timeout;
+  private queueTimer:NodeJS.Timeout;
+  private draining=false;
+  private closed=false;
   constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions) {
     super();
     runtime.on('event',(e:Json)=>{
@@ -39,12 +43,14 @@ export class Control extends EventEmitter {
       if(e.method==='turn/completed')this.starting.delete(e.params.threadId);
       if(e.method==='thread/tokenUsage/updated')this.contexts.set(e.params.threadId,contextUsage(e.params.tokenUsage));
       if(e.method==='thread/compacted')this.contexts.delete(e.params.threadId);
+      if(e.method==='thread/settings/updated')this.rememberSettings(e.params.threadId,e.params.threadSettings);
       this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
     });
     runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.settings.clear();this.contexts.clear();this.generation=randomUUID();this.emit('change',null);});
     desktop.on('change',(id:string)=>this.emit('change',id));
     desktop.on('resync',(id:string)=>{this.emit('change',id);});
     desktop.on('offline',()=>{this.generation=randomUUID();this.emit('change',null);});
+    this.queueTimer=setInterval(()=>void this.drainQueue(),1000);this.queueTimer.unref();
   }
   async start(){await this.runtime.start();await this.desktop.connect().catch(()=>{});}
   async handle(req:BridgeRequest):Promise<any> {
@@ -52,7 +58,7 @@ export class Control extends EventEmitter {
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
     if(req.action==='runtime.reload')return this.reloadRuntime(p);
     if(this.reloading)throw new BridgeError('maintenance','连接器正在适配 Codex 更新，请稍后刷新');
-    if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.edit','turn.stop','request.respond'].includes(req.action)) {
+    if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.cancelQueued','turn.edit','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,()=>this.mutate(req.action,p)));
     }
@@ -62,7 +68,7 @@ export class Control extends EventEmitter {
       const models=await readModels(this.runtime);
       const c=config.config||{};
       const projects=await this.projects(c);
-      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',models:models.data||[],runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},generation:this.generation};
+      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',serviceTier:c.service_tier??null,models:models.data||[],runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},generation:this.generation};
     }
     if(req.action==='sessions.list') {
       const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
@@ -97,10 +103,6 @@ export class Control extends EventEmitter {
       view.hasMore=hasMore||view.hasMore;
       if(notice)view.notice=notice;
       if(resumeUnavailable)view.resumeUnavailable=true;
-      let starting=this.starting.get(id);
-      if(starting&&raw.turns?.some((t:Json)=>t.id===starting&&t.status!=='inProgress')){this.starting.delete(id);starting=undefined;}
-      if(starting&&!view.activeTurnId){view.activeTurnId=starting;view.running=true;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
-      else if(starting&&view.activeTurnId===starting)this.starting.delete(id);
       for(const turn of view.turns)turn.diff=this.diffs.get(turn.id)||turn.diff;
     } else {
       try {
@@ -114,6 +116,12 @@ export class Control extends EventEmitter {
         view.notice=notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
       }
     }
+    const starting=this.starting.get(id);
+    if(starting&&view.source!=='history') {
+      if(view.activeTurnId||view.turns.some(turn=>turn.id===starting&&turnFinished(turn.status)))this.starting.delete(id);
+      else {view.activeTurnId=starting;view.running=true;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
+    }
+    view.queuedMessages=this.ledger.queued(id).map(message=>({id:message.id,text:message.payload.text,imageCount:message.payload.images?.length||0,state:message.state,error:message.error}));
     view.generation=this.generation;return view;
   }
   private async runtimeThread(id:string,limit:number):Promise<{raw:Json;hasMore:boolean;notice?:string;resumeUnavailable?:boolean}> {
@@ -175,10 +183,14 @@ export class Control extends EventEmitter {
       const options:Json={cwd,historyMode:'legacy'};if(p.model)options.model=textRequired(p.model,'模型',200);
       const policy=approvalPolicy(p.approvalPolicy);if(policy)options.approvalPolicy=policy;
       const r=await this.runtime.rpc('thread/start',options);
-      this.loaded.add(r.thread.id);this.ledger.claim(r.thread.id);this.settings.set(r.thread.id,{model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy||policy,sessionId:r.thread.sessionId||r.thread.id});
+      this.loaded.add(r.thread.id);this.ledger.claim(r.thread.id);this.settings.set(r.thread.id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy||policy,sessionId:r.thread.sessionId||r.thread.id});
       this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider};
     }
     const id=textRequired(p.threadId,'会话');
+    if(action==='turn.cancelQueued') {
+      this.ledger.cancelQueued(id,textRequired(p.queuedId,'排队消息',100));
+      this.emit('change',id);return {threadId:id,kind:'queue_cancelled'};
+    }
     if(action==='session.fork') {
       const lastTurnId=textRequired(p.lastTurnId,'分叉位置',200);
       const source=await this.read(id,100);
@@ -188,7 +200,7 @@ export class Control extends EventEmitter {
       if(!r?.thread?.id)throw new BridgeError('unexpected','分叉结果未返回新会话，请刷新列表核实',true);
       const forkId=r.thread.id;
       this.loaded.add(forkId);this.ledger.claim(forkId);
-      this.settings.set(forkId,{model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy,sessionId:r.thread.sessionId||forkId});
+      this.settings.set(forkId,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy,sessionId:r.thread.sessionId||forkId});
       const title=`${source.title.slice(0,180)}（分叉）`;
       try {await this.runtime.rpc('thread/name/set',{threadId:forkId,name:title});}
       catch {this.emit('change',forkId);throw new BridgeError('partial',`分叉已创建，但标题保存未获确认。新会话：${forkId}`,true);}
@@ -206,6 +218,7 @@ export class Control extends EventEmitter {
     const session=await this.read(id);
     if(action==='session.archive') {
       if(session.running)throw new BridgeError('active','请等当前任务结束后再归档');
+      if(this.ledger.queued(id).length)throw new BridgeError('active','请先处理排队消息再归档');
       await this.runtime.rpc('thread/archive',{threadId:id});
       this.loaded.delete(id);this.settings.delete(id);this.contexts.delete(id);
       this.emit('change',id);return {threadId:id,archived:true};
@@ -215,10 +228,17 @@ export class Control extends EventEmitter {
       if(session.resumeUnavailable)throw new BridgeError('unsupported','此分页会话暂不能在连接器中继续，请在 Codex 桌面操作');
       if(!p.confirmIdle||session.activeTurnId)throw new BridgeError('active','请先在电脑结束原任务，再继续会话');
       const r=await this.runtime.rpc('thread/resume',{threadId:id});
-      this.loaded.add(id);this.ledger.claim(id);this.settings.set(id,{model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy,sessionId:r.thread?.sessionId||id});this.emit('change',id);return {threadId:id,model:r.model,provider:r.modelProvider};
+      this.loaded.add(id);this.ledger.claim(id);this.settings.set(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy,sessionId:r.thread?.sessionId||id});this.emit('change',id);return {threadId:id,model:r.model,provider:r.modelProvider};
+    }
+    if(p.generation!==this.generation||p.source!==session.source)throw new BridgeError('changed','连接状态已改变，请刷新任务后重试');
+    if(action==='turn.send'&&p.mode==='queue') {
+      if(session.source==='history')throw new BridgeError('read_only',session.notice||'当前会话暂不能操作');
+      await this.turnInput(p,p.model||session.model);
+      const settings=await this.turnSettings(p,session.model);
+      this.ledger.enqueue(p.opId,id,{threadId:id,source:session.source,text:p.text||'',images:p.images||[],...settings});
+      this.emit('change',id);return {threadId:id,kind:'queued'};
     }
     if(!session.canControl)throw new BridgeError('read_only',session.notice||'当前会话暂不能操作');
-    if(p.generation!==this.generation||p.source!==session.source)throw new BridgeError('changed','连接状态已改变，请刷新任务后重试');
     const context={conversationId:id,hostId:this.desktop.states.get(id)?.hostId||'local'};
     if(session.source==='desktop')await this.desktop.request('thread-owner-discovery',context,1500);
     if(action==='turn.edit') {
@@ -245,6 +265,7 @@ export class Control extends EventEmitter {
       this.emit('change',id);return {threadId:id,kind:'edited'};
     }
     if(action==='turn.send'||action==='turn.stop') {
+      if(action==='turn.send'&&p.mode!==undefined&&p.mode!=='steer')throw new BridgeError('invalid','发送方式无效');
       if(p.expectedTurnId!==session.activeTurnId)throw new BridgeError('changed','任务已发生变化，输入已保留，请刷新后发送');
       if(action==='turn.stop') {
         if(!session.activeTurnId)throw new BridgeError('finished','任务已经结束');
@@ -252,32 +273,26 @@ export class Control extends EventEmitter {
         else await this.runtime.rpc('turn/interrupt',{threadId:id,turnId:session.activeTurnId});
         return {threadId:id,turnId:session.activeTurnId,kind:'stop_requested'};
       }
-      if(p.images!==undefined&&(!Array.isArray(p.images)||p.images.length>MAX_IMAGES))throw new BridgeError('invalid','最多两张 PNG、JPEG 或 WebP，每张不超过 2 MiB');
-      const images=(p.images||[]).map(imageDataUrl);
-      const text=images.length&&(p.text===undefined||typeof p.text==='string'&&!p.text.trim())?'':textRequired(p.text,'输入');
-      // Desktop renders this input before app-server can supply protocol defaults.
-      const input:Json[]=text?[{type:'text',text,text_elements:[]}]:[];
-      if(images.length) {
-        // Unknown/custom providers remain text-first; only expose images when native metadata confirms them.
-        const models=await readModels(this.runtime);
-        const model=models.data?.find((m:Json)=>m.model===(!session.activeTurnId&&p.model||session.model));
-        if(!model?.inputModalities?.includes('image'))throw new BridgeError('unsupported','当前模型未确认图片能力');
-        input.push(...images.map((url:string)=>({type:'image',url})));
-      }
+      const input=await this.turnInput(p,!session.activeTurnId&&p.model||session.model);
       let result:any;
       if(session.activeTurnId) {
-        if(p.model||p.effort||p.approvalPolicy)throw new BridgeError('active','运行中补充沿用当前设置；下一轮可以更换');
+        if(p.model||p.effort||p.approvalPolicy||p.serviceTier!==undefined)throw new BridgeError('active','运行中补充沿用当前设置；下一轮可以更换');
         const params={input,expectedTurnId:session.activeTurnId};
-        result=session.source==='desktop'?await this.desktop.request('thread-follower-steer-turn',{...context,...params}):await this.runtime.rpc('turn/steer',{threadId:id,...params});
+        const text=input.filter(item=>item.type==='text').map(item=>item.text).join('\n');
+        const restoreMessage={id:p.opId,text,cwd:session.cwd,createdAt:Date.now(),context:{prompt:text,workspaceRoots:session.cwd?[session.cwd]:[],textElements:[],imageAttachments:[],fileAttachments:[],pastedTextAttachments:[],addedFiles:[],commentAttachments:[],mcpAppModelContextAttachments:[]}};
+        result=session.source==='desktop'?await this.desktop.request('thread-follower-steer-turn',{...context,...params,restoreMessage,clientUserMessageId:p.opId,attachments:[]}):await this.runtime.rpc('turn/steer',{threadId:id,...params});
       } else {
         const settings=await this.turnSettings(p,session.model);
         const request:Json={threadId:id,input,...settings};
         if(session.source==='desktop')result=await this.desktop.request('thread-follower-start-turn',{...context,turnStart:{request:{...request,clientUserMessageId:p.opId},context:{inheritThreadSettings:true}}});
-        else {result=await this.runtime.rpc('turn/start',request);if(result?.turn?.id)this.starting.set(id,result.turn.id);}
+        else result=await this.runtime.rpc('turn/start',request);
+        const started=result?.result?.turn?.id||result?.turn?.id;
+        if(!started)throw new BridgeError('unexpected','发送结果未返回轮次，请刷新会话核实',true);
+        this.starting.set(id,started);
         if(session.source==='connector')this.rememberSettings(id,settings);
       }
       this.emit('change',id);
-      return {threadId:id,turnId:result?.result?.turn?.id||result?.turn?.id||session.activeTurnId||null,kind:session.activeTurnId?'steer_accepted':'turn_accepted'};
+      return {threadId:id,turnId:result?.result?.turn?.id||result?.turn?.id||result?.result?.turnId||result?.turnId||session.activeTurnId||null,kind:session.activeTurnId?'steer_accepted':'turn_accepted'};
     }
     if(action==='request.respond') {
       const req=session.requests.find(r=>String(r.id)===String(p.requestId));
@@ -299,7 +314,54 @@ export class Control extends EventEmitter {
     if(p.model)settings.model=textRequired(p.model,'模型',200);
     if(p.effort)settings.effort=await reasoningEffort(this.runtime,p.effort,settings.model||currentModel);
     const policy=approvalPolicy(p.approvalPolicy);if(policy)settings.approvalPolicy=policy;
+    if(p.serviceTier!==undefined) {
+      if(p.serviceTier!==null) {
+        const catalog=await readModels(this.runtime),model=catalog.data?.find((m:Json)=>m.model===(settings.model||currentModel));
+        if(typeof p.serviceTier!=='string'||!fastTier(model)||p.serviceTier!==fastTier(model))throw new BridgeError('invalid','当前模型不支持所选极速档位');
+      }
+      settings.serviceTier=p.serviceTier;
+    }
     return settings;
+  }
+  private async turnInput(p:Json,modelId:string):Promise<Json[]> {
+    if(p.images!==undefined&&(!Array.isArray(p.images)||p.images.length>MAX_IMAGES))throw new BridgeError('invalid','最多两张 PNG、JPEG 或 WebP，每张不超过 2 MiB');
+    const images=(p.images||[]).map(imageDataUrl);
+    const text=images.length&&(p.text===undefined||typeof p.text==='string'&&!p.text.trim())?'':textRequired(p.text,'输入');
+    // Desktop renders the original input before app-server supplies defaults.
+    const input:Json[]=text?[{type:'text',text,text_elements:[]}]:[];
+    if(images.length) {
+      const models=await readModels(this.runtime),model=models.data?.find((m:Json)=>m.model===modelId);
+      if(!model?.inputModalities?.includes('image'))throw new BridgeError('unsupported','当前模型未确认图片能力');
+      input.push(...images.map((url:string)=>({type:'image',url})));
+    }
+    return input;
+  }
+  async drainQueue() {
+    if(this.draining||this.reloading||this.closed)return;
+    this.draining=true;
+    try {
+      for(const id of new Set(this.ledger.queued().map(message=>message.threadId))) {
+        if(this.closed||this.reloading)return;
+        await this.exclusive(id,async()=>{
+          if(this.closed||this.reloading)return;
+          const message=this.ledger.queued(id)[0];
+          if(!message||message.state!=='queued')return;
+          let session:SessionView;
+          try{session=await this.read(id);}catch{return;}
+          if(this.closed||session.running||!session.canControl||session.source!==message.payload.source)return;
+          this.ledger.sending(message.id);
+          try {
+            const result=await this.mutate('turn.send',{...message.payload,opId:message.id,generation:this.generation,expectedTurnId:null});
+            if(this.closed)return;
+            this.ledger.finishQueued(message.id,result);
+          } catch(error) {
+            if(this.closed)return;
+            this.ledger.finishQueued(message.id,{},error instanceof BridgeError?error:new BridgeError('unexpected','排队消息发送结果待核实，不会自动重发',true));
+          }
+          this.emit('change',id);
+        });
+      }
+    } finally {this.draining=false;}
   }
   private rememberSettings(id:string,settings:Json) {
     this.settings.set(id,{...this.settings.get(id),...settings,...(settings.effort?{reasoningEffort:settings.effort}:{})});
@@ -308,7 +370,7 @@ export class Control extends EventEmitter {
     if(p.generation!==this.generation)throw new BridgeError('changed','连接器已变化，请重新检查');
     const bin=resolveCodex(),path=(value:string)=>process.platform==='win32'?resolve(value).toLowerCase():resolve(value);
     if(typeof p.expectedBin!=='string'||path(p.expectedBin)!==path(bin))throw new BridgeError('changed','Codex 安装或执行端配置已变化，请重新检查');
-    if(this.reloading||this.locks.size||this.starting.size||this.runtime.requests.size||this.ledger.db.prepare("SELECT COUNT(*) AS n FROM operations WHERE state='pending'").get()?.n)
+    if(this.reloading||this.locks.size||this.starting.size||this.runtime.requests.size||this.ledger.queued().length||this.ledger.db.prepare("SELECT COUNT(*) AS n FROM operations WHERE state='pending'").get()?.n)
       throw new BridgeError('active','连接器有任务或操作尚未结束，稍后再适配');
     // Set this before the first await, so a new turn cannot race the idle check.
     this.reloading=true;
@@ -317,7 +379,7 @@ export class Control extends EventEmitter {
     const restore=async()=>{
       for(const id of ids){
         const r=await this.runtime.rpc('thread/resume',{threadId:id});
-        this.loaded.add(id);this.settings.set(id,{...savedSettings.get(id),model:r.model,modelProvider:r.modelProvider,approvalPolicy:r.approvalPolicy});
+        this.loaded.add(id);this.settings.set(id,{...savedSettings.get(id),model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy});
       }
     };
     try {
@@ -345,5 +407,5 @@ export class Control extends EventEmitter {
       throw error;
     }finally{if(!prepared)this.reloading=false;}
   }
-  close(){clearTimeout(this.reloadLease);this.desktop.close();this.runtime.close();this.ledger.close();}
+  close(){this.closed=true;clearInterval(this.queueTimer);clearTimeout(this.reloadLease);this.desktop.close();this.runtime.close();this.ledger.close();}
 }

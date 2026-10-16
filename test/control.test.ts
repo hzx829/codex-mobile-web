@@ -21,6 +21,10 @@ test('desktop writes use the original owner, expected turn and correct approval 
     const changed=await request('turn.send',{expectedTurnId:'previous',text:'hello'});assert.equal(changed.state,'failed');assert.equal(changed.error.code,'changed');
     const send=await request('turn.send',{text:'hello'});assert.equal(send.state,'accepted');assert.equal(desktop.calls.at(-1).method,'thread-follower-steer-turn');assert.equal(desktop.calls.at(-1).params.expectedTurnId,'active');
     assert.deepEqual(desktop.calls.at(-1).params.input,[{type:'text',text:'hello',text_elements:[]}]);
+    const steer=desktop.calls.at(-1).params;
+    assert.equal(steer.restoreMessage.cwd,cwd);assert.equal(steer.restoreMessage.context.prompt,'hello');
+    assert.deepEqual(steer.restoreMessage.context.workspaceRoots,[cwd]);assert.deepEqual(steer.restoreMessage.context.commentAttachments,[]);
+    assert.equal(steer.restoreMessage.id,steer.clientUserMessageId);assert.ok(steer.restoreMessage.createdAt);
     await request('turn.stop',{});assert.equal(desktop.calls.at(-1).params.mode,'user-stop');
     await request('request.respond',{requestId:'123',response:{allow:true,scope:'turn'}});assert.equal(desktop.calls.at(-1).method,'thread-follower-permissions-request-approval-response');assert.equal(desktop.calls.at(-1).params.requestId,123);
     assert.equal(runtime.calls.length,0);

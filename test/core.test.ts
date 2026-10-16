@@ -61,6 +61,10 @@ test('current Windows canonical history exposes the real active turn and pending
   assert.equal(v.activeTurnId,'t2');assert.equal(v.canControl,true);assert.equal(v.hasMore,true);assert.equal(v.turns[0].items[0].role,'user');assert.equal(v.requests.length,1);assert.equal(v.model,'deepseek-test');
   assert.equal(v.sessionId,'s');
   assert.equal(normalizeSession({id:'s',status:{type:'active'},turns:[]},'connector',[]).canControl,false);
+  const pending=normalizeSession({id:'s',turns:[{turnId:null,status:'inProgress',items:[]}]},'desktop',[]);
+  assert.equal(pending.running,true);assert.equal(pending.canControl,false);assert.equal(pending.activeTurnId,null);
+  const steered=normalizeSession({id:'s',turns:[{turnId:'t',status:'inProgress',items:[{id:'steer',type:'steeringUserMessage',input:[{type:'text',text:'follow-up',text_elements:[]}]}]}]},'desktop',[]);
+  assert.equal(steered.turns[0].items[0].role,'user');assert.equal(steered.turns[0].items[0].text,'follow-up');
 });
 
 test('completed, interrupted and failed turns can be forked while an active turn cannot',()=>{

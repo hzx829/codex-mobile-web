@@ -13,13 +13,16 @@ Browse projects and conversations, send instructions, steer or stop a running ta
 - Consecutive tool activity is collapsed in the timeline.
 - Tap a suggested follow-up to fill the composer; in-app back buttons return to the parent list.
 - Long-press a conversation on mobile or right-click on desktop to pin, organize, mark unread, copy its ID, rename or archive it. Pins, sections and unread marks stay in this browser per computer; rename and archive update Codex.
-- Choose the next turn's model, reasoning effort and approval policy inside the composer.
+- While a task runs, choose “完成后发送” to queue the next message or “立即追加（Steer）” to add instructions immediately. Queued messages run in order on the connector, even after closing the page, and can be removed before sending.
+- Choose the next turn's model, reasoning effort, fast mode and approval policy inside the composer. Models and fast tiers come from the runtime catalog; there is no custom model-ID field.
 - Open the top-right status ring to see the thread ID, directory, context usage, account limits and reset times. Missing native statistics are shown as unavailable.
 - Preview Markdown, highlighted code, visual task diffs, images and videos in a bottom sheet on phones or a right pane on desktop. Download other files such as PowerPoint, PDF and ZIP. Select or paste images, including image Base64, with a count and clickable previews before sending. Image attachments require runtime-confirmed model support.
 - Open a local web page through the relay; the phone renders it directly while the connector forwards requests to the project's `localhost`.
 - Reconnect after a browser disconnect, retain text drafts, and check uncertain operations without automatically resending them.
 
 Closing the phone page does not stop Codex. The computer must remain on and connected. The relay is not a backup service and cannot execute tasks or supply stored conversation history while the computer is offline.
+
+Each conversation can hold up to 20 queued messages. The connector stores their text, images and selected settings until dispatch or removal. A failed or uncertain dispatch pauses that conversation's queue and is never retried automatically. After a connector restart, a connector-owned conversation may need “在这里继续” before its queue can proceed.
 
 ## Privacy
 

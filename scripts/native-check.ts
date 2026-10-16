@@ -13,14 +13,16 @@ import {Ledger} from '../src/connector/ledger.js';
 import {indexedSessions} from '../src/connector/projects.js';
 import type {Json} from '../src/shared/types.js';
 import {submitTurn,editTurn} from '../web/turn-request.js';
+import {fastTier} from '../src/shared/models.js';
 const dir=await mkdtemp(join(tmpdir(),'cmw-native-')),home=join(dir,'codex'),project=join(dir,'project');await mkdir(home);await mkdir(project);
 const localConfig=JSON.parse(await readFile('.local/config.json','utf8').catch(()=>'{}'));
 const nativeBin=resolveCodex(process.env.CODEX_BIN||localConfig.codexBin);
-const fixtureKey=randomUUID();let receivedModel='',receivedEffort='',receivedAuth=false,hang=false,onRequest:(()=>void)|undefined;
+const fixtureKey=randomUUID();let receivedModel='',receivedEffort='',receivedServiceTier:string|null=null,receivedCount=0,receivedAuth=false,hang=false,onRequest:(()=>void)|undefined;
 const api=createServer(async(req,res)=>{
   const chunks=[];for await(const chunk of req)chunks.push(chunk);let body:any={};try{body=JSON.parse(Buffer.concat(chunks).toString());}catch{}
   receivedModel=body.model||'';receivedAuth=req.headers.authorization===`Bearer ${fixtureKey}`;
   receivedEffort=body.reasoning?.effort||'';
+  receivedServiceTier=body.service_tier??null;receivedCount++;
   const id=`resp_${randomUUID()}`,item={id:`msg_${randomUUID()}`,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'FIXTURE_OK',annotations:[]}]};
   res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});
   const emit=(event:Json)=>res.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -88,14 +90,30 @@ try{
   const revised=await control.read(view.id);
   assert.equal(receivedModel,'gpt-6.1-sol');assert.equal(receivedEffort,'medium');assert.equal(revised.model,'gpt-6.1-sol');assert.equal(revised.effort,'medium');
   assert.equal(revised.turns.length,1);assert.match(revised.turns[0].items.find(item=>item.role==='user')?.text||'',/Revised fixture response/);
+  const catalog=await runtime.rpc('model/list',{}),speedModel=catalog.data.find((model:Json)=>fastTier(model));
+  assert.ok(speedModel,'Native model catalog must expose a fast tier for this fixture.');
+  const tier=fastTier(speedModel)!;
+  hang=true;const reachedFastFixture=new Promise<void>(resolve=>{onRequest=resolve;});
+  const fast=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},'Fast fixture response.',[],{model:speedModel.model,effort:'',approvalPolicy:'',serviceTier:tier});
+  assert.equal(fast.state,'accepted',JSON.stringify(fast));await reachedFastFixture;
+  assert.equal(receivedServiceTier,tier==='fast'?'priority':tier);
+  const live=await control.read(view.id),beforeQueue=receivedCount;
+  const steered=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:live.activeTurnId},'Additional native fixture input.',[],{model:'',effort:'',approvalPolicy:''});
+  assert.equal(steered.kind,'steer_accepted',JSON.stringify(steered));
+  const queued=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:live.activeTurnId},'Queued normal-speed response.',[],{model:speedModel.model,effort:'',approvalPolicy:'',serviceTier:null},'queue');
+  assert.equal(queued.kind,'queued',JSON.stringify(queued));await control.drainQueue();assert.equal(receivedCount,beforeQueue);
+  const fastStopped=event('turn/completed',p=>p.turn.id===live.activeTurnId),queueDone=event('turn/completed',p=>p.threadId===view.id&&p.turn.id!==live.activeTurnId);
+  hang=false;await call('turn.stop',{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:live.activeTurnId});await fastStopped;
+  await control.drainQueue();await queueDone;assert.equal(receivedServiceTier,null);assert.equal(receivedCount,beforeQueue+1);
+  assert.deepEqual((await control.read(view.id)).queuedMessages,[]);
   const reloaded=await control.handle({id:'reload',action:'runtime.reload',payload:{generation:control.generation,expectedBin:nativeBin}});
   assert.equal(reloaded.restored,3);
-  const restored=await control.read(view.id);assert.equal(restored.source,'connector');assert.equal(restored.turns.length,1);
+  const restored=await control.read(view.id);assert.equal(restored.source,'connector');assert.equal(restored.turns.length,3);
   assert.equal((await control.read(forked.threadId)).turns.length,1);assert.equal((await control.read(stoppedFork.threadId)).turns.length,3);
   assert.equal((await control.read(stoppedFork.threadId)).turns.length,3,'Editing the original must preserve the fork.');
   const profiled=new AppServer(nativeBin,{...process.env,CODEX_HOME:home,CMW_TEST_KEY:fixtureKey,CODEX_PROFILE:'mobile'});
   try{await assert.rejects(profiled.start(),/不支持/);}finally{profiled.close();}
-  console.log(JSON.stringify({result:'passed',layer:'native-fixture',nativeBinary:nativeBin,nativeVersion:runtime.version,checks:['custom provider inherited','model and env credential reached local fixture','existing access policy inherited','thread start/read including empty session','streamed reply','steer expected turn','interrupt same turn','connector create/read/send','earlier-turn fork excludes later history and appears in mobile list','interrupted turn can be forked and edited','earlier edit replaces later history in the same thread and preserves forks','web send/edit actions preserve selected model and effort through the native HTTP request','idle runtime reload restores the original and forked histories','unsupported profile rejected explicitly'],liveChatGPT:false,uiAcceptance:false}));
+  console.log(JSON.stringify({result:'passed',layer:'native-fixture',nativeBinary:nativeBin,nativeVersion:runtime.version,checks:['custom provider inherited','model and env credential reached local fixture','existing access policy inherited','thread start/read including empty session','streamed reply','steer expected turn','interrupt same turn','connector create/read/send','earlier-turn fork excludes later history and appears in mobile list','interrupted turn can be forked and edited','earlier edit replaces later history in the same thread and preserves forks','web send/edit actions preserve selected model and effort through the native HTTP request','fast service tier reaches HTTP and explicit null restores normal speed','web steer and connector queue wait for the active turn before dispatching once','idle runtime reload restores the original and forked histories','unsupported profile rejected explicitly'],liveChatGPT:false,uiAcceptance:false}));
 }finally{
   control.close();api.closeAllConnections();await new Promise<void>(r=>api.close(()=>r()));
   // Wait only for this isolated child to release its temporary database on Windows.

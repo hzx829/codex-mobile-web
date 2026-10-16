@@ -19,6 +19,7 @@ import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status
 import {groupThreads,visibleThreads,rememberThreads,saveThread,type ThreadPreferences,type ThreadPreference} from './thread-preferences';
 import {turnFinished,type Json,type SessionView,type RequestAction,type MessageItem,type TurnView} from '../src/shared/types';
 import {submitTurn,editTurn} from './turn-request';
+import {fastTier} from '../src/shared/models';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -47,6 +48,7 @@ function App(){
   const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
   const [view,setView]=useState<SessionView|null>(null),[limit,setLimit]=useState(20),[loading,setLoading]=useState(false);
   const [draft,setDraft]=useState(''),[images,setImages]=useState<string[]>([]),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[approval,setApproval]=useState(''),[newCwd,setNewCwd]=useState('');
+  const [sendMode,setSendMode]=useState<'queue'|'steer'>('queue'),[serviceTier,setServiceTier]=useState<string|null|undefined>(undefined);
   const [imageLoading,setImageLoading]=useState(false),imageLoad=useRef<number|null>(null),imageSequence=useRef(0),imagesRef=useRef(images);imagesRef.current=images;
   const [threadMenu,setThreadMenu]=useState<{thread:Json;point:MenuPoint;machine:string;archived:boolean;compact?:boolean}|null>(null);
   const [statusPanel,setStatusPanel]=useState<{machine:string;thread:string;point:MenuPoint}|null>(null);
@@ -141,6 +143,7 @@ function App(){
     imageSequence.current++;imageLoad.current=null;setImageLoading(false);
     setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
     sequence.current++;setView(null);setLoading(Boolean(selected));setLimit(20);setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;
+    setSendMode('queue');setServiceTier(undefined);
     setDraft(load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
   },[machine,selected,newChat]);
   useEffect(()=>{void refreshSession();},[limit,connected]);
@@ -180,7 +183,7 @@ function App(){
       setOperation(null);if(stillHere()){setDraft('');navigate({...route,thread:result.threadId,newChat:false},true);setNotice(record.imageCount?'会话已建立，文字已保留；附图请重新选择后发送。':'会话已建立，输入已保留，请点击发送。');}return;
     }
     if(record.action==='turn.send'&&load(draftKey,'')===record.submittedText){save(draftKey,'');if(stillHere()){setDraft('');setImages([]);}}
-    setOperation(null);if(!stillHere())return;setNotice(result.kind==='stop_requested'?'已请求停止':result.kind==='response_submitted'?'回应已提交':result.kind==='edited'?'已重新发送':'Codex 已接受');
+    setOperation(null);if(!stillHere())return;setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='queue_cancelled'?'已移出队列':result.kind==='stop_requested'?'已请求停止':result.kind==='response_submitted'?'回应已提交':result.kind==='edited'?'已重新发送':'Codex 已接受');
     scheduleRefresh();void list();
   }
   async function checkPending(){
@@ -204,10 +207,10 @@ function App(){
   async function submit(){
     if(!connected||busy||pending||imageLoading||!draft.trim()&&!images.length)return;
     if(images.length&&!canImage){setError('当前模型未确认图片能力，请更换模型或移除图片');return;}
-    if(!newChat){if(view?.canControl)await submitTurn(mutate,target(),draft,images,{model,effort,approvalPolicy:approval});return;}
+    if(!newChat){if(canWrite)await submitTurn(mutate,target(),draft,images,{model,effort,approvalPolicy:approval,serviceTier},queueNext?'queue':'steer');return;}
     const createId=operationId(),sendId=operationId(),text=draft,creating={opId:createId,action:'session.create',submittedText:text,imageCount:images.length};
     setBusy(true);setError('');setNotice('正在发送…');setOperation(creating);
-    const result=await createFirstTurn((action,payload)=>call(action,payload),{cwd:newCwd,text,images,model,effort,approvalPolicy:approval,createId,sendId},id=>{
+    const result=await createFirstTurn((action,payload)=>call(action,payload),{cwd:newCwd,text,images,model,effort,approvalPolicy:approval,serviceTier,createId,sendId},id=>{
       save(`draft:${machine}:${id}`,text);save(`operation:${machine}:${id}`,{opId:sendId,action:'turn.send',submittedText:text});
       save(draftKey,'');setOperation(null);
       if(stillHere()&&current.current.newChat)navigate({...route,thread:id,newChat:false},true);
@@ -274,7 +277,7 @@ function App(){
     const editReason=view?.running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':view?.source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(value=>value.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':view?.source==='desktop'&&turn.id!==latestUserTurn?'桌面会话目前只能改写最近一条用户消息':'';
     return <UserMessage key={item.id} text={item.text} editReason={editReason} disabled={!connected||busy||Boolean(pending)} blocked={setNotice}
       copy={()=>void copyText(item.text).then(()=>setNotice('已复制消息文字')).catch(()=>setError('复制失败，请长按消息选择文字'))}
-      resend={text=>editTurn(mutate,target(),{turnId:turn.id,itemId:item.id,text},{model,effort,approvalPolicy:approval})}>{body}</UserMessage>;
+      resend={text=>editTurn(mutate,target(),{turnId:turn.id,itemId:item.id,text},{model,effort,approvalPolicy:approval,serviceTier})}>{body}</UserMessage>;
   }
   function fork(turn:TurnView){
     if(turn.status==='inProgress'){setNotice('请等这一轮结束后再分叉');return;}
@@ -306,13 +309,17 @@ function App(){
     listLoader.current.invalidate();void list();
   }
   const projectName=(path:string)=>info?.projects?.find((p:Json)=>p.path===path)?.name||name(path);
-  const selectedModel=view?.activeTurnId?view.model:model||view?.model||info?.model;
+  const queueNext=!newChat&&sendMode==='queue'&&Boolean(view?.running||view?.queuedMessages?.length);
+  const steering=!newChat&&Boolean(view?.running)&&!queueNext;
+  const selectedModel=steering?view?.model:model||view?.model||info?.model;
   const availableModels=(info?.models||[]).filter((m:Json)=>(view?.provider||info?.provider)==='openai'||m.model===(view?.model||info?.model));
-  const customModel=Boolean(model)&&!availableModels.some((m:Json)=>m.model===model);
   const modelInfo=availableModels.find((m:Json)=>m.model===selectedModel),canImage=modelInfo?.inputModalities?.includes('image');
+  const fast=fastTier(modelInfo),selectedTier=!steering&&serviceTier!==undefined?serviceTier:view?.serviceTier!==undefined?view.serviceTier:info?.serviceTier??modelInfo?.defaultServiceTier;
+  const isFast=Boolean(fast&&(selectedTier===fast||selectedTier==='fast'));
   const inheritedApproval=newChat?info?.approvalPolicy:view?.approvalPolicy;
   const approvalLabel=inheritedApproval==='never'?'不提示':inheritedApproval==='on-request'?'按需审批':'电脑配置';
-  const canWrite=connected&&!busy&&!pending&&!imageLoading&&(newChat?Boolean(newCwd):Boolean(view?.canControl));
+  const canWrite=connected&&!busy&&!pending&&!imageLoading&&(newChat?Boolean(newCwd):Boolean(view?.canControl||queueNext&&view&&view.source!=='history'));
+  const canOperate=connected&&!busy&&!pending&&Boolean(view?.canControl);
   const effortLabel=({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'极高',max:'最高',ultra:'超高'} as Json)[effort||view?.effort||(newChat?info?.effort:'')||''];
   const activeApproval=approval||inheritedApproval;
   const listedThreads=visibleThreads(sessions,preferences,project,archived,searchQuery);
@@ -350,17 +357,19 @@ function App(){
           </div>}
         </section>)}
       </div>
-      <div className="composer-area"><div className="request-stack">{!newChat&&view?.requests.map(req=><RequestCard key={`${view.generation}:${req.id}`} request={req} disabled={!canWrite} respond={response=>void mutate('request.respond',{...target(),requestId:req.id,response})}/>)}</div>{feedback}
-        {view?.activeTurnId&&!newChat&&<div className="running-status"><i className="dot online"/>Codex 正在处理 · 可继续补充</div>}
+      <div className="composer-area"><div className="request-stack">{!newChat&&view?.requests.map(req=><RequestCard key={`${view.generation}:${req.id}`} request={req} disabled={!canOperate} respond={response=>void mutate('request.respond',{...target(),requestId:req.id,response})}/>)}</div>{feedback}
+        {!newChat&&Boolean(view?.queuedMessages?.length)&&<div className="queued-messages" aria-label="待发送消息">{view?.queuedMessages?.map((message,index)=><div className="queued-message" key={message.id}><div><small>{message.state==='queued'?`排队 ${index+1}`:message.state==='sending'?'正在发送':message.state==='uncertain'?'结果待核实':'发送失败'}{message.imageCount>0?` · ${message.imageCount} 张图片`:''}</small><p title={message.text}>{message.text||'图片消息'}</p>{message.error&&<small className="error">{message.error}；后续消息已暂停，请核实后移出。</small>}</div><IconButton icon="close" label="移出队列" disabled={!connected||busy||Boolean(pending)||message.state==='sending'} onClick={()=>{if(message.state!=='uncertain'||window.confirm('请先核实这条消息是否已经发送。移出后，后续排队消息会继续发送。'))void mutate('turn.cancelQueued',{threadId:selected,queuedId:message.id});}}/></div>)}</div>}
+        {view?.running&&!newChat&&<div className="running-status"><i className="dot online"/>Codex 正在处理</div>}
         <form className={`composer ${images.length?'with-images':''}`} onSubmit={e=>{e.preventDefault();void submit();}}>
+          {!newChat&&Boolean(view?.running||view?.queuedMessages?.length)&&<label className="send-mode">发送方式<select aria-label="运行中发送方式" value={sendMode} disabled={busy||Boolean(pending)} onChange={e=>setSendMode(e.target.value as 'queue'|'steer')}><option value="queue">完成后发送</option><option value="steer">立即追加（Steer）</option></select></label>}
           {images.length>0&&<div className="image-strip"><span className="attachment-count" role="status">图片 {images.length}/{MAX_IMAGES}</span><div className="attachment-thumbnails">{images.map((url,i)=><div className="attachment-thumb" key={url}><button type="button" aria-label={`查看第 ${i+1} 张图片，共 ${images.length} 张`} onClick={()=>showPreview({kind:'image',url,title:`待发送图片 ${i+1}/${images.length}`})}><img src={url} alt={`待发送图片 ${i+1}`}/></button><button className="attachment-remove" type="button" disabled={busy} aria-label={`移除第 ${i+1} 张图片`} onClick={()=>setImages(old=>old.filter(value=>value!==url))}><Icon name="close" size={14}/></button></div>)}</div></div>}
           {imageLoading&&<span className="attachment-count" role="status">正在读取图片…</span>}
-          <textarea ref={composer} aria-label="任务输入" placeholder={newChat||!view?.turns.length?'接下来我们该写什么代码？':view?.activeTurnId?'补充当前任务…':`在 ${machineName} 上继续…`} value={draft} disabled={busy} onChange={e=>editDraft(e.target.value)} onPaste={paste} rows={1}/>
+          <textarea ref={composer} aria-label="任务输入" placeholder={queueNext?'当前任务完成后发送…':steering?'补充当前任务…':newChat||!view?.turns.length?'接下来我们该写什么代码？':`在 ${machineName} 上继续…`} value={draft} disabled={busy} onChange={e=>editDraft(e.target.value)} onPaste={paste} rows={1}/>
           <div className="composer-toolbar">
             <IconButton icon="plus" label="添加与选项" className="composer-add" disabled={busy||imageLoading} onClick={()=>setSheet('add')}/>
             <IconButton icon="shield" label={`许可：${activeApproval==='never'?'不提示':activeApproval==='on-request'?'按需审批':'电脑配置'}`} className={`composer-permission${activeApproval==='never'?' unrestricted':''}`} disabled={busy} onClick={()=>setSheet('approval')}/>
-            <button className="composer-model" type="button" onClick={()=>setSheet('model')} disabled={busy} title={`${selectedModel||'选择模型'}${effortLabel?' · '+effortLabel:''}`}><span>{modelInfo?.displayName||selectedModel||'选择模型'}</span>{effortLabel&&<small>{effortLabel}</small>}<Icon name="chevron" size={13}/></button>
-            <div className="composer-actions">{view?.activeTurnId&&!newChat&&<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canWrite} onClick={()=>void mutate('turn.stop',target())}/>}{draft.trim()||images.length?<button className="black round send" aria-label={view?.activeTurnId?'补充当前任务':'发送消息'} disabled={!canWrite}><Icon name="send" size={21}/></button>:!view?.activeTurnId&&<IconButton icon="mic" label="使用系统键盘听写" onClick={()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');}}/>}</div>
+            <button className="composer-model" type="button" onClick={()=>setSheet('model')} disabled={busy} title={`${selectedModel||'选择模型'}${effortLabel?' · '+effortLabel:''}${isFast?' · 极速':''}`}><span>{modelInfo?.displayName||selectedModel||'选择模型'}</span>{effortLabel&&<small>{effortLabel}</small>}{isFast&&<small>极速</small>}<Icon name="chevron" size={13}/></button>
+            <div className="composer-actions">{view?.activeTurnId&&!newChat&&<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('turn.stop',target())}/>}{draft.trim()||images.length?<button className="black round send" aria-label={queueNext?'加入队列':steering?'立即追加':'发送消息'} disabled={!canWrite}><Icon name="send" size={21}/></button>:!view?.activeTurnId&&<IconButton icon="mic" label="使用系统键盘听写" onClick={()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');}}/>}</div>
           </div>
          </form>
          <input className="hidden" ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={e=>{void attach(Array.from(e.target.files||[]));e.target.value='';}}/>
@@ -374,17 +383,16 @@ function App(){
       {sheet==='computer'&&<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setApproval('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
        {sheet==='model'&&<>
-         <p className="muted">{view?.activeTurnId?'当前任务沿用正在使用的设置，结束后可以更换。':'下次发送时使用所选模型与思考程度。'}</p>
-         <label>模型<select disabled={Boolean(view?.activeTurnId)||busy||!availableModels.length} value={model} onChange={e=>{setModel(e.target.value);setEffort('');}}>
+         <p className="muted">{steering?'立即追加沿用当前任务设置。选择“完成后发送”可为下一轮更换设置。':'下次发送时使用所选模型与思考程度。'}</p>
+         <label>模型<select disabled={steering||busy||!availableModels.length} value={model} onChange={e=>{setModel(e.target.value);setEffort('');setServiceTier(e.target.value?null:undefined);}}>
            <option value="">沿用当前设置{selectedModel?` · ${view?.model||info?.model}`:''}</option>
            {availableModels.map((m:Json)=><option key={m.id||m.model} value={m.model}>{m.displayName||m.model}</option>)}
-           {customModel&&<option value={model}>{model}</option>}
          </select></label>
-         <details className="other-project"><summary>输入其他模型 ID</summary><label>同一提供商的模型 ID<input disabled={Boolean(view?.activeTurnId)||busy} value={model} onChange={e=>{setModel(e.target.value);setEffort('');}} placeholder="例如自定义模型 ID"/></label></details>
-         <label>思考程度<select disabled={Boolean(view?.activeTurnId)||busy||!modelInfo} value={effort} onChange={e=>setEffort(e.target.value)}><option value="">沿用当前设置</option>{modelInfo?.supportedReasoningEfforts?.map((r:Json)=><option key={r.reasoningEffort} value={r.reasoningEffort}>{({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'更多',max:'最多',ultra:'超高'} as Json)[r.reasoningEffort]||r.reasoningEffort}</option>)}</select></label>
+         <label>思考程度<select disabled={steering||busy||!modelInfo} value={effort} onChange={e=>setEffort(e.target.value)}><option value="">沿用当前设置</option>{modelInfo?.supportedReasoningEfforts?.map((r:Json)=><option key={r.reasoningEffort} value={r.reasoningEffort}>{({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'更多',max:'最多',ultra:'超高'} as Json)[r.reasoningEffort]||r.reasoningEffort}</option>)}</select></label>
+         <label className="speed-toggle"><span>极速{!fast&&<small>当前模型未提供极速档位</small>}</span><input type="checkbox" role="switch" checked={isFast} disabled={steering||busy||!fast} onChange={e=>setServiceTier(e.target.checked?fast:null)}/></label>
          <button className="primary" onClick={()=>setSheet(null)}>完成</button>
        </>}
-       {sheet==='approval'&&<><p className="muted">{view?.activeTurnId?'当前任务沿用正在使用的许可，结束后可以更换。':'下次发送时使用所选许可。'}</p><label>审批策略<select disabled={Boolean(view?.activeTurnId)||busy} value={approval} onChange={e=>setApproval(e.target.value)}><option value="">沿用当前设置 · {approvalLabel}</option><option value="on-request">按需审批</option><option value="never">不提示审批</option></select></label><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}
+       {sheet==='approval'&&<><p className="muted">{steering?'立即追加沿用当前任务的许可。':'下次发送时使用所选许可。'}</p><label>审批策略<select disabled={steering||busy} value={approval} onChange={e=>setApproval(e.target.value)}><option value="">沿用当前设置 · {approvalLabel}</option><option value="on-request">按需审批</option><option value="never">不提示审批</option></select></label><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}
        {sheet==='add'&&<>{selected&&<MenuItem icon="browser" disabled={!connected} onClick={()=>setSheet('browser')}>打开本机网页</MenuItem>}<MenuItem icon="image" disabled={busy||imageLoading||!canImage||images.length>=MAX_IMAGES} onClick={()=>fileInput.current?.click()}>添加图片<span className="menu-detail">{images.length}/{MAX_IMAGES}</span></MenuItem>{!canImage&&<p className="muted">当前模型未确认图片能力。</p>}{error&&<p className="error" role="alert">{error}</p>}{selected&&<><MenuItem icon="file" onClick={()=>setSheet('file')}>查看项目文件</MenuItem><MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);void refreshSession();}}>刷新会话</MenuItem></>}{newChat&&<MenuItem icon="folder" disabled={busy} onClick={()=>setSheet('projects')}>选择项目</MenuItem>}</>}
        {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>}
        {sheet==='browser'&&selected&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);save(previewUrlKey(machine,selected),e.target.value);}} placeholder="http://127.0.0.1:5173"/></label><p className="muted">地址仅用于当前聊天。先在电脑启动网页服务，再打开预览。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}

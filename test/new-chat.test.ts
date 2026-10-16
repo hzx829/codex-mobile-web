@@ -21,9 +21,10 @@ test('new chat passes model and approval settings to thread creation and first t
     if(action==='session.create')return {state:'accepted',threadId:'s'};
     if(action==='session.read')return {canControl:true,activeTurnId:null,source:'connector',generation:'g'};
     return {state:'accepted'};
-  },{...input,model:'model-a',effort:'high',approvalPolicy:'on-request'},()=>{});
+  },{...input,model:'model-a',effort:'high',approvalPolicy:'on-request',serviceTier:'priority'},()=>{});
   assert.equal(calls[0].payload.model,'model-a');assert.equal(calls[0].payload.approvalPolicy,'on-request');
   assert.equal(calls[2].payload.effort,'high');assert.equal(calls[2].payload.approvalPolicy,'on-request');
+  assert.equal(calls[2].payload.serviceTier,'priority');
 });
 test('uncertain creation never sends; failed snapshot keeps the new draft unsent',async()=>{
   let count=0;

@@ -38,7 +38,7 @@ The web app connects to its own site's WebSocket endpoint. Chat Markdown images 
 | Preview browser cookies | Short-lived session cookie for the preview port and any cookies set by the proxied app | The session cookie stops granting access when the preview ends; the browser may retain cookies until cleared |
 | Connector `.local/config.json` | Relay address, Token, machine identity, selected local paths | Until changed/deleted; the app does not encrypt this file |
 | Connector `.local/connect.html`, `connect-qr.png` | Connection page and QR code containing the Token | Until regenerated/deleted; protect like the Token itself |
-| Connector `.local/operations.sqlite` | Operation IDs, payload hashes, states, result/error receipts, managed-session IDs | Operation rows older than seven days are removed when the ledger opens, not by a continuous timer. Managed-session IDs do not expire automatically. Receipts may contain sensitive error details; this is not a full transcript or an audit log |
+| Connector `.local/operations.sqlite` | Operation IDs, payload hashes, states, result/error receipts, managed-session IDs; queued message text, images and settings | Queued payloads are deleted on confirmed dispatch or removal; failed/uncertain entries remain until removed. Operation rows older than seven days are removed when the ledger opens, except those still in the queue. Managed-session IDs do not expire automatically. Receipts may contain sensitive error details; SQLite deletion does not guarantee secure erasure from disk, WAL or backups |
 | Runtime logs | Startup, connection and error diagnostics | Windows `.local/*.log` has no app-defined rotation. Supplied Compose rotates each service's local logs at 5 MB × 3 files. Other deployments follow their own settings |
 | Relay process | Peers, routes and forwarded content in memory | No application database or deliberate disk storage of conversation/file payloads. This excludes host swap, crash dumps, infrastructure logging and operator modifications |
 | Relay deployment | Token in environment/configuration; Caddy certificate/configuration volumes when used | Until changed/removed by the operator |
@@ -106,7 +106,7 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 | 预览网页 Cookie | 预览端口的短期会话 Cookie，以及被代理网页自行设置的 Cookie | 预览结束后会话 Cookie 不再授权访问；浏览器可能继续保存 Cookie，需自行清除 |
 | 连接器 `.local/config.json` | 中继地址、Token、电脑标识和选定的本地路径 | 修改/删除前保留，应用不加密此文件 |
 | 连接器 `.local/connect.html`、`connect-qr.png` | 含 Token 的连接页和二维码 | 重新生成/删除前保留，按 Token 同等保管 |
-| 连接器 `.local/operations.sqlite` | 操作 ID、载荷摘要、状态、结果/错误回执、托管会话 ID | 打开数据库时删除超过七天的操作记录，不做持续定时清理；托管会话 ID 无自动过期。回执可能含敏感错误详情，不是完整聊天库或审计日志 |
+| 连接器 `.local/operations.sqlite` | 操作 ID、载荷摘要、状态、结果/错误回执、托管会话 ID；排队消息的文字、图片及设置 | 排队内容在确认发送或移出时删除，失败和结果不明的条目保留到手动移出。打开数据库时删除超过七天且已不在队列中的操作记录；托管会话 ID 无自动过期。回执可能含敏感错误详情；SQLite 删除不保证清除磁盘、WAL 或备份中的副本 |
 | 运行日志 | 启动、连接和错误诊断 | Windows `.local/*.log` 无应用层轮换；附带 Compose 对各服务按 5 MB × 3 文件轮换；其他部署依自身设置 |
 | 中继进程 | 内存中的连接、路由和转发内容 | 无应用数据库，不主动把聊天/文件正文持久化到磁盘；不涵盖系统交换空间、崩溃转储、基础设施日志或管理者修改 |
 | 中继部署 | 环境/配置中的 Token；使用 Caddy 时的证书和配置卷 | 管理者修改/删除前保留 |
