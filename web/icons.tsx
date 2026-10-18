@@ -1,5 +1,5 @@
 import type {ReactNode} from 'react';
-export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit';
+export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'undo'|'trash';
 export function Icon({name,size=24}:{name:IconName;size?:number}) {
   const paths:Record<IconName,ReactNode>={
     back:<><path d="m11 5-7 7 7 7M4 12h16"/></>,
@@ -11,6 +11,9 @@ export function Icon({name,size=24}:{name:IconName;size?:number}) {
     plus:<path d="M12 4v16M4 12h16"/>,
     mic:<><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3"/></>,
     send:<path d="m5 11 7-7 7 7M12 4v16"/>,
+    steer:<path d="m5 10 7-7 7 7M5 17l7-7 7 7M12 10v11"/>,
+    undo:<path d="m9 4-5 5 5 5M4 9h10a6 6 0 0 1 0 12h-3"/>,
+    trash:<><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></>,
     stop:<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>,
     chevron:<path d="m8 10 4 4 4-4"/>,close:<path d="m6 6 12 12M6 18 18 6"/>,
     refresh:<><path d="M20 7v5h-5M4 17v-5h5M5.1 7a8 8 0 0 1 13-2l1.9 2M4 17l1.9 2a8 8 0 0 0 13-2"/></>,

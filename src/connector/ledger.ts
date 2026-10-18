@@ -56,6 +56,7 @@ export class Ledger {
     if(!message)throw new BridgeError('changed','消息已经发送或移出队列，请刷新');
     if(message.state==='sending')throw new BridgeError('active','消息正在发送，请稍候核实结果');
     this.finishQueued(id,{threadId,kind:'queue_cancelled'});
+    return message.payload;
   }
   async run(id:string,payload:Json,fn:()=>Promise<Json>):Promise<Json> {
     if(!/^\d{13}:[0-9a-f-]{36}$/i.test(id))throw new BridgeError('invalid','操作标识无效');

@@ -307,12 +307,17 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
   .sheet-content { padding-bottom: 24px; }
   .connect { margin-top: 5vh; }
 }
-.send-mode { display: flex; align-items: center; gap: 10px; padding: 2px 6px 6px; font-size: 12px; color: #666; }
-.send-mode select { width: auto; margin: 0; padding: 5px 8px; font-size: 12px; }
-.queued-messages { max-height: 180px; overflow-y: auto; margin-bottom: 8px; }
-.queued-message { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #e8e8e8; }
-.queued-message > div { flex: 1; min-width: 0; }
+.queued-messages { flex-shrink: 0; max-height: 200px; overflow-y: auto; margin: 0 8px; background: #f1f1f1; border: 1px solid #e8e8e8; border-bottom: 0; border-radius: 18px 18px 0 0; }
+.queue-heading { display: flex; align-items: center; gap: 6px; padding: 10px 12px 2px; font-size: 11px; color: #777; }
+.queue-heading span { font-variant-numeric: tabular-nums; }
+.queued-message { display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 12px; }
+.queued-message + .queued-message { border-top: 1px solid #e5e5e5; }
+.queued-content { flex: 1; min-width: 0; }
+.queued-actions { display: flex; flex-shrink: 0; }
+.queued-actions .icon-button { width: 40px; min-width: 40px; height: 44px; padding: 10px; color: #666; }
+.queued-actions svg { width: 18px; height: 18px; }
 .queued-message small { color: #666; font-size: 12px; }
+.queued-message small.error { color: #b42318; }
 .queued-message p { margin: 3px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .sheet-content .speed-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .speed-toggle small { display: block; margin-top: 4px; color: #777; font-weight: normal; }

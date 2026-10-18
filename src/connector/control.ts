@@ -58,7 +58,7 @@ export class Control extends EventEmitter {
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
     if(req.action==='runtime.reload')return this.reloadRuntime(p);
     if(this.reloading)throw new BridgeError('maintenance','连接器正在适配 Codex 更新，请稍后刷新');
-    if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.cancelQueued','turn.edit','turn.stop','request.respond'].includes(req.action)) {
+    if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.cancelQueued','turn.withdrawQueued','turn.steerQueued','turn.edit','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,()=>this.mutate(req.action,p)));
     }
@@ -187,9 +187,29 @@ export class Control extends EventEmitter {
       this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider};
     }
     const id=textRequired(p.threadId,'会话');
-    if(action==='turn.cancelQueued') {
-      this.ledger.cancelQueued(id,textRequired(p.queuedId,'排队消息',100));
-      this.emit('change',id);return {threadId:id,kind:'queue_cancelled'};
+    if(action==='turn.cancelQueued'||action==='turn.withdrawQueued') {
+      const queuedId=textRequired(p.queuedId,'排队消息',100);
+      const message=this.ledger.cancelQueued(id,queuedId);
+      this.emit('change',id);return {threadId:id,queuedId,kind:action==='turn.withdrawQueued'?'queue_withdrawn':'queue_cancelled',...(action==='turn.withdrawQueued'?{message}:{})};
+    }
+    if(action==='turn.steerQueued') {
+      const queuedId=textRequired(p.queuedId,'排队消息',100);
+      const message=this.ledger.queued(id).find(message=>message.id===queuedId);
+      if(!message)throw new BridgeError('changed','消息已经发送或移出队列，请刷新');
+      if(message.state!=='queued')throw new BridgeError('active','这条消息暂不能追加，请核实发送状态');
+      const session=await this.read(id);
+      if(!session.activeTurnId||session.activeTurnId!==p.expectedTurnId||session.source!==message.payload.source||p.source!==session.source||p.generation!==this.generation)
+        throw new BridgeError('changed','当前任务已变化，消息仍在队列中');
+      if(!session.canControl)throw new BridgeError('read_only',session.notice||'当前任务暂不能追加');
+      this.ledger.sending(queuedId);
+      try {
+        const result=await this.mutate('turn.send',{threadId:id,source:p.source,generation:p.generation,expectedTurnId:p.expectedTurnId,opId:p.opId,text:message.payload.text,images:message.payload.images,mode:'steer'});
+        this.ledger.finishQueued(queuedId,result);
+        return {...result,queuedId};
+      } catch(error) {
+        const failure=error instanceof BridgeError?error:new BridgeError('unexpected','追加结果待核实，不会自动重发',true);
+        this.ledger.finishQueued(queuedId,{},failure);throw failure;
+      } finally {this.emit('change',id);}
     }
     if(action==='session.fork') {
       const lastTurnId=textRequired(p.lastTurnId,'分叉位置',200);
