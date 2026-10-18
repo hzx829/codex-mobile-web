@@ -5,6 +5,7 @@ import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { MAX_FRAME, textRequired, type Json } from '../shared/types.js';
 import { PreviewTunnel } from './preview-tunnel.js';
+import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 
 type Peer={role:'phone'|'connector';machineId?:string;name?:string;alive:boolean};
 export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3341) {
@@ -65,7 +66,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       }
       if(p.role==='phone'&&m.type==='request') {
         if(typeof m.id!=='string'||m.id.length>100||typeof m.action!=='string'||!m.payload||typeof m.payload!=='object'){ws.close(4400);return;}
-        if(m.action==='turn.send'&&Array.isArray(m.payload.images)&&m.payload.images.length)send(ws,{type:'received',id:m.id});
+        if(m.action==='voice.transcribe'||m.action==='turn.send'&&Array.isArray(m.payload.images)&&m.payload.images.length)send(ws,{type:'received',id:m.id});
         if(m.action==='preview.start'||m.action==='preview.stop')try{
           m.payload.threadId=textRequired(m.payload.threadId,'会话');
           if(m.action==='preview.stop')m.payload.sessionId=textRequired(m.payload.sessionId,'预览会话');
@@ -74,7 +75,8 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         if(!connector){send(ws,{type:'response',id:m.id,error:{code:'offline',message:'电脑未连接'}});return;}
         if([...routes.values()].filter(r=>r.phone===ws).length>=32){send(ws,{type:'response',id:m.id,error:{code:'busy',message:'请求较多，请稍后重试'}});return;}
         const routeId=randomUUID();
-        const timer=setTimeout(()=>finish(routeId,{error:{code:'timeout',message:'电脑回执超时，请核实操作结果',uncertain:true}}),40_000);
+        const voice=m.action==='voice.transcribe';
+        const timer=setTimeout(()=>finish(routeId,{error:{code:'timeout',message:voice?'语音识别超时，请重试':'电脑回执超时，请核实操作结果',uncertain:!voice}}),voice?VOICE_REQUEST_TIMEOUT_MS:40_000);
         routes.set(routeId,{phone:ws,connector,id:m.id,action:m.action,sessionId:m.payload.sessionId,threadId:m.payload.threadId,timer});
         send(connector,{type:'request',id:routeId,action:m.action,payload:m.payload});
       } else if(p.role==='connector'&&m.type==='response') {

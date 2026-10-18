@@ -15,6 +15,7 @@ import {contextUsage,accountLimits} from './usage.js';
 import {readModels,reasoningEffort} from './models.js';
 import {revertThread} from './revert.js';
 import {fastTier} from '../shared/models.js';
+import {transcribeVoice} from './voice.js';
 
 function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   if(value===undefined||value===null||value==='')return undefined;
@@ -58,6 +59,7 @@ export class Control extends EventEmitter {
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
     if(req.action==='runtime.reload')return this.reloadRuntime(p);
     if(this.reloading)throw new BridgeError('maintenance','连接器正在适配 Codex 更新，请稍后刷新');
+    if(req.action==='voice.transcribe')return transcribeVoice(this.runtime,p);
     if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.cancelQueued','turn.withdrawQueued','turn.steerQueued','turn.edit','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,()=>this.mutate(req.action,p)));

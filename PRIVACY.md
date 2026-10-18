@@ -26,7 +26,11 @@ The bridge has no required developer-operated backend or built-in analytics/tele
 
 The connector returns selected model/provider metadata for display, not the full Codex configuration or a dedicated copy of API keys. But credentials typed into a conversation, emitted by tools, or read through file preview travel as ordinary content. There is no automatic secret-redaction guarantee. Existing Codex settings continue to determine model/tool behavior.
 
-The web app connects to its own site's WebSocket endpoint. Chat Markdown images and external images become placeholders; Markdown file previews can read local images through the authenticated file interface. Clicking an external link opens that site. Voice input uses the system keyboard, whose privacy behavior depends on its provider. This app does not record or upload microphone audio.
+The web app connects to its own site's WebSocket endpoint. Chat Markdown images and external images become placeholders; Markdown file previews can read local images through the authenticated file interface. Clicking an external link opens that site.
+
+Voice input defaults to Codex transcription and can be switched to the system keyboard. Codex mode records after a microphone-button click and browser permission. After stopping, audio travels through the relay and computer connector to `https://chatgpt.com/backend-api/transcribe`, using the computer's Codex ChatGPT login. The relay can read audio and transcripts; this account credential stays on the computer. Transcripts are appended to the draft, not automatically sent as tasks. This private desktop endpoint has no guarantee of cross-version compatibility. Keyboard mode does not record in this app; its privacy behavior depends on the keyboard provider.
+
+The voice choice is saved as `voice-provider` in browser `localStorage`. Audio stays in browser, relay and connector memory and is not deliberately written to disk or the operation ledger. Cancelling releases capture and discards late results, but cannot recall audio already uploaded. Provider retention, OS memory, infrastructure logs and crash dumps are outside this guarantee.
 
 ### Storage and retention
 
@@ -94,7 +98,11 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 连接器只返回展示所需的模型/provider 等信息，不发送完整 Codex 配置，也不专门上传 API Key。但输入会话、出现在工具输出、或经文件预览读取的凭据仍会随普通内容转发。程序不保证自动识别并去除敏感信息；模型和工具行为继续由原有 Codex 设置决定。
 
-网页连接本站的 WebSocket。聊天中的 Markdown 图片和外部图片显示为占位文本；Markdown 文件预览可通过已认证文件接口读取本地图片，不主动请求外部图片。点击外部链接会打开对应网站。语音输入使用系统键盘，其隐私行为取决于键盘服务商；本项目不录制或上传麦克风音频。
+网页连接本站的 WebSocket。聊天中的 Markdown 图片和外部图片显示为占位文本；Markdown 文件预览可通过已认证文件接口读取本地图片，不主动请求外部图片。点击外部链接会打开对应网站。
+
+语音默认使用 Codex 识别，可切换系统键盘。Codex 模式在点击麦克风并取得浏览器许可后录音；停止后，音频经中继、电脑连接器发送至 `https://chatgpt.com/backend-api/transcribe`，使用电脑上 Codex 的 ChatGPT 登录。中继可以读取录音和识别文字，这份账号凭据留在电脑端。识别文字追加到草稿，不自动发送任务。此服务为桌面私有接口，不保证跨版本兼容。键盘模式下本项目不录音，隐私行为取决于键盘服务商。
+
+语音方式保存在浏览器 `localStorage` 的 `voice-provider`。录音暂存在浏览器、中继及连接器内存，不主动保存到磁盘或操作记录。取消会释放麦克风并丢弃迟到结果，不能撤回已上传的录音；服务商保留策略、系统内存、基础设施日志及崩溃转储不在此保证范围。
 
 ### 保存位置与保留时间
 

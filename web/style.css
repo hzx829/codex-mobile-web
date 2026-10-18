@@ -161,6 +161,9 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
 .composer-actions .black { color: #fff; }
 .composer-actions .send { display: flex; align-items: center; justify-content: center; width: 38px; height: 38px; padding: 8px; }
 .composer-actions .stop svg { width: 20px; height: 20px; }
+.composer-actions .recording { background: #b42318; color: #fff; }
+.voice-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--muted); }
+.voice-status button { min-height: 44px; }
 .running-status { font-size: 11px; color: #8a8a8a; display: flex; align-items: center; justify-content: center; gap: 6px; margin: 0 0 8px; }
 .running-status .dot { width: 5px; height: 5px; }
 .image-strip { width: 100%; display: flex; flex-wrap: wrap; align-items: center; flex-shrink: 0; gap: 12px; padding: 4px; }

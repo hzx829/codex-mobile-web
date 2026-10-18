@@ -9,11 +9,12 @@ Browse projects and conversations, send instructions, steer or stop a running ta
 ## Features
 
 - Discover existing projects and conversations, including archived conversations.
+- Choose Codex transcription or the system keyboard in home options or “＋ → 语音输入”; the browser remembers your choice. Codex is the default: tap to record, tap to stop, then review the draft. It requires HTTPS, microphone permission and a Codex ChatGPT login on the computer. Clips of up to two minutes pass through the relay and connector to the desktop's private transcription service. Phone compatibility still requires manual verification.
 - Start or continue tasks, follow progress, add instructions, stop a turn, and answer supported approvals or questions.
 - Consecutive tool activity is collapsed in the timeline.
 - Tap a suggested follow-up to fill the composer; in-app back buttons return to the parent list.
 - Long-press a conversation on mobile or right-click on desktop to pin, organize, mark unread, copy its ID, rename or archive it. Pins, sections and unread marks stay in this browser per computer; rename and archive update Codex.
-- While a task runs, choose “完成后发送” to queue the next message or “立即追加（Steer）” to add instructions immediately. Queued messages run in order on the connector, even after closing the page, and can be removed before sending.
+- While a task runs, sending defaults to the queue above the composer. Each entry has icons to steer the active turn, withdraw to the composer, or delete. Withdrawal preserves text, images, settings and the existing draft. Queued messages run in order on the connector, even after closing the page.
 - Choose the next turn's model, reasoning effort, fast mode and approval policy inside the composer. Models and fast tiers come from the runtime catalog; there is no custom model-ID field.
 - Open the top-right status ring to see the thread ID, directory, context usage, account limits and reset times. Missing native statistics are shown as unavailable.
 - Preview Markdown, highlighted code, visual task diffs, images and videos in a bottom sheet on phones or a right pane on desktop. Download other files such as PowerPoint, PDF and ZIP. Select or paste images, including image Base64, with a count and clickable previews before sending. Image attachments require runtime-confirmed model support.
