@@ -9,7 +9,7 @@
 - 一台可联网的 Linux 服务器，已安装 Docker Engine 和 Docker Compose v2，能拉取 `node:24-alpine` 和 `caddy:2-alpine` 官方镜像。部署包已带构建结果，不需要服务器安装 Node、npm 或 Codex，也不运行 `npm install`。
 - 一个域名，例如 `codex.your-domain.com`，A 记录指向服务器公网 IPv4。只有服务器确实支持 IPv6 时才配置 AAAA。
 - 服务器的 TCP 80、443、3341 可从外部访问，且没有其他程序占用。3341 用于 HTTPS 网页预览；中继自己的 3340/3341 只监听服务器回环地址。
-- 没有域名时先准备好文件，待域名解析完成后再开启公网 HTTPS；本说明不使用 IP 自签证书。
+- 本节 Docker + Caddy 配置使用域名；没有域名时，也可使用下文的受信任 IP 证书方案。
 
 此部署包需要联网拉取两个基础镜像，不是离线镜像包。镜像拉取失败时先解决服务器到官方镜像仓库的连通性，不替换为来历不明的镜像。
 
@@ -87,6 +87,14 @@ curl --fail http://127.0.0.1:3340/health
 
 在现有代理上将域名根路径转到 `127.0.0.1:3340`，并允许 `/ws` 的 WebSocket 长连接。另将同一域名的 HTTPS 3341 端口完整转到 `127.0.0.1:3341`，保留普通 HTTP 和 WebSocket 转发。不要同时启动本包的 Caddy。若现有代理也在 Docker 容器里，回环地址指向代理容器自身，需要把代理接到中继的 Docker 网络后用 `relay:3340` 和 `relay:3341`。
 
+### 没有域名：使用 IP 证书
+
+Let’s Encrypt 已支持受信任的公网 IP 证书。使用 Certbot 5.4 或更新版本，通过 `certonly --webroot --webroot-path <验证目录> --ip-address <公网IP> --required-profile shortlived` 申请，并由 Nginx 加载证书；80 端口的 `/.well-known/acme-challenge/` 必须能从公网访问。先用 `--dry-run` 验证，再正式签发。[官方说明](https://letsencrypt.org/2026/03/11/shorter-certs-certbot.html)。
+
+IP 证书有效期约 6 天，必须自动续期，并设置部署钩子执行 `nginx -t` 和 `systemctl reload nginx`。当前 Node + systemd 实例使用独立 Certbot 配置和每 6 小时检查一次的定时器，已通过续期演练。HTTPS 主入口和 3341 预览端口均代理到回环地址；Nginx 若与中继使用相同端口，应绑定服务器实际网卡地址，避免与中继的回环监听冲突。
+
+电脑连接地址也需改成 `https://<公网IP>`，在连接器任务空闲后重启并恢复会话。重新生成连接二维码；HTTPS 是新的浏览器来源，首次连接需要重新扫码或输入原 Token。确认电脑已通过 WSS 连接后，关闭旧 HTTP WebSocket，只保留到 HTTPS 的跳转。
+
 ## 排查与验收
 
 | 现象 | 检查 |
@@ -100,6 +108,6 @@ curl --fail http://127.0.0.1:3340/health
 
 公网部署的完成条件：HTTPS 健康检查通过；手机用移动数据连接；能打开项目和原有任务；在测试会话发送一条消息并收到回复；中继重启后恢复连接。仅 `/health` 成功不代表整条链路已经通过。
 
-2026-09-17 更新：已通过另一条部署路径，在 Linux 上用独立 Node 24 + systemd 运行公网中继，并将 Windows 连接器接入；使用者已确认中继版本使用正常。该实例使用 IP 直连 HTTP/WS，传输未加密。本页的 Docker + Caddy HTTPS 路径仍未完成真实容器与证书签发验收，不能用前者的成功代替后者。实际 Node + systemd 步骤尚待整理为通用部署说明；开源收尾见 [开源分享方案](OPEN_SOURCE.md)。
+2026-10-19 更新：Linux 上的 Node 24 + systemd 实例已增加 Nginx 和 Let’s Encrypt IP 证书。已验证公开 HTTPS 的证书信任、网页文件、WSS 认证和请求路由、预览端口及自动续期；手机录音交互由使用者实测。本页的 Docker + Caddy 路径仍未完成真实容器与证书签发验收。开源收尾见 [开源分享方案](OPEN_SOURCE.md)。
 
 源码重新生成部署包：`npm ci` 后运行 `npm run package:relay`。源码直接部署仍使用根目录 Dockerfile，构建过程中需要访问 npm；预构建发布包使用只复制程序和网页的 Dockerfile。
