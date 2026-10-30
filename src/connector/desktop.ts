@@ -97,7 +97,11 @@ export class Desktop extends EventEmitter {
     if(e.type==='client-discovery-request') {this.write({type:'client-discovery-response',requestId:e.requestId,response:{canHandle:false}});return;}
     if(e.type==='response') {
       const p=this.pending.get(e.requestId);if(!p)return;clearTimeout(p.timer);this.pending.delete(e.requestId);
-      if(e.resultType==='error') p.reject(new BridgeError(/no-client-found/.test(String(e.error))?'no_owner':'desktop_error',String(e.error)));
+      if(e.resultType==='error') {
+        const message=String(e.error),timeout=/(?:^|-)timeout$/.test(message);
+        // The desktop's forwarding timeout does not cancel its pending turn start.
+        p.reject(new BridgeError(timeout?'timeout':/no-client-found/.test(message)?'no_owner':'desktop_error',timeout?`桌面回应超时，操作可能已执行，请核实会话（${message}）`:message,timeout));
+      }
       else p.resolve(e.result);return;
     }
     if(e.method==='thread-stream-state-changed') {

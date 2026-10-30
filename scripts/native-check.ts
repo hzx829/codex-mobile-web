@@ -17,12 +17,15 @@ import {fastTier} from '../src/shared/models.js';
 const dir=await mkdtemp(join(tmpdir(),'cmw-native-')),home=join(dir,'codex'),project=join(dir,'project');await mkdir(home);await mkdir(project);
 const localConfig=JSON.parse(await readFile('.local/config.json','utf8').catch(()=>'{}'));
 const nativeBin=resolveCodex(process.env.CODEX_BIN||localConfig.codexBin);
-const fixtureKey=randomUUID();let receivedModel='',receivedEffort='',receivedServiceTier:string|null=null,receivedCount=0,receivedAuth=false,hang=false,onRequest:(()=>void)|undefined;
+const queuedText='Queued normal-speed response.';
+const fixtureKey=randomUUID();let receivedModel='',receivedEffort='',receivedServiceTier:string|null=null,queuedRequests=0,receivedAuth=false,hang=false,onRequest:(()=>void)|undefined;
 const api=createServer(async(req,res)=>{
   const chunks=[];for await(const chunk of req)chunks.push(chunk);let body:any={};try{body=JSON.parse(Buffer.concat(chunks).toString());}catch{}
   receivedModel=body.model||'';receivedAuth=req.headers.authorization===`Bearer ${fixtureKey}`;
   receivedEffort=body.reasoning?.effort||'';
-  receivedServiceTier=body.service_tier??null;receivedCount++;
+  receivedServiceTier=body.service_tier??null;
+  // Steer may restart inference in the same turn; count only requests containing the queued input.
+  if(body.input?.some((item:Json)=>item.role==='user'&&item.content?.some((part:Json)=>part.type==='input_text'&&part.text===queuedText)))queuedRequests++;
   const id=`resp_${randomUUID()}`,item={id:`msg_${randomUUID()}`,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'FIXTURE_OK',annotations:[]}]};
   res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});
   const emit=(event:Json)=>res.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -97,14 +100,16 @@ try{
   const fast=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},'Fast fixture response.',[],{model:speedModel.model,effort:'',approvalPolicy:'',serviceTier:tier});
   assert.equal(fast.state,'accepted',JSON.stringify(fast));await reachedFastFixture;
   assert.equal(receivedServiceTier,tier==='fast'?'priority':tier);
-  const live=await control.read(view.id),beforeQueue=receivedCount;
+  const live=await control.read(view.id);
   const steered=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:live.activeTurnId},'Additional native fixture input.',[],{model:'',effort:'',approvalPolicy:''});
   assert.equal(steered.kind,'steer_accepted',JSON.stringify(steered));
-  const queued=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:live.activeTurnId},'Queued normal-speed response.',[],{model:speedModel.model,effort:'',approvalPolicy:'',serviceTier:null},'queue');
-  assert.equal(queued.kind,'queued',JSON.stringify(queued));await control.drainQueue();assert.equal(receivedCount,beforeQueue);
+  const queued=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:live.activeTurnId},queuedText,[],{model:speedModel.model,effort:'',approvalPolicy:'',serviceTier:null},'queue');
+  assert.equal(queued.kind,'queued',JSON.stringify(queued));await control.drainQueue();assert.equal(queuedRequests,0,'Queued input must not reach inference while the active turn is running.');
+  const waiting=await control.read(view.id);assert.equal(waiting.activeTurnId,live.activeTurnId);
+  assert.equal(waiting.queuedMessages?.length,1);assert.equal(waiting.queuedMessages[0].state,'queued');
   const fastStopped=event('turn/completed',p=>p.turn.id===live.activeTurnId),queueDone=event('turn/completed',p=>p.threadId===view.id&&p.turn.id!==live.activeTurnId);
   hang=false;await call('turn.stop',{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:live.activeTurnId});await fastStopped;
-  await control.drainQueue();await queueDone;assert.equal(receivedServiceTier,null);assert.equal(receivedCount,beforeQueue+1);
+  await control.drainQueue();await queueDone;assert.equal(receivedServiceTier,null);assert.equal(queuedRequests,1,'Queued input must reach inference exactly once after the active turn stops.');
   assert.deepEqual((await control.read(view.id)).queuedMessages,[]);
   const reloaded=await control.handle({id:'reload',action:'runtime.reload',payload:{generation:control.generation,expectedBin:nativeBin}});
   assert.equal(reloaded.restored,3);

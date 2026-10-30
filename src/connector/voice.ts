@@ -1,12 +1,19 @@
 import type {AppServer} from './app-server.js';
+import {EnvHttpProxyAgent} from 'undici';
 import {BridgeError,type Json} from '../shared/types.js';
 import {MAX_VOICE_BYTES,MAX_VOICE_DURATION_MS,voiceMimeTypes} from '../shared/voice.js';
 
 // Desktop dictation uses this private endpoint, not the model provider's Responses API.
 const endpoint='https://chatgpt.com/backend-api/transcribe';
 const userAgent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15';
+let dispatcher:EnvHttpProxyAgent|undefined;
+const fetchVoice:typeof fetch=(input,init)=>{
+  // Node fetch does not use HTTP(S)_PROXY by default. Keep this agent local to dictation.
+  dispatcher??=new EnvHttpProxyAgent();
+  return fetch(input,{...init,dispatcher} as RequestInit);
+};
 
-export async function transcribeVoice(runtime:Pick<AppServer,'rpc'>,payload:Json,fetcher:typeof fetch=fetch):Promise<{text:string}> {
+export async function transcribeVoice(runtime:Pick<AppServer,'rpc'>,payload:Json,fetcher:typeof fetch=fetchVoice):Promise<{text:string}> {
   const {audio,mimeType,durationMs}=payload;
   const extension=typeof mimeType==='string'&&Object.hasOwn(voiceMimeTypes,mimeType)?voiceMimeTypes[mimeType]:undefined;
   if(!extension)throw new BridgeError('invalid_audio','录音格式不支持，请切换系统键盘或更换浏览器');

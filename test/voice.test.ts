@@ -1,6 +1,9 @@
 import {test,type TestContext} from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter,once} from 'node:events';
+import {createServer} from 'node:http';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import {WebSocket} from 'ws';
 import {createRelay} from '../src/server/relay.js';
 import {transcribeVoice} from '../src/connector/voice.js';
@@ -64,6 +67,33 @@ test('provider errors and empty transcripts are actionable without leaking respo
   await assert.rejects(transcribeVoice(runtime(),recording,async()=>{throw new Error(auth.authToken);}),(e:any)=>e.code==='voice_failed'&&!e.message.includes(auth.authToken));
   await assert.rejects(transcribeVoice(runtime(),recording,async()=>Response.json({text:'  '})),(e:any)=>e.code==='voice_empty');
   await assert.rejects(transcribeVoice(runtime(),recording,async()=>new Response('not json')),(e:any)=>e.code==='voice_failed');
+});
+
+test('default transcription transport uses the configured HTTPS proxy without global proxy flags',async t=>{
+  const requests:{target:string|undefined;authorization:string|undefined}[]=[];
+  const proxy=createServer();
+  proxy.on('connect',(request,socket)=>{
+    requests.push({target:request.url,authorization:request.headers.authorization});
+    // Fail locally before TLS: no audio or credentials leave this fixture.
+    socket.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+  });
+  proxy.listen(0,'127.0.0.1');await once(proxy,'listening');
+  t.after(()=>new Promise<void>(resolve=>proxy.close(()=>resolve())));
+  const proxyUrl=`http://127.0.0.1:${(proxy.address() as any).port}`;
+  for(const key of ['HTTPS_PROXY','https_proxy','HTTP_PROXY']){
+    const env={...process.env};
+    for(const name of Object.keys(env))if(/^(https?_proxy|no_proxy|all_proxy|node_use_env_proxy|node_options)$/i.test(name))delete env[name];
+    env[key]=proxyUrl;
+    const script=`
+      import assert from 'node:assert/strict';
+      import {transcribeVoice} from ${JSON.stringify(new URL('../src/connector/voice.ts',import.meta.url).href)};
+      const runtime={rpc:async()=>(${JSON.stringify(auth)})};
+      await assert.rejects(transcribeVoice(runtime,${JSON.stringify(recording)}),error=>error.code==='voice_failed'&&!error.message.includes(${JSON.stringify(auth.authToken)}));
+    `;
+    await promisify(execFile)(process.execPath,['--import','tsx','--input-type=module','-e',script],{env,windowsHide:true,timeout:15000});
+    assert.equal(requests.length,['HTTPS_PROXY','https_proxy','HTTP_PROXY'].indexOf(key)+1);
+    assert.deepEqual(requests.at(-1),{target:'chatgpt.com:443',authorization:undefined});
+  }
 });
 
 test('control routes dictation without creating a conversation or storing an operation',async t=>{

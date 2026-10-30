@@ -1,5 +1,7 @@
 # 来源与版本基线
 
+2026-10-30 桌面发送超时：核对本机桌面 `26.1021.3705.0` 的 `app.asar → .vite/build/src-Dl21kCYQ.js`，转发层 `UM` 使用 5 秒超时，超时不会取消已经交给桌面的启动请求。10 月 28 日的连接器失败回执与桌面 rollout 的 `user_message.client_id` 完全一致，确认存在“手机报失败、桌面已执行”的情况。连接器现在将此类超时记为结果待核实，并短暂等待实时快照；仅在原消息 ID 与真实轮次 ID 同时匹配时确认成功，不重新发送。回归覆盖延迟快照、已完成轮次、其他消息干扰、明确拒绝及回执重放；手机交互仍由人类验收。
+
 2026-10-18 语音输入：本机 CLI `0.162.0-alpha.17.2` 生成协议仍提供 `getAuthStatus(includeToken, refreshToken)`，没有独立听写 RPC。本地桌面研究副本的 `QTs` 以 multipart `file` 调用 `/transcribe`，默认 WebM；Remodex 固定副本的 `voice-handler.js` 提供 ChatGPT `/backend-api/transcribe`、登录刷新及上传 User-Agent 的参考。实现独立写在 `src/connector/voice.ts`，仅返回文字，不转发凭据或原始服务错误。此路径是桌面私有服务；[公开 app-server 文档](https://learn.chatgpt.com/docs/app-server)未承诺转写接口，[Sign in with ChatGPT 的公开 API 限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)也不包含转写支持。浏览器录音按 [MediaRecorder](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder)选择支持的格式。自动夹具覆盖音频转发、登录刷新、取消和迟到结果；真实账号及手机效果待人工验收。
 
 2026-10-15 对照本机桌面 26.1007.9446.0 的 `app.asar`：`thread-follower-steer-turn` 的处理函数直接读取 `restoreMessage.cwd` 与 `restoreMessage.context`，旧连接器遗漏该对象；`thread-follower-update-thread-settings` 的 IPC 版本为 2。已补齐追加消息上下文和版本，并识别桌面的 `steeringUserMessage`。运行端模型目录提供极速档位，`turn/start.serviceTier` 控制开启或显式清除。CLI 0.162.0-alpha.17.2 的隔离 Responses 夹具验证极速参数到达 HTTP、关闭恢复普通速度，以及 Web 追加和排队在当前轮结束后只发送一次；真实账号调用和界面操作仍由人类验收。

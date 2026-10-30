@@ -17,7 +17,7 @@ test('desktop framing handles fragmented snapshots and rejects patch gaps',async
       const size=buffer.readUInt32LE(0),m=JSON.parse(buffer.subarray(4,4+size).toString());buffer=buffer.subarray(4+size);requests.push(m);
       if(m.type==='request'){
         if(m.method==='thread-follower-load-complete-history')send({type:'broadcast',sourceClientId:'owner',method:'thread-stream-state-changed',params:{conversationId:'s',hostId:'local',change:{type:'snapshot',revision:1,conversationState:{id:'s',turns:[],title:'fixture'}}}},true);
-        send({type:'response',requestId:m.requestId,resultType:'success',result:m.method==='initialize'?{clientId:'reader'}:{}});
+        send(m.params?.fixtureError?{type:'response',requestId:m.requestId,resultType:'error',error:m.params.fixtureError}:{type:'response',requestId:m.requestId,resultType:'success',result:m.method==='initialize'?{clientId:'reader'}:{}});
       }
     }
   });});
@@ -30,5 +30,10 @@ test('desktop framing handles fragmented snapshots and rejects patch gaps',async
     await desktop.request('thread-follower-start-turn',{});assert.equal(requests.at(-1).version,2);
     await desktop.request('thread-follower-edit-last-user-turn',{});assert.equal(requests.at(-1).version,2);
     await desktop.request('thread-follower-update-thread-settings',{});assert.equal(requests.at(-1).version,2);
+    for(const error of ['thread-follower-start-turn-timeout','request-timeout'])await assert.rejects(
+      desktop.request('thread-follower-start-turn',{fixtureError:error}),
+      (failure:any)=>failure.code==='timeout'&&failure.uncertain===true&&failure.message.includes(error));
+    await assert.rejects(desktop.request('thread-owner-discovery',{fixtureError:'no-client-found'}),(failure:any)=>failure.code==='no_owner'&&!failure.uncertain);
+    await assert.rejects(desktop.request('thread-follower-start-turn',{fixtureError:'invalid-input'}),(failure:any)=>failure.code==='desktop_error'&&!failure.uncertain);
   }finally{desktop.close();remote?.destroy();await new Promise<void>(r=>server.close(()=>r()));if(original===undefined)delete process.env.CODEX_IPC_PATH;else process.env.CODEX_IPC_PATH=original;}
 });

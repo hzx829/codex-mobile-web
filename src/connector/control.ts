@@ -306,7 +306,7 @@ export class Control extends EventEmitter {
       } else {
         const settings=await this.turnSettings(p,session.model);
         const request:Json={threadId:id,input,...settings};
-        if(session.source==='desktop')result=await this.desktop.request('thread-follower-start-turn',{...context,turnStart:{request:{...request,clientUserMessageId:p.opId},context:{inheritThreadSettings:true}}});
+        if(session.source==='desktop')result=await this.startDesktopTurn(context,{...request,clientUserMessageId:p.opId});
         else result=await this.runtime.rpc('turn/start',request);
         const started=result?.result?.turn?.id||result?.turn?.id;
         if(!started)throw new BridgeError('unexpected','发送结果未返回轮次，请刷新会话核实',true);
@@ -325,6 +325,33 @@ export class Control extends EventEmitter {
       this.emit('change',id);return {threadId:id,requestId:req.id,kind:'response_submitted'};
     }
     throw new BridgeError('unsupported','此操作暂不支持');
+  }
+  private async startDesktopTurn(context:Json,request:Json):Promise<Json> {
+    try {
+      return await this.desktop.request('thread-follower-start-turn',{...context,turnStart:{request,context:{inheritThreadSettings:true}}});
+    } catch(error) {
+      if(!(error instanceof BridgeError)||!error.uncertain)throw error;
+      // A timed-out desktop request may still start. Confirm this exact input from
+      // the live stream, never from another active turn or an optimistic placeholder.
+      const turnId=await new Promise<string|undefined>(resolve=>{
+        const finish=(id?:string)=>{clearTimeout(timer);this.desktop.off('change',changed);this.desktop.off('offline',offline);resolve(id);};
+        const changed=(id:string)=>{
+          if(id!==context.conversationId)return;
+          const raw=this.desktop.states.get(id)?.state;
+          const turn=raw&&desktopTurns(raw).find(turn=>(turn.turnId||turn.id)&&(
+            turn.params?.clientUserMessageId===request.clientUserMessageId||
+            turn.items?.some((item:Json)=>item.type==='userMessage'&&item.clientId===request.clientUserMessageId)));
+          if(turn)finish(turn.turnId||turn.id);
+        };
+        const offline=()=>finish();
+        const timer=setTimeout(finish,3000);
+        this.desktop.on('change',changed);this.desktop.once('offline',offline);
+        changed(context.conversationId);
+        if(!this.desktop.clientId)finish();
+      });
+      if(!turnId)throw error;
+      return {result:{turn:{id:turnId}}};
+    }
   }
   private async exclusive<T>(key:string,fn:()=>Promise<T>):Promise<T> {
     const previous=this.locks.get(key)||Promise.resolve();
