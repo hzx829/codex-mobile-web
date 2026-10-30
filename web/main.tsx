@@ -1,6 +1,7 @@
 import {lazy,Suspense,useEffect,useLayoutEffect,useRef,useState,type ReactNode,type ClipboardEvent} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
+import {ChatGPTPanel} from './chatgpt';
 import {Icon,type IconName} from './icons';
 import {SafeMarkdown,RequestCard} from './content';
 import {createFirstTurn} from './new-chat';
@@ -347,10 +348,12 @@ function App(){
   const feedback=<>{error&&<div className="feedback error" role="alert"><span>{error}</span><IconButton icon="close" label="关闭提示" onClick={()=>setError('')}/></div>}{notice&&<div className="feedback" role="status">{notice}</div>}{pending&&!busy&&<div className="pending"><button onClick={()=>void checkPending()}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先查看最新任务，确认这次操作的实际结果。清除提示不会重发旧操作。')){setOperation(null);setNotice('');}}}>我已核实</button></div>}</>;
 
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>在手机上继续使用 Codex。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
+  if(route.chat!==undefined)return <ChatGPTPanel key={`${machine}:${route.chat}`} machine={machine} connected={connected} conversationId={route.chat} call={call} go={chat=>navigate({...home,chat})} back={()=>navigate(home)}/>;
   return <div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||compactPreview&&preview)}>
        <header className="home-header">{project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={busy} onClick={backToProjects}/><h1>{projectName(project)}</h1></>:<button className="home-identity" aria-label="选择电脑" onClick={()=>setSheet('computer')}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</span></button>}<IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
       <div className="home-content">
+        <button className="project-row" onClick={()=>navigate({...home,chat:''})}><Icon name="chat"/><span>ChatGPT 聊天</span></button>
         {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
         <section className="recent-section">{!listedThreads.length&&<h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2>}{groupThreads(listedThreads,preferences,searchQuery?'搜索结果':archived?'归档会话':'最近').map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]} time={relativeTime(s.updatedAt)} open={()=>{changePreference(s.id,{unread:false});navigate({...route,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
           {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}

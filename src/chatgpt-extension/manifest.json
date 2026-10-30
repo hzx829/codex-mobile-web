@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT Mobile Bridge",
+  "version": "0.1.0",
+  "description": "Connect a selected ChatGPT tab to your own Codex Mobile Web connector.",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "scripting", "alarms"],
+  "host_permissions": ["https://chatgpt.com/*", "http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html"},
+  "content_scripts": [{"matches": ["https://chatgpt.com/*"], "js": ["content.js"], "run_at": "document_idle"}]
+}

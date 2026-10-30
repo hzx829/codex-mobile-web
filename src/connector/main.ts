@@ -9,6 +9,7 @@ import { MAX_FRAME, BridgeError, type Json } from '../shared/types.js';
 import { Ledger } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
+import { ChatGPTBridge } from './chatgpt.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -18,6 +19,7 @@ mkdirSync(config.dataDir,{recursive:true});
 const control=new Control(new Ledger(join(config.dataDir,'operations.sqlite')));
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
+const chatgpt=new ChatGPTBridge(config.dataDir,config.chatgptPort||3342);
 await control.start();
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
 let proxyBackpressure:NodeJS.Timeout|undefined;
@@ -47,8 +49,10 @@ function connect() {
     if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
     if(m.type!=='request')return;
     try{
+      if(m.action==='runtime.reload')chatgpt.prepareReload();
       const result=m.action==='preview.start'?browserPreview.start(m.payload?.url,m.payload?.threadId)
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
+        :typeof m.action==='string'&&m.action.startsWith('chatgpt.')?await chatgpt.handle(m.action,m.payload)
         :await control.handle(m as any);
       if(socket===ws)send({type:'response',id:m.id,result});
     }
@@ -68,4 +72,4 @@ control.on('change',(id:string|null)=>{
   dirty=setTimeout(()=>{dirty=undefined;try{for(const threadId of dirtyIds)send({type:'changed',threadId,generation:control.generation});}catch{}dirtyIds.clear();},200);
 });
 connect();
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);void browserPreview.stop();socket?.close();control.close();process.exit(0);});
+for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);void browserPreview.stop();chatgpt.close();socket?.close();control.close();process.exit(0);});
