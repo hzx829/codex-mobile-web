@@ -390,7 +390,10 @@ export class Control extends EventEmitter {
         const started=result?.result?.turn?.id||result?.turn?.id;
         if(!started)throw new BridgeError('unexpected','发送结果未返回轮次，请刷新会话核实',true);
         this.starting.set(id,started);
-        if(session.source==='connector')this.rememberSettings(id,settings);
+        if(session.source==='connector') {
+          this.rememberSettings(id,settings);
+          void this.refreshDesktop(id);
+        }
       }
       this.emit('change',id);
       return {threadId:id,turnId:result?.result?.turn?.id||result?.turn?.id||result?.result?.turnId||result?.turnId||session.activeTurnId||null,kind:session.activeTurnId?'steer_accepted':'turn_accepted'};
@@ -441,6 +444,11 @@ export class Control extends EventEmitter {
     if(!id||!this.loaded.has(id)||this.closed)return;
     void this.exclusive(id,()=>this.releaseIdle(id)).catch(()=>{});
   }
+  private async refreshDesktop(id:string) {
+    if(this.closed)return;
+    try {await this.desktop.refreshThread(id);}
+    catch {this.emit('diagnostic','desktop_thread_refresh_failed');}
+  }
   private async releaseIdle(id:string) {
     if(this.closed||this.reloading||!this.loaded.has(id)||this.ledger.queued(id).some(message=>message.state==='queued'||message.state==='sending'))return;
     const session=await this.read(id,1);
@@ -448,6 +456,8 @@ export class Control extends EventEmitter {
     if(this.closed||this.reloading||session.running||session.requests.length||!session.turns.length)return;
     await this.runtime.unsubscribe(id);
     this.loaded.delete(id);this.starting.delete(id);this.emit('change',id);
+    // The final title and legacy history are durable once the native writer closes.
+    void this.refreshDesktop(id);
   }
   private async turnSettings(p:Json,currentModel:string):Promise<Json> {
     const settings:Json={};

@@ -2,7 +2,7 @@ import {removeTestTemp} from './test-temp.js';
 // An actual Codex app-server talks to a local Responses fixture. No model account or existing session is used.
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {once} from 'node:events';
+import {EventEmitter,once} from 'node:events';
 import {mkdir,mkdtemp,readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -11,7 +11,7 @@ import {AppServer,resolveCodex} from '../src/connector/app-server.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {indexedSessions} from '../src/connector/projects.js';
-import type {Json} from '../src/shared/types.js';
+import {BridgeError,type Json} from '../src/shared/types.js';
 import {submitTurn,editTurn} from '../web/turn-request.js';
 import {fastTier} from '../src/shared/models.js';
 const dir=await mkdtemp(join(tmpdir(),'cmw-native-')),home=join(dir,'codex'),project=join(dir,'project');await mkdir(home);await mkdir(project);
@@ -39,7 +39,13 @@ const api=createServer(async(req,res)=>{
 api.listen(0,'127.0.0.1');await once(api,'listening');const port=(api.address() as any).port;
 await writeFile(join(home,'config.toml'),`model = "mobile-fixture"\nmodel_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n[model_providers.fixture]\nname = "Local test fixture"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nenv_key = "CMW_TEST_KEY"\n[projects.${JSON.stringify(project)}]\ntrust_level = "trusted"\n`);
 const runtime=new AppServer(nativeBin,{...process.env,CODEX_HOME:home,CMW_TEST_KEY:fixtureKey,CODEX_PROFILE:'',CODEX_LEGACY_BIN:process.env.CODEX_LEGACY_BIN||localConfig.legacyCodexBin});
-const control=new Control(new Ledger(':memory:'),runtime);
+class OfflineDesktop extends EventEmitter {
+  clientId='';states=new Map();
+  async follow(){throw new BridgeError('no_owner','isolated fixture');}
+  async refreshThread(){}
+  close(){}
+}
+const control=new Control(new Ledger(':memory:'),runtime,new OfflineDesktop() as any);
 const call=(action:any,payload:Json)=>control.handle({id:randomUUID(),action,payload:{...payload,opId:`${Date.now()}:${randomUUID()}`}});
 function event(method:string,predicate:(p:Json)=>boolean=()=>true):Promise<Json>{return new Promise((resolve,reject)=>{
   const timer=setTimeout(()=>{runtime.off('event',listener);reject(new Error(`Native event timeout: ${method}`));},20_000);

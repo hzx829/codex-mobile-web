@@ -33,7 +33,7 @@ api.listen(0,'127.0.0.1');await once(api,'listening');
 await writeFile(join(home,'config.toml'),`model = "ownership-fixture"\nmodel_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n[model_providers.fixture]\nname = "Ownership fixture"\nbase_url = "http://127.0.0.1:${(api.address() as any).port}/v1"\nwire_api = "responses"\nenv_key = "CMW_TEST_KEY"\n[projects.${JSON.stringify(project)}]\ntrust_level = "trusted"\n`);
 const env={...process.env,CODEX_HOME:home,CODEX_PROFILE:'',CMW_TEST_KEY:key};
 const runtime=new AppServer(bin,env),other=new AppServer(bin,env);
-class OfflineDesktop extends EventEmitter {clientId='';states=new Map();async follow(){throw new BridgeError('no_owner','isolated fixture');}close(){}}
+class OfflineDesktop extends EventEmitter {clientId='';states=new Map();async follow(){throw new BridgeError('no_owner','isolated fixture');}async refreshThread(){}close(){}}
 const control=new Control(new Ledger(':memory:'),runtime,new OfflineDesktop() as any,async()=>[],()=>null);
 const call=(action:any,payload:Json)=>control.handle({id:randomUUID(),action,payload:{...payload,opId:`${Date.now()}:${randomUUID()}`}});
 function completed(id:string){return new Promise<void>((resolve,reject)=>{
@@ -46,6 +46,7 @@ try{
   const send=()=>call('turn.send',{threadId:id,source:'connector',generation:control.generation,expectedTurnId:null,text:'Return ownership fixture response.'});
   const active=new Promise<void>(resolve=>{reached=resolve;}),done=completed(id);
   assert.equal((await send()).state,'accepted');await active;
+  assert.equal((await other.rpc('thread/read',{threadId:id,includeTurns:false},3000)).thread.id,id,'Desktop discovery can read persisted metadata while the mobile writer is active.');
   await assert.rejects(other.rpc('thread/resume',{threadId:id},3000),/another|locked|active writer|already.*open/i);
   hold=false;finish(held!);await done;await (control as any).exclusive(id,async()=>{});
   assert.equal((await runtime.rpc('thread/loaded/list')).data.includes(id),false,'Completion must release the native lock.');
@@ -57,7 +58,7 @@ try{
   const again=completed(id);assert.equal((await send()).state,'accepted');await again;await (control as any).exclusive(id,async()=>{});
   assert.equal(requests,2);assert.equal((await runtime.rpc('thread/loaded/list')).data.includes(id),false);
   assert.equal((await other.rpc('thread/resume',{threadId:id})).thread.id,id);
-  console.log(JSON.stringify({result:'passed',nativeVersion:runtime.version,checks:['active native ownership blocks another app','completion releases native ownership','history reads stay detached','external owner prevents duplicate execution','mobile resumes only after external release'],liveChatGPT:false,uiAcceptance:false}));
+  console.log(JSON.stringify({result:'passed',nativeVersion:runtime.version,checks:['active thread metadata is readable without taking ownership','active native ownership blocks another app','completion releases native ownership','history reads stay detached','external owner prevents duplicate execution','mobile resumes only after external release'],liveChatGPT:false,uiAcceptance:false}));
 }finally{
   await other.stop();await runtime.stop();control.close();api.closeAllConnections();await new Promise<void>(resolve=>api.close(()=>resolve()));
   await removeTestTemp(dir);

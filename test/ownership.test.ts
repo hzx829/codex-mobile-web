@@ -22,7 +22,8 @@ class Runtime extends EventEmitter {
   close(){}
 }
 class Desktop extends EventEmitter {
-  clientId='';states=new Map();owner=false;calls:string[]=[];
+  clientId='';states=new Map();owner=false;calls:string[]=[];refreshed:string[]=[];refreshError=false;
+  async refreshThread(id:string){if(this.refreshError)throw new Error('desktop offline');this.refreshed.push(id);}
   async follow(){if(!this.owner)throw new BridgeError('no_owner','no owner');return {id:'s',turns:[],requests:[]};}
   async request(method:string){this.calls.push(method);return {result:{turn:{id:'desktop-turn'}}};}
   close(){}
@@ -39,13 +40,28 @@ test('completed mobile turns release native ownership; reading stays detached an
   const f=fixture();try{
     f.runtime.complete();await f.settle();
     assert.equal(f.runtime.calls.filter(c=>c.method==='thread/unsubscribe').length,1);
+    assert.deepEqual(f.desktop.refreshed,['s'],'A persisted mobile thread must be discovered without a desktop search.');
     assert.equal((f.control as any).loaded.has('s'),false);
     const view=await f.control.read('s');assert.equal(view.source,'connector');assert.equal(view.canControl,true);assert.equal(view.model,'native-model');
     assert.equal(f.runtime.calls.some(c=>c.method==='thread/resume'),false,'Reading must not reacquire the desktop lock.');
     assert.equal((await f.send()).state,'accepted');await f.settle();
     assert.equal(f.runtime.calls.filter(c=>c.method==='thread/resume').length,1);
     assert.equal(f.runtime.calls.filter(c=>c.method==='turn/start').length,1);
+    assert.deepEqual(f.desktop.refreshed,['s','s'],'A confirmed mobile send also refreshes the desktop while the task runs.');
     assert.equal(f.runtime.calls.filter(c=>c.method==='thread/unsubscribe').length,1,'The new running turn remains owned.');
+  }finally{f.control.close();}
+});
+
+test('desktop discovery failures do not change a confirmed send or prevent native release',async()=>{
+  const f=fixture();try{
+    f.desktop.refreshError=true;
+    assert.equal((await f.send()).state,'accepted');
+    f.runtime.complete();await f.settle();
+    assert.equal((f.control as any).loaded.has('s'),false);
+    assert.equal(f.runtime.calls.filter(call=>call.method==='turn/start').length,1);
+    f.desktop.refreshError=false;
+    assert.equal((await f.send()).state,'accepted');
+    assert.deepEqual(f.desktop.refreshed,['s']);
   }finally{f.control.close();}
 });
 
@@ -59,6 +75,7 @@ test('release never interrupts active turns, approvals, queued sends or unpersis
       (f.control as any).scheduleRelease('s');await f.settle();
       assert.equal(f.runtime.calls.some(c=>c.method==='thread/unsubscribe'),false,condition);
       assert.equal((f.control as any).loaded.has('s'),true,condition);
+      assert.deepEqual(f.desktop.refreshed,[],condition);
     }finally{f.control.close();}
   }
 });
@@ -71,6 +88,7 @@ test('a desktop that acquires the released thread becomes the only write target'
     assert.equal((await f.send('desktop')).state,'accepted');
     assert.equal(f.desktop.calls.at(-1),'thread-follower-start-turn');
     assert.equal(f.runtime.calls.some(c=>c.method==='thread/resume'||c.method==='turn/start'),false);
+    assert.deepEqual(f.desktop.refreshed,['s'],'Desktop-owned sends already update their own recents.');
   }finally{f.control.close();}
 });
 
@@ -86,6 +104,7 @@ test('an external owner not visible over IPC is protected by the native resume l
 test('a failed release keeps ownership tracked until native unsubscribe succeeds',async()=>{
   const f=fixture();try{
     f.runtime.unsubscribeError=true;f.runtime.complete();await f.settle();assert.equal((f.control as any).loaded.has('s'),true);
+    assert.deepEqual(f.desktop.refreshed,[],'A failed release is not a durable completion.');
     f.runtime.unsubscribeError=false;f.runtime.complete();await f.settle();assert.equal((f.control as any).loaded.has('s'),false);
   }finally{f.control.close();}
 });
@@ -130,6 +149,7 @@ test('a partially named fork still releases the new native thread',async()=>{
     assert.equal(result.state,'uncertain');assert.match(result.error.message,/branch/);
     assert.equal(f.ledger.owns('branch'),true);assert.equal((f.control as any).loaded.has('branch'),false);
     assert.ok(f.runtime.calls.some(call=>call.method==='thread/unsubscribe'&&call.params.threadId==='branch'));
+    assert.ok(f.desktop.refreshed.includes('branch'));
   }finally{f.control.close();}
 });
 

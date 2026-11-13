@@ -31,6 +31,10 @@ test('desktop framing handles fragmented snapshots and rejects patch gaps',async
     await desktop.request('thread-follower-start-turn',{});assert.equal(requests.at(-1).version,2);
     await desktop.request('thread-follower-edit-last-user-turn',{});assert.equal(requests.at(-1).version,2);
     await desktop.request('thread-follower-update-thread-settings',{});assert.equal(requests.at(-1).version,2);
+    await desktop.refreshThread('new-mobile-thread');
+    await desktop.request('fixture-barrier',{});
+    assert.deepEqual(requests.at(-2),{type:'broadcast',sourceClientId:'reader',method:'thread-unarchived',version:1,params:{hostId:'local',conversationId:'new-mobile-thread'}});
+    assert.equal(requests.some(request=>request.method==='thread/resume'),false);
     for(const error of ['thread-follower-start-turn-timeout','request-timeout'])await assert.rejects(
       desktop.request('thread-follower-start-turn',{fixtureError:error}),
       (failure:any)=>failure.code==='timeout'&&failure.uncertain===true&&failure.message.includes(error));

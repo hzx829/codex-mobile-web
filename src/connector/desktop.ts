@@ -68,6 +68,12 @@ export class Desktop extends EventEmitter {
     });
   }
   broadcast(method: string, params: Json) { this.write({type:'broadcast',sourceClientId:this.clientId,method,version:versions[method]||1,params}); }
+  async refreshThread(threadId:string) {
+    await this.connect();
+    // Desktop has no thread-created IPC broadcast. Its unarchived handler reads
+    // stored metadata and adds the thread to recents without resuming its writer.
+    this.broadcast('thread-unarchived',{hostId:'local',conversationId:threadId});
+  }
   async follow(threadId: string, hostId = 'local') {
     await this.connect();
     if(this.states.has(threadId)){const cached=this.states.get(threadId)!;this.states.delete(threadId);this.states.set(threadId,cached);return cached.state;}
