@@ -2,12 +2,15 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
+import { gzip } from 'node:zlib';
+import { promisify } from 'node:util';
 import { WebSocketServer, WebSocket } from 'ws';
 import { MAX_FRAME, textRequired, type Json } from '../shared/types.js';
 import { PreviewTunnel } from './preview-tunnel.js';
 import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 
 type Peer={role:'phone'|'connector';machineId?:string;name?:string;alive:boolean};
+const compress=promisify(gzip);
 export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3341) {
   const peers=new Map<WebSocket,Peer>();
   const routes=new Map<string,{phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;threadId?:string;timer:NodeJS.Timeout}>();
@@ -23,7 +26,14 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       if(!file.startsWith(resolve(staticDir)+sep))throw Error();
       if(!(await stat(file)).isFile())throw Error();
       const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.json':'application/json','.webmanifest':'application/manifest+json','.png':'image/png'};
-      res.writeHead(200,{'Content-Type':mime[extname(file)]||'application/octet-stream'});res.end(await readFile(file));
+      const asset=/^\/assets\/[\w.-]+-[\w-]{8,}\.(js|css)$/.test(pathname);
+      let body=await readFile(file);
+      if(asset){
+        res.setHeader('Cache-Control','public, max-age=31536000, immutable');res.setHeader('Vary','Accept-Encoding');
+        const acceptsGzip=(req.headers['accept-encoding']||'').split(',').some(value=>{const [coding,...params]=value.trim().split(';');return coding==='gzip'&&!params.some(p=>/^\s*q\s*=\s*0(?:\.0*)?\s*$/.test(p));});
+        if(acceptsGzip){body=await compress(body);res.setHeader('Content-Encoding','gzip');}
+      }
+      res.writeHead(200,{'Content-Type':mime[extname(file)]||'application/octet-stream','Content-Length':body.length});res.end(body);
     }catch{res.writeHead(404);res.end('Not found');}
   });
   const wss=new WebSocketServer({server,path:'/ws',maxPayload:MAX_FRAME});

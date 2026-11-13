@@ -4,18 +4,19 @@ import { AppServer, resolveCodex } from './app-server.js';
 import { resolve } from 'node:path';
 import { Desktop } from './desktop.js';
 import { Ledger } from './ledger.js';
-import { desktopTurns, normalizeSession } from './normalize.js';
+import { desktopTurns, normalizeSession, turnPage } from './normalize.js';
 import { approvalResult } from './approvals.js';
 import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
 import { nativeProjects, indexedSessions } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
-import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus } from '../shared/types.js';
-import {imageDataUrl,MAX_IMAGES} from '../shared/images.js';
+import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor } from '../shared/types.js';
+import {validateImages} from '../shared/images.js';
 import {contextUsage,accountLimits} from './usage.js';
 import {readModels,reasoningEffort} from './models.js';
 import {revertThread} from './revert.js';
 import {fastTier} from '../shared/models.js';
 import {transcribeVoice} from './voice.js';
+import {sessionSnapshot} from './session-snapshot.js';
 
 function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   if(value===undefined||value===null||value==='')return undefined;
@@ -42,9 +43,11 @@ export class Control extends EventEmitter {
     runtime.on('event',(e:Json)=>{
       if(e.method==='turn/diff/updated')this.diffs.set(e.params.turnId,e.params.diff);
       if(e.method==='turn/completed')this.starting.delete(e.params.threadId);
+      if(e.method==='thread/closed'){this.loaded.delete(e.params.threadId);this.starting.delete(e.params.threadId);}
       if(e.method==='thread/tokenUsage/updated')this.contexts.set(e.params.threadId,contextUsage(e.params.tokenUsage));
       if(e.method==='thread/compacted')this.contexts.delete(e.params.threadId);
       if(e.method==='thread/settings/updated')this.rememberSettings(e.params.threadId,e.params.threadSettings);
+      if(e.method==='turn/completed')this.scheduleRelease(e.params.threadId);
       this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
     });
     runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.settings.clear();this.contexts.clear();this.generation=randomUUID();this.emit('change',null);});
@@ -62,7 +65,13 @@ export class Control extends EventEmitter {
     if(req.action==='voice.transcribe')return transcribeVoice(this.runtime,p);
     if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.cancelQueued','turn.withdrawQueued','turn.steerQueued','turn.edit','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
-      return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,()=>this.mutate(req.action,p)));
+      return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,async()=>{
+        try {
+          const result=await this.mutate(req.action,p);
+          if(p.threadId&&!['turn.send','turn.edit','turn.steerQueued','request.respond'].includes(req.action))this.scheduleRelease(p.threadId);
+          return result;
+        }catch(error){if(p.threadId)this.scheduleRelease(p.threadId);throw error;}
+      }));
     }
     if(req.action==='info') {
       const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
@@ -80,7 +89,12 @@ export class Control extends EventEmitter {
       const page=this.listSessions({cwd,archived:Boolean(p.archived),search,cursor:p.cursor});
       return {...page,data:page.data.map(thread=>({...thread,status:this.desktop.states.get(thread.id)?.state.threadRuntimeStatus}))};
     }
-    if(req.action==='session.read')return this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(5,Number(p.limit)||20)));
+    if(req.action==='session.read') {
+      const cursor:TurnCursor|undefined=p.cursor==null?undefined:{before:textRequired(p.cursor.before,'历史位置',200)};
+      if(cursor&&p.cursor.native!=null)cursor.native=textRequired(p.cursor.native,'历史游标',4000);
+      const view=await this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(1,Math.floor(Number(p.limit)||20))),cursor);
+      return sessionSnapshot(view,cursor?undefined:p.known);
+    }
     if(req.action==='session.status') {
       const session=await this.read(textRequired(p.threadId,'会话'),5);
       const status:ThreadStatus={threadId:session.id,limits:[]};
@@ -95,10 +109,11 @@ export class Control extends EventEmitter {
     }
     throw new BridgeError('unsupported','此操作暂不支持');
   }
-  async read(id:string,limit=20):Promise<SessionView> {
-    let view:SessionView;
+  async read(id:string,limit=20,cursor?:TurnCursor):Promise<SessionView> {
+    let view:SessionView,nativeCursor:string|undefined;
     if(this.loaded.has(id)) {
-      const {raw,hasMore,notice,resumeUnavailable}=await this.runtimeThread(id,limit);
+      const {raw,hasMore,notice,resumeUnavailable,nextCursor}=await this.runtimeThread(id,limit,cursor);
+      nativeCursor=nextCursor;
       for(const [key,value] of Object.entries(this.settings.get(id)||{}))if(raw[key]===undefined||raw[key]===null||raw[key]==='')raw[key]=value;
       view=normalizeSession(raw,'connector',[...this.runtime.requests.values()].filter(r=>r.params?.threadId===id),limit);
       view.contextUsage=this.contexts.get(id)||null;
@@ -109,27 +124,62 @@ export class Control extends EventEmitter {
     } else {
       try {
         const raw=await this.desktop.follow(id);
-        view=normalizeSession(raw,'desktop',raw.requests||[],limit);
+        view=await this.desktopView(raw,id,limit,cursor);
+        nativeCursor=view.nextCursor?.native;
       } catch(e) {
-        const {raw,hasMore,notice,resumeUnavailable}=await this.runtimeThread(id,limit);
-        view=normalizeSession(raw,'history',[],limit);
+        if(e instanceof BridgeError&&e.code==='changed')throw e;
+        const {raw,hasMore,notice,resumeUnavailable,nextCursor}=await this.runtimeThread(id,limit,cursor);
+        nativeCursor=nextCursor;
+        const managed=this.ledger.owns(id)&&!resumeUnavailable;
+        for(const [key,value] of Object.entries(this.settings.get(id)||{}))if(raw[key]===undefined||raw[key]===null||raw[key]==='')raw[key]=value;
+        view=normalizeSession(raw,managed?'connector':'history',[],limit);
+        if(managed){view.contextUsage=this.contexts.get(id)||null;for(const turn of view.turns)turn.diff=this.diffs.get(turn.id)||turn.diff;}
         view.hasMore=hasMore||view.hasMore;
         view.resumeUnavailable=resumeUnavailable;
-        view.notice=notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
+        if(!managed)view.notice=notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
       }
     }
+    view.nextCursor=view.hasMore&&view.turns.length?{before:view.turns[0].id,...nativeCursor?{native:nativeCursor}:{}}:null;
     const starting=this.starting.get(id);
-    if(starting&&view.source!=='history') {
+    if(starting&&!cursor&&view.source!=='history') {
       if(view.activeTurnId||view.turns.some(turn=>turn.id===starting&&turnFinished(turn.status)))this.starting.delete(id);
       else {view.activeTurnId=starting;view.running=true;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
     }
     view.queuedMessages=this.ledger.queued(id).map(message=>({id:message.id,text:message.payload.text,imageCount:message.payload.images?.length||0,state:message.state,error:message.error}));
     view.generation=this.generation;return view;
   }
-  private async runtimeThread(id:string,limit:number):Promise<{raw:Json;hasMore:boolean;notice?:string;resumeUnavailable?:boolean}> {
+  private async desktopView(raw:Json,id:string,limit:number,cursor?:TurnCursor):Promise<SessionView> {
+    const live=desktopTurns(raw),history=raw.turnHistory?.history;
+    const partial=history?.isComplete===false||history?.islands?.length>1||raw.turnsPagination?.hasLoadedOldest===false||live.some(turn=>turn.itemsPagination?.hasLoadedOldest===false);
+    if(!partial)return normalizeSession(raw,'desktop',raw.requests||[],limit,cursor?.before);
+    // A desktop snapshot may contain only a window of history or partial turn items.
+    // Read a bounded persisted page and overlay the live state without expanding the desktop's history.
+    let page=this.history(id,limit,undefined,cursor?.before),nativeCursor:string|undefined;
+    if(!page){const result=await this.runtimeThread(id,limit,cursor);page={turns:result.raw.turns||[],hasMore:result.hasMore};nativeCursor=result.nextCursor;}
+    const liveById=new Map(live.map(turn=>[turn.turnId||turn.id,turn]));
+    const turns=page.turns.map(turn=>{
+      const latest=liveById.get(turn.id||turn.turnId);if(!latest)return turn;
+      const items=latest.itemsPagination?.hasLoadedOldest===false
+        ?[...new Map([...turn.items||[],...latest.items||[]].map(item=>[item.id,item])).values()]:latest.items;
+      return {...turn,...latest,items};
+    });
+    if(!cursor){
+      const tail=history?.islands?.at(-1);
+      const recent:Json[]=tail?tail.entries.map((entry:Json)=>history.entitiesByKey[entry.value||entry.key]).filter(Boolean):live;
+      const last=recent.findIndex(turn=>(turn.turnId||turn.id)===(turns.at(-1)?.turnId||turns.at(-1)?.id));
+      const ids=new Set(turns.map(turn=>turn.turnId||turn.id));
+      turns.push(...recent.slice(last+1).filter(turn=>!ids.has(turn.turnId||turn.id)));
+    }
+    const view=normalizeSession({...raw,turnHistory:undefined,turns},'desktop',raw.requests||[],limit);
+    view.hasMore=page.hasMore||view.hasMore;
+    if(nativeCursor&&(page.turns[0]?.id||page.turns[0]?.turnId)===view.turns[0]?.id)view.nextCursor={before:view.turns[0].id,native:nativeCursor};
+    return view;
+  }
+  private async runtimeThread(id:string,limit:number,cursor?:TurnCursor):Promise<{raw:Json;hasMore:boolean;nextCursor?:string;notice?:string;resumeUnavailable?:boolean}> {
     try {
       const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:true});
-      return {raw:r.thread,hasMore:false};
+      const page=turnPage(r.thread.turns||[],limit,cursor?.before);
+      return {raw:{...r.thread,turns:page.turns},hasMore:page.hasMore};
     } catch(e) {
       const paginated=e instanceof BridgeError&&/paginated[_\s]threads?.*(?:do not support|is not supported)/i.test(e.message);
       const unsupportedTurns=e instanceof BridgeError&&/list_turns is not supported yet/i.test(e.message);
@@ -142,17 +192,30 @@ export class Control extends EventEmitter {
       }
       const thread=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:false});
       const indexed=()=>{
-        const page=this.history(id,limit);
+        const page=this.history(id,limit,undefined,cursor?.before);
         const resumeUnavailable=!this.loaded.has(id);
         if(page)return {raw:{...thread.thread,turns:page.turns},hasMore:page.hasMore,resumeUnavailable};
+        if(cursor)throw new BridgeError('changed','历史位置已变化，请重新打开会话');
         return {raw:{...thread.thread,turns:[]},hasMore:false,resumeUnavailable,
           notice:resumeUnavailable?'此会话的分页历史暂时无法读取，请在 Codex 桌面查看完整记录。':undefined};
       };
       if(unsupportedTurns)return indexed();
+      if(cursor&&!cursor.native){const page=this.history(id,limit,undefined,cursor.before);if(page)return {raw:{...thread.thread,turns:page.turns},hasMore:page.hasMore};}
       try {
-        const page=await this.runtime.rpc('thread/turns/list',{threadId:id,limit,sortDirection:'desc',itemsView:'full'});
-        const turns=page.data||page.turns||page.items||[];
-        return {raw:{...thread.thread,turns:[...turns].reverse()},hasMore:Boolean(page.nextCursor)};
+        let native=cursor?.native,seeking=Boolean(cursor&&!native);const seen=new Set<string>();
+        for(;;){
+          if(native){if(seen.has(native))throw new BridgeError('changed','历史游标未前进，请重新打开会话');seen.add(native);}
+          const page=await this.runtime.rpc('thread/turns/list',{threadId:id,limit,sortDirection:'desc',itemsView:'full',...native?{cursor:native}:{}});
+          let turns:Json[]=[...page.data||page.turns||page.items||[]].reverse();
+          if(seeking){
+            const index=turns.findIndex(turn=>turn.id===cursor!.before);
+            if(index>=0){turns=turns.slice(0,index);seeking=false;}
+            else if(!page.nextCursor)throw new BridgeError('changed','历史位置已变化，请重新打开会话');
+          }
+          if(page.nextCursor&&seen.has(page.nextCursor))throw new BridgeError('changed','历史游标未前进，请重新打开会话');
+          if(!seeking&&(turns.length||!page.nextCursor))return {raw:{...thread.thread,turns},hasMore:Boolean(page.nextCursor),nextCursor:page.nextCursor||undefined};
+          native=page.nextCursor;
+        }
       } catch(error) {
         if(!(error instanceof BridgeError)||!/list_turns is not supported yet/i.test(error.message))throw error;
         return indexed();
@@ -216,7 +279,8 @@ export class Control extends EventEmitter {
     if(action==='session.fork') {
       const lastTurnId=textRequired(p.lastTurnId,'分叉位置',200);
       const source=await this.read(id,100);
-      const selected=source.turns.find(turn=>turn.id===lastTurnId);
+      let page=source,selected=page.turns.find(turn=>turn.id===lastTurnId);
+      while(!selected&&page.nextCursor){page=await this.read(id,100,page.nextCursor);selected=page.turns.find(turn=>turn.id===lastTurnId);}
       if(!selected||!selected.canFork)throw new BridgeError('changed','分叉位置已变化，请刷新后重试');
       const r=await this.runtime.rpc('thread/fork',{threadId:id,lastTurnId});
       if(!r?.thread?.id)throw new BridgeError('unexpected','分叉结果未返回新会话，请刷新列表核实',true);
@@ -226,6 +290,7 @@ export class Control extends EventEmitter {
       const title=`${source.title.slice(0,180)}（分叉）`;
       try {await this.runtime.rpc('thread/name/set',{threadId:forkId,name:title});}
       catch {this.emit('change',forkId);throw new BridgeError('partial',`分叉已创建，但标题保存未获确认。新会话：${forkId}`,true);}
+      finally {await this.exclusive(forkId,()=>this.releaseIdle(forkId)).catch(()=>{});}
       this.emit('change',forkId);return {threadId:forkId,title,cwd:r.thread.cwd||source.cwd};
     }
     if(action==='session.rename') {
@@ -261,6 +326,13 @@ export class Control extends EventEmitter {
       this.emit('change',id);return {threadId:id,kind:'queued'};
     }
     if(!session.canControl)throw new BridgeError('read_only',session.notice||'当前会话暂不能操作');
+    if(session.source==='connector'&&!this.loaded.has(id)&&(action==='turn.send'||action==='turn.edit')) {
+      // Resume by ID: app-server's native ownership lock rejects another application's active thread.
+      const r=await this.runtime.rpc('thread/resume',{threadId:id});
+      this.loaded.add(id);this.rememberSettings(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy});
+      const connected=await this.read(id);
+      if(connected.running||connected.activeTurnId!==session.activeTurnId)throw new BridgeError('changed','任务已发生变化，输入已保留，请刷新后发送');
+    }
     const context={conversationId:id,hostId:this.desktop.states.get(id)?.hostId||'local'};
     if(session.source==='desktop')await this.desktop.request('thread-owner-discovery',context,1500);
     if(action==='turn.edit') {
@@ -276,9 +348,16 @@ export class Control extends EventEmitter {
         }
         await this.desktop.request('thread-follower-edit-last-user-turn',{...context,turnId,message:text});
       } else {
-        const {raw}=await this.runtimeThread(id,100);
+        let page=await this.runtimeThread(id,100);const raw=page.raw;
+        while(!raw.turns.some((turn:Json)=>turn.id===turnId)&&page.hasMore){
+          const before=raw.turns[0]?.id;if(!before)break;
+          page=await this.runtimeThread(id,100,{before,...page.nextCursor?{native:page.nextCursor}:{}});
+          if(!page.raw.turns?.length)break;
+          raw.turns=[...page.raw.turns,...raw.turns];
+        }
         const {input,numTurns}=this.editedInput(raw,turnId,itemId,text);
         await revertThread(this.runtime,raw,turnId,numTurns);
+        this.loaded.add(id);
         this.contexts.delete(id);
         for(const turn of raw.turns.slice(-numTurns))this.diffs.delete(turn.id||turn.turnId);
         try {const result=await this.runtime.rpc('turn/start',{threadId:id,input,...settings});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);this.rememberSettings(id,settings);}
@@ -358,6 +437,18 @@ export class Control extends EventEmitter {
     const next=previous.catch(()=>{}).then(fn);this.locks.set(key,next);
     try{return await next;}finally{if(this.locks.get(key)===next)this.locks.delete(key);}
   }
+  private scheduleRelease(id:string) {
+    if(!id||!this.loaded.has(id)||this.closed)return;
+    void this.exclusive(id,()=>this.releaseIdle(id)).catch(()=>{});
+  }
+  private async releaseIdle(id:string) {
+    if(this.closed||this.reloading||!this.loaded.has(id)||this.ledger.queued(id).some(message=>message.state==='queued'||message.state==='sending'))return;
+    const session=await this.read(id,1);
+    // Empty legacy threads have not been persisted yet. Keep their first send possible.
+    if(this.closed||this.reloading||session.running||session.requests.length||!session.turns.length)return;
+    await this.runtime.unsubscribe(id);
+    this.loaded.delete(id);this.starting.delete(id);this.emit('change',id);
+  }
   private async turnSettings(p:Json,currentModel:string):Promise<Json> {
     const settings:Json={};
     if(p.model)settings.model=textRequired(p.model,'模型',200);
@@ -373,8 +464,7 @@ export class Control extends EventEmitter {
     return settings;
   }
   private async turnInput(p:Json,modelId:string):Promise<Json[]> {
-    if(p.images!==undefined&&(!Array.isArray(p.images)||p.images.length>MAX_IMAGES))throw new BridgeError('invalid','最多两张 PNG、JPEG 或 WebP，每张不超过 2 MiB');
-    const images=(p.images||[]).map(imageDataUrl);
+    const images=validateImages(p.images===undefined?[]:p.images);
     const text=images.length&&(p.text===undefined||typeof p.text==='string'&&!p.text.trim())?'':textRequired(p.text,'输入');
     // Desktop renders the original input before app-server supplies defaults.
     const input:Json[]=text?[{type:'text',text,text_elements:[]}]:[];

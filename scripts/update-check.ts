@@ -58,7 +58,7 @@ async function checks(bin:string):Promise<boolean>{
   try{
     const tsx='node_modules/tsx/dist/cli.mjs',tsc='node_modules/typescript/bin/tsc';
     const tests=(await readdir('test')).filter(name=>name.endsWith('.test.ts')).sort().map(name=>join('test',name));
-    return await run([tsc,'--noEmit'])&&await run([tsx,'--test',...tests])&&await run([tsx,'scripts/native-check.ts'])&&await run(['node_modules/vite/bin/vite.js','build'])&&await run([tsx,'scripts/build-node.ts']);
+    return await run([tsc,'--noEmit'])&&await run([tsx,'--test',...tests])&&await run([tsx,'scripts/native-check.ts'])&&await run([tsx,'scripts/ownership-check.ts'])&&await run(['node_modules/vite/bin/vite.js','build'])&&await run([tsx,'scripts/build-node.ts']);
   }finally{closeSync(fd);}
 }
 async function save(state:State){await writeFile(statePath+'.next',JSON.stringify(state,null,2)+'\n');await rename(statePath+'.next',statePath);}

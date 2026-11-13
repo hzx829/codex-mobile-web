@@ -10,6 +10,7 @@ Browse projects and conversations, send instructions, steer or stop a running ta
 
 - Discover existing projects and conversations, including archived conversations.
 - Choose Codex transcription or the system keyboard in home options or “＋ → 语音输入”; the browser remembers your choice. Codex is the default: tap to record, tap to stop, then review the draft. It requires HTTPS, microphone permission and a Codex ChatGPT login on the computer. Clips of up to two minutes pass through the relay and connector to the desktop's private transcription service. Phone compatibility still requires manual verification.
+  If the computer needs a proxy, set `HTTPS_PROXY` (or `HTTP_PROXY`) before starting the connector. Voice requests also respect `NO_PROXY`; lowercase variable names are supported.
 - Start or continue tasks, follow progress, add instructions, stop a turn, and answer supported approvals or questions.
 - Consecutive tool activity is collapsed in the timeline.
 - Tap a suggested follow-up to fill the composer; in-app back buttons return to the parent list.
@@ -53,7 +54,7 @@ flowchart LR
 
 This shows the recommended public HTTPS deployment. TLS ends at the reverse proxy. The proxy-to-relay connection stays on the same host or private container network; both are trusted components.
 
-The connector uses local desktop IPC for existing desktop sessions, and a Codex app-server child process for sessions it creates or resumes. If a live owner cannot be reached, it shows history and asks you to confirm that the original task has ended before resuming it here. Active standalone CLI sessions cannot be taken over.
+The connector uses local desktop IPC for existing desktop sessions, and a Codex app-server child process for sessions it creates or resumes. It releases its sessions after the task and queued sends finish, allowing the desktop to open them. Reading history does not reacquire ownership; sending resumes the session as needed. Active tasks, pending approvals and empty sessions without a saved first turn remain attached. Other sessions without a reachable live owner show history and require confirmation that the original task has ended before resuming here. Active standalone CLI sessions cannot be taken over.
 
 On Windows, an unset `codexBin` uses the newest Codex in the desktop installation before checking PATH. Restart the connector after a desktop update when its tasks are idle. An explicit execution binary path remains pinned until changed. Model and reasoning options come from the execution runtime. With CLI 0.160.0, set `legacyCodexBin` to CLI 0.146.0 if you need to edit legacy conversations: it only rolls back history; all model requests use the current execution runtime.
 
@@ -131,7 +132,7 @@ Click a file link in a reply, choose “下载文件” (download), then “保�
 
 Task diffs support file selection, syntax and inline-edit highlighting, unified and side-by-side views. Markdown files support relative file links and local images. PowerPoint, PDF and other complex formats currently have a download entry only. Update the web application, relay and connector together. Preview UI acceptance remains manual; see [acceptance steps](ACCEPTANCE.md).
 
-Current limits: latest 100 turns per conversation view, truncated large output, text/image previews up to 2 MiB, file downloads and video playback up to 100 MiB, and at most two supported image attachments of 2 MiB each. MP4, WebM, OGV and MOV load on request into browser memory and use the browser's native decoder. Code views show up to 10,000 lines. Downloads are assembled in browser memory without resumable transfers. No background push, audio upload, or active standalone CLI takeover. Named Codex profiles are rejected for connector-managed app-server sessions on the tested CLI baseline.
+Current limits: latest 100 turns per conversation view, truncated large output, text/image previews up to 2 MiB, file downloads and video playback up to 100 MiB, and up to 10 PNG/JPEG/WebP attachments, accepting originals up to 20 MiB each and automatically compressing oversized images to at most 2 MiB each and 8 MiB per message. MP4, WebM, OGV and MOV load on request into browser memory and use the browser's native decoder. Code views show up to 10,000 lines. Downloads are assembled in browser memory without resumable transfers. No background push, audio upload, or active standalone CLI takeover. Named Codex profiles are rejected for connector-managed app-server sessions on the tested CLI baseline.
 
 ## Development and provenance
 

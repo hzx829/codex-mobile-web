@@ -73,7 +73,6 @@ export class Desktop extends EventEmitter {
     if(this.states.has(threadId)){const cached=this.states.get(threadId)!;this.states.delete(threadId);this.states.set(threadId,cached);return cached.state;}
     await this.request('thread-owner-discovery',{hostId,conversationId:threadId},1500);
     this.broadcast('thread-stream-following-changed',{hostId,conversationId:threadId,following:true});
-    await this.request('thread-follower-load-complete-history',{hostId,conversationId:threadId});
     for(let i=0;i<20 && !this.states.has(threadId);i++) await new Promise(r=>setTimeout(r,50));
     if (!this.states.has(threadId)) throw new BridgeError('no_snapshot','桌面尚未提供实时状态');
     while(this.states.size>8){const oldest=this.states.keys().next().value!;const entry=this.states.get(oldest)!;this.broadcast('thread-stream-following-changed',{conversationId:oldest,hostId:entry.hostId,following:false});this.states.delete(oldest);}

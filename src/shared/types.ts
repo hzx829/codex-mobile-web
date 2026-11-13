@@ -2,7 +2,8 @@ export type Json = Record<string, any>;
 export type RequestAction = 'chatgpt.status' | 'chatgpt.list' | 'chatgpt.read' | 'chatgpt.send' | 'chatgpt.stop' | 'chatgpt.operation' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
-export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string }
+export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string }
+export interface TurnCursor { before: string; native?: string }
 export const turnFinished=(status:unknown)=>status==='completed'||status==='interrupted'||status==='failed';
 export interface ContextUsage { usedTokens: number; windowTokens: number | null }
 export interface UsageLimit { id: string; name: string | null; usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
@@ -11,7 +12,7 @@ export interface QueuedMessage { id: string; text: string; imageCount: number; s
 export interface SessionView {
   id: string; sessionId: string; title: string; cwd: string; model: string; provider: string; effort?: string; approvalPolicy?: string; serviceTier?: string | null;
   source: 'desktop' | 'connector' | 'history'; activeTurnId: string | null; running?: boolean; contextUsage?: ContextUsage | null;
-  turns: TurnView[]; requests: Json[]; queuedMessages?: QueuedMessage[]; canControl: boolean; hasMore?: boolean; notice?: string; generation?: string; resumeUnavailable?: boolean;
+  turns: TurnView[]; requests: Json[]; queuedMessages?: QueuedMessage[]; canControl: boolean; hasMore?: boolean; nextCursor?: TurnCursor | null; notice?: string; generation?: string; resumeUnavailable?: boolean;
 }
 export class BridgeError extends Error {
   constructor(public code: string, message: string, public uncertain = false) { super(message); }

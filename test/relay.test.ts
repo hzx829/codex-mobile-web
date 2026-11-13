@@ -9,7 +9,8 @@ import {createRelay} from '../src/server/relay.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {BrowserPreview} from '../src/connector/browser-preview.js';
 import {Control} from '../src/connector/control.js';
-import {mkdtemp,writeFile} from 'node:fs/promises';
+import {mkdtemp,writeFile,mkdir} from 'node:fs/promises';
+import {gunzipSync} from 'node:zlib';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {removeTestTemp} from '../scripts/test-temp.js';
@@ -23,16 +24,33 @@ function waitFrame(ws:WebSocket,predicate:(v:any)=>boolean):Promise<any>{return 
 
 async function httpRequest(url:string,options:{method?:string;headers?:Record<string,string>;body?:string;redirect?:string}={}){
   // These are protocol tests. Node HTTP accepts Windows' low ephemeral ports.
-  return new Promise<{status:number;headers:Headers;text:()=>Promise<string>;json:()=>Promise<any>}>((resolve,reject)=>{
+  return new Promise<{status:number;headers:Headers;bytes:Buffer;text:()=>Promise<string>;json:()=>Promise<any>}>((resolve,reject)=>{
     const req=request(url,{method:options.method,headers:options.headers},async res=>{
       try{
-        const chunks:Buffer[]=[];for await(const chunk of res)chunks.push(Buffer.from(chunk));const body=Buffer.concat(chunks).toString();
+        const chunks:Buffer[]=[];for await(const chunk of res)chunks.push(Buffer.from(chunk));const bytes=Buffer.concat(chunks),body=bytes.toString();
         const headers=new Headers();for(const [key,value] of Object.entries(res.headers))if(value!==undefined)headers.set(key,Array.isArray(value)?value.join(','):value);
-        resolve({status:res.statusCode!,headers,text:async()=>body,json:async()=>JSON.parse(body)});
+        resolve({status:res.statusCode!,headers,bytes,text:async()=>body,json:async()=>JSON.parse(body)});
       }catch(error){reject(error);}
     });req.on('error',reject);req.end(options.body);
   });
 }
+
+test('only versioned assets are cached and gzip preserves their content',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'cmw-static-')),script='const greeting="hello";\n'.repeat(1000);
+  await mkdir(join(dir,'assets'));await writeFile(join(dir,'assets','index-a1B2c3D4.js'),script);await writeFile(join(dir,'index.html'),'<main>Current entry</main>');
+  const relay=createRelay('static-test-token',dir);relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');
+  const base=`http://127.0.0.1:${(relay.server.address() as any).port}`;
+  try{
+    const asset=await httpRequest(base+'/assets/index-a1B2c3D4.js',{headers:{'Accept-Encoding':'gzip'}});
+    assert.equal(asset.status,200);assert.equal(asset.headers.get('content-encoding'),'gzip');assert.match(asset.headers.get('cache-control')!,/immutable/);
+    assert.equal(asset.headers.get('vary'),'Accept-Encoding');assert.equal(gunzipSync(asset.bytes).toString(),script);assert.ok(asset.bytes.length<script.length/10);
+    for(const encoding of ['', 'br, gzip;q=0']){
+      const plain=await httpRequest(base+'/assets/index-a1B2c3D4.js',{headers:{'Accept-Encoding':encoding}});
+      assert.equal(plain.headers.get('content-encoding'),null);assert.equal(await plain.text(),script);
+    }
+    for(const path of ['/','/health','/assets/missing-a1B2c3D4.js'])assert.equal((await httpRequest(base+path)).headers.get('cache-control'),'no-store');
+  }finally{await relay.close();await removeTestTemp(dir);}
+});
 
 test('a binary result larger than one frame downloads intact through the selected machine and session',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'cmw-download-')),name='演示 deck.pptx',source=Buffer.alloc(MAX_FRAME+137);

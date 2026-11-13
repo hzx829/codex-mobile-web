@@ -1,4 +1,4 @@
-import {turnFinished,type Json,type SessionView,type MessageItem,type TurnView} from '../shared/types.js';
+import {BridgeError,turnFinished,type Json,type SessionView,type MessageItem,type TurnView} from '../shared/types.js';
 import {contextUsage} from './usage.js';
 
 const bounded=(s:unknown)=>typeof s==='string'?(s.length>120_000?s.slice(0,120_000)+'\n\n[内容较长，剩余部分请在电脑查看]':s):'';
@@ -10,6 +10,11 @@ export function desktopTurns(state:Json):Json[] {
     return [...new Set<string>(keys)].map(k=>history.entitiesByKey[k]).filter(Boolean);
   }
   return state.turns||[];
+}
+export function turnPage(all:Json[],limit:number,before?:string):{turns:Json[];hasMore:boolean} {
+  const end=before?all.findIndex(t=>(t.turnId||t.id)===before):all.length;
+  if(end<0)throw new BridgeError('changed','历史位置已变化，请重新打开会话');
+  return {turns:all.slice(Math.max(0,end-limit),end),hasMore:end>limit};
 }
 export function normalizeItem(item:Json):MessageItem {
   const result:MessageItem={id:item.id,type:item.type,role:'activity',text:''};
@@ -28,10 +33,11 @@ export function normalizeItem(item:Json):MessageItem {
   }
   result.text=bounded(result.text);return result;
 }
-export function normalizeSession(raw:Json,source:SessionView['source'],requests:Json[],limit=20):SessionView {
+export function normalizeSession(raw:Json,source:SessionView['source'],requests:Json[],limit=20,before?:string):SessionView {
   const all=source==='desktop'?desktopTurns(raw):raw.turns||[];
   const active=all.filter((t:Json)=>t.status==='inProgress').at(-1);
-  const turns:TurnView[]=all.slice(-limit).map((t:Json,index:number)=>{
+  const page=turnPage(all,limit,before);
+  const turns:TurnView[]=page.turns.map((t:Json,index:number)=>{
     const id=t.turnId||t.id;
     const items:MessageItem[]=(t.items||[]).map(normalizeItem);
     if(t.params?.input?.length&&!items.some(i=>i.role==='user'))items.unshift(normalizeItem({id:id+':input',type:'userMessage',content:t.params.input}));
@@ -41,6 +47,6 @@ export function normalizeSession(raw:Json,source:SessionView['source'],requests:
   const unresolvedActive=runtimeActive&&!active||Boolean(active&&!active.turnId&&!active.id);
   return {id:raw.id,sessionId:typeof raw.sessionId==='string'&&raw.sessionId?raw.sessionId:raw.id,title:raw.title||raw.name||raw.preview?.slice(0,80)||'新会话',cwd:raw.cwd||'',model:raw.latestModel||raw.model||'',provider:raw.modelProvider||'',effort:raw.latestReasoningEffort||raw.reasoningEffort||'',approvalPolicy:raw.approvalPolicy||raw.threadSettings?.approvalPolicy||'',source,
     serviceTier:raw.latestThreadSettings?.serviceTier!==undefined?raw.latestThreadSettings.serviceTier:raw.threadSettings?.serviceTier!==undefined?raw.threadSettings.serviceTier:raw.serviceTier,
-    activeTurnId:active?.turnId||active?.id||null,running:Boolean(active||runtimeActive),contextUsage:contextUsage(raw.latestTokenUsageInfo),turns,requests:requests.filter(r=>!r.completed),canControl:source!=='history'&&!unresolvedActive,hasMore:all.length>limit,
+    activeTurnId:active?.turnId||active?.id||null,running:Boolean(active||runtimeActive),contextUsage:contextUsage(raw.latestTokenUsageInfo),turns,requests:requests.filter(r=>!r.completed),canControl:source!=='history'&&!unresolvedActive,hasMore:page.hasMore,nextCursor:page.hasMore&&turns.length?{before:turns[0].id}:null,
     notice:unresolvedActive?'正在同步运行中的任务，暂不能操作':undefined};
 }

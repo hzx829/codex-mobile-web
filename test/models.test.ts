@@ -63,9 +63,9 @@ test('fast mode follows native service tier IDs and explicitly clears the inheri
   (control as any).loaded.add('s');
   const send=(serviceTier:unknown)=>control.handle({id:randomUUID(),action:'turn.send',payload:{threadId:'s',source:'connector',generation:control.generation,expectedTurnId:null,text:'task',serviceTier,opId:`${Date.now()}:${randomUUID()}`}});
   try{
-    assert.equal((await send('priority')).state,'accepted');assert.equal(runtime.calls.at(-1).params.serviceTier,'priority');
+    assert.equal((await send('priority')).state,'accepted');assert.equal(runtime.calls.filter(call=>call.method==='turn/start').at(-1).params.serviceTier,'priority');
     assert.equal((await control.read('s')).serviceTier,'priority');
-    assert.equal((await send(null)).state,'accepted');assert.equal(runtime.calls.at(-1).params.serviceTier,null);
+    assert.equal((await send(null)).state,'accepted');assert.equal(runtime.calls.filter(call=>call.method==='turn/start').at(-1).params.serviceTier,null);
     assert.equal((await control.read('s')).serviceTier,null);
     assert.equal((await send('invented')).state,'failed');assert.equal(runtime.calls.filter(call=>call.method==='turn/start').length,2);
   }finally{control.close();}

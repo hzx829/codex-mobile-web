@@ -2,7 +2,7 @@ import {useEffect,useLayoutEffect,useRef,type ReactNode} from 'react';
 import {Icon} from './icons';
 
 export type MenuPoint={x:number;y:number;align?:'end'};
-export function Popover({point,title,label,close,children,className='',focusSelector}:{point:MenuPoint;title:string;label:string;close:()=>void;children:ReactNode;className?:string;focusSelector?:string}){
+export function Popover({point,anchor,title,label,close,children,className='',focusSelector,side='below',showHeader=true}:{point:MenuPoint;anchor?:HTMLElement|null;title:string;label:string;close:()=>void;children:ReactNode;className?:string;focusSelector?:string;side?:'above'|'below';showHeader?:boolean}){
   const panel=useRef<HTMLElement>(null),closeRef=useRef(close),opener=useRef<HTMLElement|null>(null);closeRef.current=close;
   useLayoutEffect(()=>{opener.current=document.activeElement as HTMLElement;},[]);
   useLayoutEffect(()=>{
@@ -10,13 +10,15 @@ export function Popover({point,title,label,close,children,className='',focusSele
     const viewport=window.visualViewport;
     const position=()=>{
       const {width,height}=el.getBoundingClientRect(),top=viewport?.offsetTop||0;
-      el.style.left=`${Math.max(12,Math.min(point.x-(point.align==='end'?width:0),window.innerWidth-width-12))}px`;
-      el.style.top=`${Math.max(top+12,Math.min(point.y,top+(viewport?.height||window.innerHeight)-height-12))}px`;
+      const rect=anchor?.isConnected?anchor.getBoundingClientRect():undefined;
+      const x=rect?(point.align==='end'?rect.right:rect.left):point.x,y=rect?(side==='above'?rect.top:rect.bottom):point.y;
+      el.style.left=`${Math.max(12,Math.min(x-(point.align==='end'?width:0),window.innerWidth-width-12))}px`;
+      el.style.top=`${Math.max(top+12,Math.min(side==='above'?y-height-8:y,top+(viewport?.height||window.innerHeight)-height-12))}px`;
     };
-    position();const observer=new ResizeObserver(position);observer.observe(el);
+    position();const observer=new ResizeObserver(position);observer.observe(el);if(anchor)observer.observe(anchor);
     window.addEventListener('resize',position);viewport?.addEventListener('resize',position);viewport?.addEventListener('scroll',position);
     return()=>{observer.disconnect();window.removeEventListener('resize',position);viewport?.removeEventListener('resize',position);viewport?.removeEventListener('scroll',position);};
-  },[point.x,point.y,point.align]);
+  },[point.x,point.y,point.align,side,anchor]);
   useLayoutEffect(()=>{const el=panel.current;(focusSelector?el?.querySelector<HTMLElement>(focusSelector)||el:el)?.focus({preventScroll:true});},[focusSelector]);
   useEffect(()=>{
     const key=(e:KeyboardEvent)=>{
@@ -29,7 +31,7 @@ export function Popover({point,title,label,close,children,className='',focusSele
   },[]);
   return <div className="thread-menu-overlay" onPointerDown={e=>{if(e.target===e.currentTarget)close();}} onContextMenu={e=>e.preventDefault()}>
     <section className={`thread-menu ${className}`} role="dialog" aria-modal="true" aria-label={label} tabIndex={-1} ref={panel}>
-      <header><span>{title}</span><button type="button" aria-label="关闭弹出面板" onClick={close}><Icon name="close" size={18}/></button></header>
+      {showHeader&&<header><span>{title}</span><button type="button" aria-label="关闭弹出面板" onClick={close}><Icon name="close" size={18}/></button></header>}
       {children}
     </section>
   </div>;

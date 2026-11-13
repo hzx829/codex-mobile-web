@@ -4,6 +4,8 @@
 
 2026-10-18 语音输入：本机 CLI `0.162.0-alpha.17.2` 生成协议仍提供 `getAuthStatus(includeToken, refreshToken)`，没有独立听写 RPC。本地桌面研究副本的 `QTs` 以 multipart `file` 调用 `/transcribe`，默认 WebM；Remodex 固定副本的 `voice-handler.js` 提供 ChatGPT `/backend-api/transcribe`、登录刷新及上传 User-Agent 的参考。实现独立写在 `src/connector/voice.ts`，仅返回文字，不转发凭据或原始服务错误。此路径是桌面私有服务；[公开 app-server 文档](https://learn.chatgpt.com/docs/app-server)未承诺转写接口，[Sign in with ChatGPT 的公开 API 限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)也不包含转写支持。浏览器录音按 [MediaRecorder](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder)选择支持的格式。自动夹具覆盖音频转发、登录刷新、取消和迟到结果；真实账号及手机效果待人工验收。
 
+2026-10-17 历史翻页：对照本地桌面研究副本的 `handleThreadStreamFollowingChanged`，订阅本身会发布快照，首次打开不再调用 `thread-follower-load-complete-history`。手机每次读取 20 轮，向上滚动后按轮次锚点请求前一页；分页历史使用本地索引或运行端游标。旧版运行端只提供整段 `thread/read` 时仍需兼容读取，但连接器只向手机返回所请求的一页。自动回归覆盖跨 100 轮翻页、实时更新合并、局部桌面快照及旧轮次编辑/分叉；滚动位置与触摸体验由人类实测。
+
 2026-10-15 对照本机桌面 26.1007.9446.0 的 `app.asar`：`thread-follower-steer-turn` 的处理函数直接读取 `restoreMessage.cwd` 与 `restoreMessage.context`，旧连接器遗漏该对象；`thread-follower-update-thread-settings` 的 IPC 版本为 2。已补齐追加消息上下文和版本，并识别桌面的 `steeringUserMessage`。运行端模型目录提供极速档位，`turn/start.serviceTier` 控制开启或显式清除。CLI 0.162.0-alpha.17.2 的隔离 Responses 夹具验证极速参数到达 HTTP、关闭恢复普通速度，以及 Web 追加和排队在当前轮结束后只发送一次；真实账号调用和界面操作仍由人类验收。
 
 核对日期：2026-09-06。项目代码独立实现；未整体 fork 候选项目，也没有把它们的账号、配对、E2EE 或浏览器控制组件带入本项目。
@@ -29,6 +31,8 @@ Remodex 的协议思路可参考，但其被检查版本仍主要从 `conversati
 - [Node 24.11.1 许可证](https://github.com/nodejs/node/blob/v24.11.1/LICENSE)：便携包运行时分发说明。
 
 `.research/` 保存本地研究副本与生成协议，不参与构建或分发。构建依赖由 `package-lock.json` 固定，便携包附依赖许可证。真实桌面写操作与 DeepSeek 实际服务仍待人工验证；第三方协议夹具通过不等于真实服务通过。
+
+2026-10-19 核对本机桌面 `26.1013.4894.0` 的 `app/resources/app.asar → webview/assets/zh-CN-7ba80cbb133d.js`：模型显示 `GPT-6 Astra`，思考程度使用 `轻度 / 中 / 高 / 极高 / Max / Ultra`。运行端 `model/list` 实查返回 `GPT-6-Astra` 及 `priority` 极速档位；只格式化已知模型系列的显示名称，不修改发送 ID 或推测支持能力。CLI `0.162.0-alpha.17.2` 的隔离双 app-server 夹具验证活动 writer 互斥、`thread/unsubscribe` 后等待 `thread/closed` 释放、只读不重占及按需恢复；连接器子进程设置 `thread_unload_delay_secs=0`，不改用户全局配置。
 
 2026-10-04 核对桌面 26.930.3748.0 的安装包与附带 CLI 0.160.0 的生成协议，并运行隔离 Responses 夹具：模型目录与推理请求使用同一执行端；编辑重发的模型、推理档位到达 HTTP 请求。新版 `thread/revert` 仅支持分页历史，旧历史通过单独的 0.146.0 进程回退后由新版重新接入并发送；夹具验证原会话 ID、早期轮次编辑、分叉保留、补充与中断。桌面编辑先通过 owner 的 `thread-follower-update-thread-settings` 确认设置，再调用编辑接口；真实 ChatGPT 模型调用与页面操作由人类复验。
 

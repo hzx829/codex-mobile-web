@@ -1,28 +1,34 @@
-import {lazy,Suspense,useEffect,useLayoutEffect,useRef,useState,type ReactNode,type ClipboardEvent} from 'react';
+import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,useState,type ReactNode,type ClipboardEvent} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
 import {ChatGPTPanel} from './chatgpt';
 import {Icon,type IconName} from './icons';
-import {SafeMarkdown,RequestCard} from './content';
+import {IconButton} from './icon-button';
+import {ConversationTurn} from './conversation';
+import {RequestCard} from './content';
 import {createFirstTurn} from './new-chat';
 import {SessionListLoader} from './session-list-loader';
+import {HISTORY_PAGE_SIZE,refreshHistory,prependHistory} from './thread-history';
+import {knownSnapshot,restoreSnapshot} from './session-snapshot';
 import {BrowserPreviewPanel,WebViewer,type PreviewSession} from './browser-preview';
 import {belongsToThread,defaultPreviewUrl,openThreadPreview,previewUrlKey} from './thread-preview';
-import {groupItems} from './activity';
 import {PreviewPane,useCompactPreview} from './preview-pane';
 import {fileReference,samePreviewTarget,type PreviewTarget} from './preview-target';
 import {home,initialLocation,rememberLocation,parseLocation,type Route} from './route-state';
-import {appendImages,pastedImage,readImageFiles} from './attachments';
-import {MAX_IMAGES} from '../src/shared/images';
+import {appendImages,pastedImage,readImageFiles,clipboardImageFiles,imageFile} from './attachments';
+import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes,validateImages} from '../src/shared/images';
+import {DraftSave} from './draft-save';
 import {ThreadMenu,ThreadRow} from './thread-menu';
 import type {MenuPoint} from './popover';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {groupThreads,visibleThreads,rememberThreads,saveThread,type ThreadPreferences,type ThreadPreference} from './thread-preferences';
-import {turnFinished,type Json,type SessionView,type RequestAction,type MessageItem,type TurnView} from '../src/shared/types';
+import {type Json,type SessionView,type RequestAction,type TurnView} from '../src/shared/types';
 import {submitTurn,editTurn} from './turn-request';
-import {fastTier} from '../src/shared/models';
+import {modelDisplayName,reasoningLabel,resolveModelSelection} from '../src/shared/models';
+import {ModelPicker} from './model-picker';
 import {voiceProvider} from '../src/shared/voice';
 import {useVoiceInput} from './use-voice-input';
+import {useStableEvent} from './use-event';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -34,27 +40,29 @@ const load=(key:string,fallback:any)=>{try{return JSON.parse(localStorage.getIte
 const save=(key:string,value:any)=>{try{localStorage.setItem(key,JSON.stringify(value));}catch{}};
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:'网页预览';
-const statusLabel:Record<string,string>={inProgress:'进行中',completed:'已完成',interrupted:'已停止',failed:'失败'};
-const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划'};
 function relativeTime(value:number){if(!value)return '';const elapsed=Math.max(0,Date.now()-(value<1e12?value*1000:value));const minutes=Math.floor(elapsed/60_000);return minutes<1?'刚刚':minutes<60?`${minutes}分钟`:minutes<1440?`${Math.floor(minutes/60)}小时`:`${Math.floor(minutes/1440)}天`;}
 function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('token');if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
 const savedLocation=initialLocation();
 type PreviewTab={id:number;target:PreviewTarget};
-type Sheet='home'|'computer'|'projects'|'model'|'approval'|'add'|'file'|'browser'|'voice'|null;
+type Sheet='home'|'computer'|'projects'|'approval'|'add'|'file'|'browser'|'voice'|null;
 
 function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const {thread:selected,project,newChat}=route,showThread=Boolean(selected||newChat);
+  const threadMounted=showThread&&Boolean(token)&&status!=='auth_error';
   const [info,setInfo]=useState<Json|null>(null),[projects,setProjects]=useState<string[]>([]),[sessions,setSessions]=useState<Json[]>([]);
   const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
-  const [view,setView]=useState<SessionView|null>(null),[limit,setLimit]=useState(20),[loading,setLoading]=useState(false);
+  const [view,setView]=useState<SessionView|null>(null),[loading,setLoading]=useState(false),[loadingOlder,setLoadingOlder]=useState(false),[historyError,setHistoryError]=useState('');
+  const viewRef=useRef(view);useLayoutEffect(()=>{viewRef.current=view;},[view]);
   const [draft,setDraft]=useState(''),[images,setImages]=useState<string[]>([]),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[approval,setApproval]=useState(''),[newCwd,setNewCwd]=useState('');
+  const draftSave=useRef(new DraftSave(save));
   const [serviceTier,setServiceTier]=useState<string|null|undefined>(undefined);
   const [voiceMode,setVoiceMode]=useState(()=>voiceProvider(load('voice-provider','codex')));
   const [imageLoading,setImageLoading]=useState(false),imageLoad=useRef<number|null>(null),imageSequence=useRef(0),imagesRef=useRef(images);imagesRef.current=images;
   const [threadMenu,setThreadMenu]=useState<{thread:Json;point:MenuPoint;machine:string;archived:boolean;compact?:boolean}|null>(null);
+  const [modelPoint,setModelPoint]=useState<MenuPoint|null>(null),modelButton=useRef<HTMLButtonElement>(null);
   const [statusPanel,setStatusPanel]=useState<{machine:string;thread:string;point:MenuPoint}|null>(null);
   const [preferenceState,setPreferences]=useState<{machine:string;values:ThreadPreferences}>({machine:'',values:{}});
   const preferences=preferenceState.machine===machine?preferenceState.values:{};
@@ -66,10 +74,10 @@ function App(){
   const fileSequence=useRef(0),browserSequence=useRef(0);
   const [browserUrl,setBrowserUrl]=useState(defaultPreviewUrl),[browserRequest,setBrowserRequest]=useState<number|null>(null),[browserState,setBrowserSession]=useState<PreviewSession|null>(null);
   const browserBusy=browserRequest!==null,browserSession=belongsToThread(browserState,machine,selected)?browserState:null;
-  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,limit,searchQuery,archived}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
-  const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null);
-  const scrollAnchor=useRef<{height:number;top:number;limit:number;ready:boolean}|null>(null);
-  current.current={machine,selected,project,newChat,limit,searchQuery,archived};
+  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
+  const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),timelineContent=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null),submitting=useRef(false);
+  const scrollAnchor=useRef<{element:HTMLElement;top:number}|null>(null),lastScrollTop=useRef(0),olderRequest=useRef<object|null>(null);
+  current.current={machine,selected,project,newChat,searchQuery,archived};
   const connected=status==='online'&&machines.some(m=>m.id===machine),machineName=machines.find(m=>m.id===machine)?.name||'电脑';
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
   const call=(action:RequestAction,payload:Json={},target=machine)=>client.current!.request(action,payload,target);
@@ -87,24 +95,38 @@ function App(){
   function fail(e:any){setError(e?.message||'操作失败，请重试');}
   function navigate(next:Route,replace=false){
     history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine},'',location.pathname);
-    rememberLocation(next,machine);setSheet(null);setThreadMenu(null);setStatusPanel(null);setRoute(next);
+    rememberLocation(next,machine);setSheet(null);setThreadMenu(null);setStatusPanel(null);setModelPoint(null);setRoute(next);
   }
   function backToProjects(){navigate(home);}
   function backToSessions(){navigate({...home,project});}
   useEffect(()=>{
-    const pop=(e:PopStateEvent)=>{setSheet(null);setThreadMenu(null);setStatusPanel(null);const location=parseLocation(e.state);const next=location?.machine===current.current.machine?location.route:home;rememberLocation(next,current.current.machine);setRoute(next);};
+    const pop=(e:PopStateEvent)=>{setSheet(null);setThreadMenu(null);setStatusPanel(null);setModelPoint(null);const location=parseLocation(e.state);const next=location?.machine===current.current.machine?location.route:home;rememberLocation(next,current.current.machine);setRoute(next);};
     window.addEventListener('popstate',pop);return()=>window.removeEventListener('popstate',pop);
   },[]);
   useEffect(()=>{history.replaceState({cmwRoute:route,cmwMachine:machine},'',location.pathname);rememberLocation(route,machine);},[machine]);
   async function refreshSession(){
     if(refreshing.current){again.current=true;return;}
     const c={...current.current};if(!c.machine||!c.selected||!client.current?.ready)return;
-    const seq=sequence.current;refreshing.current=true;
-    try{const next=await call('session.read',{threadId:c.selected,limit:c.limit},c.machine);if(seq===sequence.current&&c.machine===current.current.machine&&c.selected===current.current.selected){if(scrollAnchor.current&&c.limit>=scrollAnchor.current.limit)scrollAnchor.current.ready=true;setView(next);setLoading(false);}}
+    const seq=sequence.current,previous=viewRef.current;refreshing.current=true;
+    try{const snapshot=await call('session.read',{threadId:c.selected,limit:HISTORY_PAGE_SIZE,known:previous?.id===c.selected?knownSnapshot(previous):undefined},c.machine);if(seq===sequence.current&&c.machine===current.current.machine&&c.selected===current.current.selected){const next=restoreSnapshot(previous,snapshot);startTransition(()=>{setView(old=>refreshHistory(old,next));setLoading(false);});}}
     catch(e){if(seq===sequence.current){fail(e);setLoading(false);}}
     finally{refreshing.current=false;if(again.current){again.current=false;void refreshSession();}}
   }
-  function scheduleRefresh(){if(refreshTimer.current)return;refreshTimer.current=setTimeout(()=>{refreshTimer.current=undefined;void refreshSession();},250);}
+  async function loadOlder(){
+    const cursor=view?.nextCursor;if(!connected||loading||olderRequest.current||!view?.hasMore||!cursor)return;
+    const c={...current.current},seq=sequence.current,request={};olderRequest.current=request;
+    setLoadingOlder(true);setHistoryError('');sticky.current=false;
+    const here=()=>seq===sequence.current&&c.machine===current.current.machine&&c.selected===current.current.selected;
+    try{
+      const page=await call('session.read',{threadId:c.selected,limit:HISTORY_PAGE_SIZE,cursor},c.machine);
+      if(!here())return;
+      const element=timeline.current?.querySelector<HTMLElement>('.turn');
+      if(element)scrollAnchor.current={element,top:element.getBoundingClientRect().top};
+      setView(old=>prependHistory(old,page,cursor));
+    }catch(e:any){if(here())setHistoryError(e?.message||'加载失败，请重试');}
+    finally{if(olderRequest.current===request){olderRequest.current=null;setLoadingOlder(false);}}
+  }
+  function scheduleRefresh(){if(refreshTimer.current||document.visibilityState!=='visible')return;refreshTimer.current=setTimeout(()=>{refreshTimer.current=undefined;void refreshSession();},250);}
   async function list(append=false,refresh=false){
     const c={...current.current};
     const key=(value:typeof c)=>JSON.stringify([value.machine,value.project,value.searchQuery,value.archived]);
@@ -150,24 +172,37 @@ function App(){
   useEffect(()=>{if(!machine&&machines[0])setMachine(machines[0].id);},[machines,machine]);
   useEffect(()=>{setPreferences({machine,values:load(`thread-preferences:${machine}`,{})});setThreadMenu(null);},[machine]);
   useEffect(()=>{
-    setStatusPanel(null);
+    draftSave.current.flush();
+    setStatusPanel(null);setModelPoint(null);
     imageSequence.current++;imageLoad.current=null;setImageLoading(false);
     setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
-    sequence.current++;setView(null);setLoading(Boolean(selected));setLimit(20);setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;
+    sequence.current++;setView(null);setLoading(Boolean(selected));olderRequest.current=null;setLoadingOlder(false);setHistoryError('');setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;lastScrollTop.current=0;
     setServiceTier(undefined);
     setDraft(load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
   },[machine,selected,newChat]);
-  useEffect(()=>{void refreshSession();},[limit,connected]);
+  useEffect(()=>{
+    const flush=()=>draftSave.current.flush(),hidden=()=>{if(document.visibilityState==='hidden')flush();};
+    window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',hidden);
+    return()=>{flush();window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',hidden);};
+  },[]);
+  useEffect(()=>{void refreshSession();},[connected]);
   useEffect(()=>{
     const viewport=window.visualViewport;if(!viewport)return;
     const resize=()=>{if(viewport.scale!==1)return;document.documentElement.style.setProperty('--viewport-height',`${viewport.height}px`);document.documentElement.style.setProperty('--viewport-top',`${viewport.offsetTop}px`);};
     resize();viewport.addEventListener('resize',resize);viewport.addEventListener('scroll',resize);
     return()=>{viewport.removeEventListener('resize',resize);viewport.removeEventListener('scroll',resize);};
   },[]);
-  useEffect(()=>{const el=timeline.current;if(!el)return;if(scrollAnchor.current?.ready){el.scrollTop=scrollAnchor.current.top+el.scrollHeight-scrollAnchor.current.height;scrollAnchor.current=null;}else if(sticky.current)el.scrollTop=el.scrollHeight;},[view]);
+  useLayoutEffect(()=>{const el=timeline.current;if(!el)return;const anchor=scrollAnchor.current;scrollAnchor.current=null;if(anchor?.element.isConnected)el.scrollTop+=anchor.element.getBoundingClientRect().top-anchor.top;else if(sticky.current)el.scrollTop=el.scrollHeight;lastScrollTop.current=el.scrollTop;},[view?.turns,loadingOlder]);
+  useEffect(()=>{
+    const el=timeline.current,content=timelineContent.current;if(!el||!content)return;
+    let frame=0;
+    const observer=new ResizeObserver(()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{if(sticky.current&&!scrollAnchor.current){el.scrollTop=el.scrollHeight;lastScrollTop.current=el.scrollTop;}});});
+    observer.observe(el);observer.observe(content);
+    return()=>{observer.disconnect();cancelAnimationFrame(frame);};
+  },[threadMounted]);
   function resizeComposer(){const el=composer.current;if(!el)return;el.style.overflowY='hidden';el.style.height='auto';const height=el.scrollHeight;el.style.height=`${Math.min(Math.max(height,44),144)}px`;el.style.overflowY=height>145?'auto':'hidden';}
-  useLayoutEffect(resizeComposer,[draft,showThread]);
-  useEffect(()=>{const el=composer.current;if(!el)return;let width=el.clientWidth;const observer=new ResizeObserver(()=>{if(width!==el.clientWidth){width=el.clientWidth;resizeComposer();}});observer.observe(el);return()=>observer.disconnect();},[showThread]);
+  useLayoutEffect(resizeComposer,[draft,threadMounted]);
+  useEffect(()=>{const el=composer.current;if(!el)return;let width=el.clientWidth;const observer=new ResizeObserver(()=>{if(width!==el.clientWidth){width=el.clientWidth;resizeComposer();}});observer.observe(el);return()=>observer.disconnect();},[threadMounted]);
   useEffect(()=>{setPreviewState(old=>{let changed=false;const tabs=old.tabs.flatMap(tab=>{if(tab.target.kind!=='image')return [tab];const index=images.indexOf(tab.target.url);if(index<0){changed=true;return [];}const title=`待发送图片 ${index+1}/${images.length}`;if(title!==tab.target.title){changed=true;return [{...tab,target:{...tab.target,title}}];}return [tab];});if(!changed)return old;return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});},[images]);
   useEffect(()=>{
     if(!connected)return;
@@ -177,10 +212,11 @@ function App(){
   },[connected,project,searchQuery,archived]);
   useEffect(()=>{if(connected&&pending&&!busy)void checkPending();},[connected,pending?.opId,busy]);
   useEffect(()=>{if(!notice||pending)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice,pending]);
-  function editDraft(value:string){setDraft(value);save(draftKey,value);}
+  function editDraft(value:string){setDraft(value);draftSave.current.write(draftKey,value);}
   function insertFollowup(prompt:string){if(!draft.trimEnd().endsWith(prompt))editDraft(draft.trim()?`${draft.trimEnd()}\n\n${prompt}`:prompt);setNotice('已填入输入框，确认后发送。');composer.current?.focus();}
   function setOperation(value:Json|null){save(pendingKey,value);if(stillHere())setPending(value);}
   function accepted(record:Json,result:Json){
+    draftSave.current.flush();
     if(record.action==='session.fork'&&result.threadId){
       setOperation(null);
       if(stillHere()){
@@ -205,8 +241,8 @@ function App(){
     }
     setOperation(null);if(!stillHere())return;
     if(result.queuedId)setView(old=>old?{...old,queuedMessages:old.queuedMessages?.filter(message=>message.id!==result.queuedId)}:old);
-    setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='queue_withdrawn'?'已撤回到输入框':result.kind==='queue_cancelled'?'已删除排队消息':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='stop_requested'?'已请求停止':result.kind==='response_submitted'?'回应已提交':result.kind==='edited'?'已重新发送':'Codex 已接受');
-    scheduleRefresh();void list();
+    setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='queue_withdrawn'?'已撤回到输入框':result.kind==='queue_cancelled'?'已删除排队消息':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='stop_requested'?'已请求停止':result.kind==='response_submitted'?'回应已提交':result.kind==='edited'?'已重新发送':'');
+    void refreshSession();void list();
   }
   async function checkPending(){
     const record=load(pendingKey,null);if(!record||!connected)return;
@@ -214,8 +250,9 @@ function App(){
   }
   async function mutate(action:RequestAction,payload:Json){
     if(busy||pending)return;
+    draftSave.current.flush();
     const record={opId:operationId(),action,submittedText:action==='turn.send'||action==='turn.edit'?payload.text:undefined};
-    setBusy(true);setError('');setNotice('正在提交…');setOperation(record);
+    setBusy(true);setError('');setNotice(action==='turn.send'?'':'正在提交…');setOperation(record);
     try{
       const result=await call(action,{...payload,opId:record.opId});
       if(result.state==='accepted')accepted(record,result);
@@ -227,11 +264,18 @@ function App(){
   const target=()=>({threadId:view!.id,source:view!.source,generation:view!.generation,expectedTurnId:view!.activeTurnId});
   function startNew(){if(!connected||busy)return;setNewCwd(project||view?.cwd||info?.roots?.[0]||'');navigate({...route,thread:'',newChat:true});}
   async function submit(){
-    if(!connected||busy||pending||imageLoading||voiceBusy||!draft.trim()&&!images.length)return;
+    if(submitting.current||!connected||busy||pending||imageLoading||voiceBusy||!draft.trim()&&!images.length)return;
     if(images.length&&!canImage){setError('当前模型未确认图片能力，请更换模型或移除图片');return;}
+    try{validateImages(images);}catch(error){fail(error);return;}
+    submitting.current=true;sticky.current=true;
+    if(timeline.current){timeline.current.scrollTop=timeline.current.scrollHeight;lastScrollTop.current=timeline.current.scrollTop;}
+    try{await sendDraft();}finally{submitting.current=false;}
+  }
+  async function sendDraft(){
+    draftSave.current.flush();
     if(!newChat){if(canWrite)await submitTurn(mutate,target(),draft,images,{model,effort,approvalPolicy:approval,serviceTier},queueNext?'queue':'steer');return;}
     const createId=operationId(),sendId=operationId(),text=draft,creating={opId:createId,action:'session.create',submittedText:text,imageCount:images.length};
-    setBusy(true);setError('');setNotice('正在发送…');setOperation(creating);
+    setBusy(true);setError('');setNotice('');setOperation(creating);
     const result=await createFirstTurn((action,payload)=>call(action,payload),{cwd:newCwd,text,images,model,effort,approvalPolicy:approval,serviceTier,createId,sendId},id=>{
       save(`draft:${machine}:${id}`,text);save(`operation:${machine}:${id}`,{opId:sendId,action:'turn.send',submittedText:text});
       save(draftKey,'');setOperation(null);
@@ -240,11 +284,11 @@ function App(){
     const id=result.threadId||'',key=`operation:${machine}:${id}`;
     if(result.result.state==='accepted'){
       save(key,null);save(`draft:${machine}:${id}`,'');
-      if(current.current.machine===machine&&current.current.selected===id){setPending(null);setDraft('');setImages([]);setNotice('Codex 已接受');}
+      if(current.current.machine===machine&&current.current.selected===id){setPending(null);setDraft('');setImages([]);setNotice('');}
     }else if(result.result.state==='failed'){
       save(key,null);if(current.current.machine===machine&&current.current.selected===id){setPending(null);setNotice('');setError((result.result.error?.message||'发送失败，输入已保留')+(images.length&&id?'；附图请重新选择':''));}
     }else if(current.current.machine===machine&&current.current.selected===id)setNotice('结果待核实，系统不会自动重发。');
-    setBusy(false);scheduleRefresh();void list();
+    setBusy(false);void refreshSession();void list();
   }
   async function openFile(reference:string,ownerMachine=machine,ownerThread=selected){
     const {path,line}=fileReference(reference),request=++fileSequence.current;
@@ -271,14 +315,16 @@ function App(){
     if(imageLoad.current!==null){setError('图片正在读取，请稍候');return;}
     const request=++imageSequence.current;imageLoad.current=request;setImageLoading(true);setError('');
     try{
-      const incoming=data?[data]:await readImageFiles(files);
+      const selection=data?[imageFile(data)]:files;
+      const budget=MAX_TOTAL_IMAGE_BYTES-imagesRef.current.reduce((sum,url)=>sum+imageBytes(url),0);
+      const incoming=await readImageFiles(selection,budget,()=>request!==imageSequence.current);
       if(request!==imageSequence.current||!stillHere()||current.current.newChat!==newChat)return;
       const next=appendImages(imagesRef.current,incoming);imagesRef.current=next;setImages(next);setSheet(null);
     }catch(e){if(request===imageSequence.current&&stillHere())fail(e);}
     finally{if(imageLoad.current===request){imageLoad.current=null;setImageLoading(false);}}
   }
   function paste(e:ClipboardEvent<HTMLTextAreaElement>){
-    const files=Array.from(e.clipboardData.items).filter(item=>item.kind==='file'&&item.type.startsWith('image/')).map(item=>item.getAsFile()).filter((file):file is File=>Boolean(file));
+    const files=clipboardImageFiles(e.clipboardData);
     if(files.length){e.preventDefault();void attach(files);return;}
     try{const data=pastedImage(e.clipboardData.getData('text/plain'));if(data){e.preventDefault();void attach([],data);}}
     catch(error){e.preventDefault();fail(error);}
@@ -292,15 +338,8 @@ function App(){
         try{if(!document.execCommand('copy'))throw Error('copy failed');}finally{input.remove();}
       }
   }
-  function renderMessage(item:MessageItem,turn:TurnView){
-    const body=<><SafeMarkdown text={item.text} openFile={openFile} openPreview={url=>void openBrowser(url)} onFollowup={insertFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图"/>)}</>;
-    if(item.role!=='user')return <article className={`message ${item.role}`} key={item.id}>{body}</article>;
-    const latestUserTurn=view?.turns.filter(value=>value.items.some(entry=>entry.role==='user')).at(-1)?.id;
-    const editReason=view?.running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':view?.source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(value=>value.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':view?.source==='desktop'&&turn.id!==latestUserTurn?'桌面会话目前只能改写最近一条用户消息':'';
-    return <UserMessage key={item.id} text={item.text} editReason={editReason} disabled={!connected||busy||Boolean(pending)} blocked={setNotice}
-      copy={()=>void copyText(item.text).then(()=>setNotice('已复制消息文字')).catch(()=>setError('复制失败，请长按消息选择文字'))}
-      resend={text=>editTurn(mutate,target(),{turnId:turn.id,itemId:item.id,text},{model,effort,approvalPolicy:approval,serviceTier})}>{body}</UserMessage>;
-  }
+  const markdownOpenFile=useStableEvent(openFile),markdownOpenPreview=useStableEvent((url:string)=>void openBrowser(url)),markdownFollowup=useStableEvent(insertFollowup);
+  const latestUserTurn=useMemo(()=>view?.turns.filter(turn=>turn.items.some(item=>item.role==='user')).at(-1)?.id,[view?.turns]);
   function fork(turn:TurnView){
     if(turn.status==='inProgress'){setNotice('请等这一轮结束后再分叉');return;}
     if(!turn.canFork){setNotice('此轮状态尚未同步，请刷新后重试');return;}
@@ -332,25 +371,29 @@ function App(){
   }
   const projectName=(path:string)=>info?.projects?.find((p:Json)=>p.path===path)?.name||name(path);
   const queueNext=!newChat&&Boolean(view?.running||view?.queuedMessages?.length);
-  const selectedModel=model||view?.model||info?.model;
   const availableModels=(info?.models||[]).filter((m:Json)=>(view?.provider||info?.provider)==='openai'||m.model===(view?.model||info?.model));
-  const modelInfo=availableModels.find((m:Json)=>m.model===selectedModel),canImage=modelInfo?.inputModalities?.includes('image');
-  const fast=fastTier(modelInfo),selectedTier=serviceTier!==undefined?serviceTier:view?.serviceTier!==undefined?view.serviceTier:info?.serviceTier??modelInfo?.defaultServiceTier;
-  const isFast=Boolean(fast&&(selectedTier===fast||selectedTier==='fast'));
+  const currentModel={model:view?.model||info?.model,effort:view?.effort||(newChat?info?.effort:''),serviceTier:view?.serviceTier!==undefined?view.serviceTier:info?.serviceTier};
+  const selection=resolveModelSelection(availableModels,{model,effort,serviceTier},currentModel);
+  const modelInfo=selection.model,canImage=modelInfo?.inputModalities?.includes('image'),isFast=selection.isFast;
+  const modelLabel=modelDisplayName(modelInfo,selection.id)||'选择模型';
   const inheritedApproval=newChat?info?.approvalPolicy:view?.approvalPolicy;
   const approvalLabel=inheritedApproval==='never'?'不提示':inheritedApproval==='on-request'?'按需审批':'电脑配置';
   const canWrite=connected&&!busy&&!pending&&!imageLoading&&!voiceBusy&&(newChat?Boolean(newCwd):Boolean(view?.canControl||queueNext&&view&&view.source!=='history'));
   const canOperate=connected&&!busy&&!pending&&Boolean(view?.canControl);
-  const effortLabel=({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'极高',max:'最高',ultra:'超高'} as Json)[effort||view?.effort||(newChat?info?.effort:'')||''];
+  const effortLabel=reasoningLabel(selection.effort),sending=busy&&(pending?.action==='turn.send'||pending?.action==='session.create');
   const activeApproval=approval||inheritedApproval;
-  const listedThreads=visibleThreads(sessions,preferences,project,archived,searchQuery);
+  const listedThreads=useMemo(()=>visibleThreads(sessions,preferences,project,archived,searchQuery),[sessions,preferences,project,archived,searchQuery]);
   const visibleTitle=newChat?'新聊天':view?.title||sessions.find(s=>s.id===selected)?.title||'正在打开…';
+  const conversationCopy=useStableEvent((text:string)=>void copyText(text).then(()=>setNotice('已复制文字')).catch(()=>setError('复制失败，请长按选择文字')));
+  const conversationEdit=useStableEvent((turnId:string,itemId:string,text:string)=>editTurn(mutate,target(),{turnId,itemId,text},{model,effort,approvalPolicy:approval,serviceTier}));
+  const conversationFork=useStableEvent(fork),conversationDiff=useStableEvent((turn:TurnView)=>showPreview({kind:'diff',threadId:selected,turnId:turn.id,text:turn.diff!}));
+  const conversation=useMemo(()=>view?.turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={Boolean(view.running)} source={view.source} latestUser={turn.id===latestUserTurn} disabled={!connected||busy||Boolean(pending)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} onFollowup={markdownFollowup} onCopy={conversationCopy} onEdit={conversationEdit} onFork={conversationFork} onDiff={conversationDiff} onBlocked={setNotice}/>),[view?.turns,view?.running,view?.source,latestUserTurn,connected,busy,Boolean(pending),markdownOpenFile,markdownOpenPreview,markdownFollowup,conversationCopy,conversationEdit,conversationFork,conversationDiff]);
   const feedback=<>{error&&<div className="feedback error" role="alert"><span>{error}</span><IconButton icon="close" label="关闭提示" onClick={()=>setError('')}/></div>}{notice&&<div className="feedback" role="status">{notice}</div>}{pending&&!busy&&<div className="pending"><button onClick={()=>void checkPending()}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先查看最新任务，确认这次操作的实际结果。清除提示不会重发旧操作。')){setOperation(null);setNotice('');}}}>我已核实</button></div>}</>;
 
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>在手机上继续使用 Codex。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   if(route.chat!==undefined)return <ChatGPTPanel key={`${machine}:${route.chat}`} machine={machine} connected={connected} conversationId={route.chat} call={call} go={chat=>navigate({...home,chat})} back={()=>navigate(home)}/>;
   return <div className={`shell ${showThread?'has-session':''}`}>
-    <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||compactPreview&&preview)}>
+    <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>
        <header className="home-header">{project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={busy} onClick={backToProjects}/><h1>{projectName(project)}</h1></>:<button className="home-identity" aria-label="选择电脑" onClick={()=>setSheet('computer')}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</span></button>}<IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
       <div className="home-content">
         <button className="project-row" onClick={()=>navigate({...home,chat:''})}><Icon name="chat"/><span>ChatGPT 聊天</span></button>
@@ -363,22 +406,17 @@ function App(){
       <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><label className="search-pill"><Icon name="search"/><input aria-label="搜索聊天" placeholder="搜索聊天…" value={search} maxLength={200} onChange={e=>setSearch(e.target.value)}/>{search&&<IconButton icon="close" label="清除搜索" onClick={()=>setSearch('')}/>}</label><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={startNew}/></div></div>
     </aside>
 
-    <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
+    <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
        <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={backToSessions}/><button className="thread-title" onClick={e=>newChat?setSheet('projects'):openStatus(e.currentTarget)}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button></div></header>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
       {!connected&&<div className="banner">连接已断开，电脑上的任务会继续。</div>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
-      <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!;sticky.current=el.scrollHeight-el.scrollTop-el.clientHeight<100;}}>
+      <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!,up=el.scrollTop<lastScrollTop.current;lastScrollTop.current=el.scrollTop;sticky.current=!up&&el.scrollHeight-el.scrollTop-el.clientHeight<24;if(up&&el.scrollTop<160&&!historyError)void loadOlder();}}>
+        <div className="timeline-content" ref={timelineContent}>
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
-        {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={limit>=100} onClick={()=>{sticky.current=false;const el=timeline.current;if(el)scrollAnchor.current={height:el.scrollHeight,top:el.scrollTop,limit:Math.min(100,limit+20),ready:false};setLimit(n=>Math.min(100,n+20));}}>查看更早内容{limit>=100?'（最近 100 轮）':''}</button>}
-        {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:view?.turns.map(turn=><section className="turn" key={turn.id}>
-          {groupItems(turn.items).map((group,index)=>group[0].role==='activity'?<details className="activity-group" key={`activity-${index}`}><summary>{turn.status==='inProgress'?'正在处理':'运行记录'} · {group.length} 项<span className="activity-excerpt">{activityLabel[group.at(-1)!.type]||'任务活动'}</span></summary><div className="activity-list">{group.map(item=><details className="activity" key={item.id}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.split('\n')[0]?.slice(0,90)}</span></summary><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>void openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</details>)}</div></details>:group.map((item:MessageItem)=>renderMessage(item,turn)))}
-          <div className="turn-status">{turn.status!=='completed'&&(statusLabel[turn.status]||turn.status)}{turn.diff&&<button onClick={()=>showPreview({kind:'diff',threadId:selected,turnId:turn.id,text:turn.diff!})}><Icon name="file" size={14}/>查看修改</button>}</div>{turn.error&&<p className="error">{turn.error}</p>}
-          {turn.items.some(item=>item.role==='assistant')&&<div className="assistant-actions">
-            <IconButton icon="copy" label="复制回复文字" onClick={()=>void copyText(turn.items.filter(item=>item.role==='assistant').at(-1)!.text).then(()=>setNotice('已复制回复文字')).catch(()=>setError('复制失败，请长按回复选择文字'))}/>
-            <IconButton icon="fork" label="从这轮回复分叉" disabled={!connected||busy||Boolean(pending)} onClick={()=>fork(turn)}/>
-          </div>}
-        </section>)}
+        {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={!connected||loadingOlder} onClick={()=>void loadOlder()}>{loadingOlder?'正在加载…':historyError?`${historyError} · 重试`:'加载更早内容'}</button>}
+        {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:conversation}
+        </div>
       </div>
       <div className="composer-area"><div className="request-stack">{!newChat&&view?.requests.map(req=><RequestCard key={`${view.generation}:${req.id}`} request={req} disabled={!canOperate} respond={response=>void mutate('request.respond',{...target(),requestId:req.id,response})}/>)}</div>{feedback}
         {view?.running&&!newChat&&<div className="running-status"><i className="dot online"/>Codex 正在处理</div>}
@@ -398,18 +436,18 @@ function App(){
           })}
         </div>}
         <form className={`composer ${images.length?'with-images':''}`} onSubmit={e=>{e.preventDefault();void submit();}}>
-          {images.length>0&&<div className="image-strip"><span className="attachment-count" role="status">图片 {images.length}/{MAX_IMAGES}</span><div className="attachment-thumbnails">{images.map((url,i)=><div className="attachment-thumb" key={url}><button type="button" aria-label={`查看第 ${i+1} 张图片，共 ${images.length} 张`} onClick={()=>showPreview({kind:'image',url,title:`待发送图片 ${i+1}/${images.length}`})}><img src={url} alt={`待发送图片 ${i+1}`}/></button><button className="attachment-remove" type="button" disabled={busy} aria-label={`移除第 ${i+1} 张图片`} onClick={()=>setImages(old=>old.filter(value=>value!==url))}><Icon name="close" size={14}/></button></div>)}</div></div>}
-          {imageLoading&&<span className="attachment-count" role="status">正在读取图片…</span>}
+          {images.length>0&&<div className="image-strip"><span className="attachment-count" role="status">图片 {images.length}/{MAX_IMAGES}</span><div className="attachment-thumbnails">{images.map((url,i)=><div className="attachment-thumb" key={i}><button type="button" aria-label={`查看第 ${i+1} 张图片，共 ${images.length} 张`} onClick={()=>showPreview({kind:'image',url,title:`待发送图片 ${i+1}/${images.length}`})}><img src={url} alt={`待发送图片 ${i+1}`} decoding="async"/></button><button className="attachment-remove" type="button" disabled={busy} aria-label={`移除第 ${i+1} 张图片`} onClick={()=>setImages(old=>old.filter(value=>value!==url))}><Icon name="close" size={14}/></button></div>)}</div></div>}
+          {imageLoading&&<span className="attachment-count" role="status">正在处理图片，大图会自动压缩…</span>}
           {voiceBusy&&<div className="voice-status" role="status"><span>{voice.state==='starting'?'正在请求麦克风…':voice.state==='recording'?'录音中 · 最长 2 分钟':'正在识别…'}</span><button type="button" onClick={voice.cancel}>取消</button></div>}
-          <textarea ref={composer} aria-label="任务输入" placeholder={queueNext?'当前任务完成后发送…':newChat||!view?.turns.length?'接下来我们该写什么代码？':`在 ${machineName} 上继续…`} value={draft} disabled={busy} onChange={e=>editDraft(e.target.value)} onPaste={paste} rows={1}/>
+          <textarea ref={composer} aria-label="任务输入" placeholder={queueNext?'当前任务完成后发送…':newChat||!view?.turns.length?'接下来我们该写什么代码？':`在 ${machineName} 上继续…`} value={draft} readOnly={busy} onChange={e=>editDraft(e.target.value)} onPaste={paste} rows={1} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing&&window.matchMedia('(pointer: fine)').matches){e.preventDefault();void submit();}}}/>
           <div className="composer-toolbar">
             <IconButton icon="plus" label="添加与选项" className="composer-add" disabled={busy||imageLoading} onClick={()=>setSheet('add')}/>
             <IconButton icon="shield" label={`许可：${activeApproval==='never'?'不提示':activeApproval==='on-request'?'按需审批':'电脑配置'}`} className={`composer-permission${activeApproval==='never'?' unrestricted':''}`} disabled={busy} onClick={()=>setSheet('approval')}/>
-            <button className="composer-model" type="button" onClick={()=>setSheet('model')} disabled={busy} title={`${selectedModel||'选择模型'}${effortLabel?' · '+effortLabel:''}${isFast?' · 极速':''}`}><span>{modelInfo?.displayName||selectedModel||'选择模型'}</span>{effortLabel&&<small>{effortLabel}</small>}{isFast&&<small>极速</small>}<Icon name="chevron" size={13}/></button>
+            <button className="composer-model" ref={modelButton} type="button" aria-haspopup="dialog" aria-expanded={Boolean(modelPoint)} onClick={e=>{const rect=e.currentTarget.getBoundingClientRect();setModelPoint({x:rect.right,y:rect.top,align:'end'});}} disabled={busy} title={`${modelLabel}${effortLabel?' · '+effortLabel:''}${isFast?' · 极速':''}`}><span>{modelLabel}</span>{effortLabel&&<small>{effortLabel}</small>}{isFast&&<small>极速</small>}<Icon name="chevron" size={13}/></button>
             <div className="composer-actions">
-              {view?.activeTurnId&&!newChat&&<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('turn.stop',target())}/>}
+              {view?.activeTurnId&&!newChat&&Boolean(draft.trim()||images.length||busy)&&<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('turn.stop',target())}/>}
               <IconButton icon={voice.state==='recording'?'stop':'mic'} label={voice.state==='recording'?'结束录音并识别':voice.state==='transcribing'?'正在识别':voice.state==='starting'?'正在请求麦克风':`语音输入：${voiceLabel}`} className={voice.state==='recording'?'recording round':''} disabled={busy||voice.state==='starting'||voice.state==='transcribing'||voiceMode==='codex'&&!connected} onClick={()=>{if(voice.state==='recording')voice.stop();else{setError('');setNotice('');voice.start();}}}/>
-              {Boolean(draft.trim()||images.length)&&<button className="black round send" aria-label={queueNext?'完成后发送':'发送消息'} disabled={!canWrite}><Icon name="send" size={21}/></button>}
+              {view?.activeTurnId&&!newChat&&!draft.trim()&&!images.length&&!busy?<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('turn.stop',target())}/>:<button className={`black round send${sending?' sending':''}`} aria-label={sending?'正在发送':queueNext?'完成后发送':'发送消息'} aria-busy={sending} disabled={!canWrite||!draft.trim()&&!images.length} onPointerDown={e=>e.preventDefault()}><Icon name={sending?'more':'send'} size={21}/></button>}
             </div>
           </div>
          </form>
@@ -419,30 +457,21 @@ function App(){
 
      {threadMenu&&threadMenu.machine===machine&&<ThreadMenu key={`${machine}:${threadMenu.thread.id}`} thread={threadMenu.thread} point={threadMenu.point} preference={preferences[threadMenu.thread.id]||{}} sections={[...new Set(Object.values(preferences).map(p=>p.section).filter((s):s is string=>Boolean(s)))]} archived={threadMenu.archived} compact={threadMenu.compact} connected={connected} close={()=>setThreadMenu(current=>current===threadMenu?null:current)} change={patch=>changePreference(threadMenu.thread.id,patch,threadMenu.thread)} copy={()=>copyText(threadMenu.thread.id)} rename={name=>changeThread('session.rename',threadMenu.thread,{name})} archive={()=>changeThread(threadMenu.archived?'session.unarchive':'session.archive',threadMenu.thread)} openPreview={threadMenu.compact?()=>setSheet('browser'):undefined}/>}
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
-     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',model:'模型与思考程度',approval:'许可',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页',voice:'语音输入'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
+     {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
+     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',approval:'许可',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页',voice:'语音输入'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
        {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
       {sheet==='computer'&&<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setApproval('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
-       {sheet==='model'&&<>
-         <p className="muted">下次发送时使用所选模型与思考程度。</p>
-         <label>模型<select disabled={busy||!availableModels.length} value={model} onChange={e=>{setModel(e.target.value);setEffort('');setServiceTier(e.target.value?null:undefined);}}>
-           <option value="">沿用当前设置{selectedModel?` · ${view?.model||info?.model}`:''}</option>
-           {availableModels.map((m:Json)=><option key={m.id||m.model} value={m.model}>{m.displayName||m.model}</option>)}
-         </select></label>
-         <label>思考程度<select disabled={busy||!modelInfo} value={effort} onChange={e=>setEffort(e.target.value)}><option value="">沿用当前设置</option>{modelInfo?.supportedReasoningEfforts?.map((r:Json)=><option key={r.reasoningEffort} value={r.reasoningEffort}>{({none:'关闭',minimal:'最少',low:'较少',medium:'适中',high:'较多',xhigh:'更多',max:'最多',ultra:'超高'} as Json)[r.reasoningEffort]||r.reasoningEffort}</option>)}</select></label>
-         <label className="speed-toggle"><span>极速{!fast&&<small>当前模型未提供极速档位</small>}</span><input type="checkbox" role="switch" checked={isFast} disabled={busy||!fast} onChange={e=>setServiceTier(e.target.checked?fast:null)}/></label>
-         <button className="primary" onClick={()=>setSheet(null)}>完成</button>
-       </>}
        {sheet==='approval'&&<><p className="muted">下次发送时使用所选许可。</p><label>审批策略<select disabled={busy} value={approval} onChange={e=>setApproval(e.target.value)}><option value="">沿用当前设置 · {approvalLabel}</option><option value="on-request">按需审批</option><option value="never">不提示审批</option></select></label><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}
        {sheet==='voice'&&<><label>识别方式<select value={voiceMode} onChange={e=>{const mode=voiceProvider(e.target.value);setVoiceMode(mode);save('voice-provider',mode);}}><option value="codex">Codex 识别</option><option value="keyboard">系统键盘</option></select></label><p className="muted">{voiceMode==='codex'?'点麦克风开始录音，再点结束，文字填入输入框。需要 HTTPS 和电脑上的 ChatGPT 登录；录音经中继、电脑发送到语音服务。':'点麦克风打开输入框，再使用手机键盘上的听写。'}</p><p className="muted">选择保存在当前浏览器。</p><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}
-       {sheet==='add'&&<><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>{selected&&<MenuItem icon="browser" disabled={!connected} onClick={()=>setSheet('browser')}>打开本机网页</MenuItem>}<MenuItem icon="image" disabled={busy||imageLoading||!canImage||images.length>=MAX_IMAGES} onClick={()=>fileInput.current?.click()}>添加图片<span className="menu-detail">{images.length}/{MAX_IMAGES}</span></MenuItem>{!canImage&&<p className="muted">当前模型未确认图片能力。</p>}{error&&<p className="error" role="alert">{error}</p>}{selected&&<><MenuItem icon="file" onClick={()=>setSheet('file')}>查看项目文件</MenuItem><MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);void refreshSession();}}>刷新会话</MenuItem></>}{newChat&&<MenuItem icon="folder" disabled={busy} onClick={()=>setSheet('projects')}>选择项目</MenuItem>}</>}
+       {sheet==='add'&&<><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>{selected&&<MenuItem icon="browser" disabled={!connected} onClick={()=>setSheet('browser')}>打开本机网页</MenuItem>}<MenuItem icon="image" disabled={busy||imageLoading||!canImage||images.length>=MAX_IMAGES} onClick={()=>fileInput.current?.click()}>添加图片<span className="menu-detail">{images.length}/{MAX_IMAGES} · 大图自动压缩</span></MenuItem>{!canImage&&<p className="muted">当前模型未确认图片能力。</p>}{error&&<p className="error" role="alert">{error}</p>}{selected&&<><MenuItem icon="file" onClick={()=>setSheet('file')}>查看项目文件</MenuItem><MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);void refreshSession();}}>刷新会话</MenuItem></>}{newChat&&<MenuItem icon="folder" disabled={busy} onClick={()=>setSheet('projects')}>选择项目</MenuItem>}</>}
        {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>}
        {sheet==='browser'&&selected&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);save(previewUrlKey(machine,selected),e.target.value);}} placeholder="http://127.0.0.1:5173"/></label><p className="muted">地址仅用于当前聊天。先在电脑启动网页服务，再打开预览。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
      </SheetPanel>}
      {preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:undefined}
        tabs={previewState.tabs.map(tab=>({id:tab.id,title:previewTitle(tab.target)}))} activeTab={previewState.activeId}
        selectTab={id=>setPreviewState(old=>({...old,activeId:id}))} closeTab={closePreviewTab}
-       compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel)} close={closePreview}>
+       compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel||modelPoint)} close={closePreview}>
        {previewState.tabs.map(({id,target})=><div key={id} id={`preview-panel-${id}`} aria-labelledby={`preview-tab-${id}`} className="preview-tab-panel" role="tabpanel" hidden={id!==previewState.activeId}>
          {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel key={target.request} file={target.file} connected={connected} line={target.line} openFile={path=>void openFile(path,target.machineId,target.threadId)}
            readFile={path=>call('file.read',{threadId:target.threadId,path},target.machineId)}
@@ -453,22 +482,6 @@ function App(){
        </div>)}
      </PreviewPane>}
   </div>;
-}
-function IconButton({icon,label,onClick,disabled=false,className=''}:{icon:IconName;label:string;onClick:()=>void;disabled?:boolean;className?:string}){return <button type="button" className={`icon-button ${className}`} aria-label={label} title={label} disabled={disabled} onClick={onClick}><Icon name={icon}/></button>;}
-function UserMessage({text,editReason,disabled,blocked,copy,resend,children}:{text:string;editReason:string;disabled:boolean;blocked:(reason:string)=>void;copy:()=>void;resend:(text:string)=>Promise<void>;children:ReactNode}){
-  const [editing,setEditing]=useState(false),[draft,setDraft]=useState(text);
-  const submitting=useRef(false);
-  return <div className="user-entry">{editing?<form className="edit-message" onSubmit={e=>{e.preventDefault();if(!draft.trim()||submitting.current)return;submitting.current=true;void resend(draft).finally(()=>{submitting.current=false;});}}>
-    <textarea aria-label="编辑消息" autoFocus value={draft} onChange={e=>setDraft(e.target.value)} disabled={disabled} rows={4}/>
-    <p>将覆盖这条消息及后续聊天；原附件会保留，文件改动不会撤销。</p>
-    <div><button type="button" disabled={disabled} onClick={()=>setEditing(false)}>取消</button><button className="primary" disabled={disabled||!draft.trim()}>重发</button></div>
-  </form>:<>
-    <article className="message user">{children}</article>
-    {text&&<div className="user-actions">
-      <IconButton icon="copy" label="复制消息文字" onClick={copy}/>
-      <IconButton icon="edit" label={editReason||'编辑并重发消息'} disabled={disabled} onClick={()=>{if(editReason){blocked(editReason);return;}setDraft(text);setEditing(true);}}/>
-    </div>}
-  </>}</div>;
 }
 function MenuItem({icon,children,onClick,disabled=false}:{icon:IconName;children:ReactNode;onClick:()=>void;disabled?:boolean}){return <button className="menu-item" onClick={onClick} disabled={disabled}><Icon name={icon} size={21}/><span className="menu-copy">{children}</span></button>;}
 function SheetPanel({title,close,children,className=''}:{title:string;close:()=>void;children:ReactNode;className?:string}){

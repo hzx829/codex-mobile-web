@@ -19,6 +19,9 @@ test('paginated history reads recent full turns from the local index without wri
     assert.equal(page?.hasMore,true);
     assert.deepEqual(page?.turns.map(turn=>turn.id),['new']);
     assert.equal(page?.turns[0].items[0].text,'完整回复');
+    assert.deepEqual(readPaginatedHistory('target',1,home,'new')?.turns.map(turn=>turn.id),['old']);
+    assert.deepEqual(readPaginatedHistory('target',1,home,'old'),{turns:[],hasMore:false});
+    assert.equal(readPaginatedHistory('target',1,home,'other'),null,'A cursor from another thread must not expose its history.');
     assert.equal(readPaginatedHistory('missing',1,home),null);
   } finally {try{db.close();}catch{}await removeTestTemp(home);}
 });

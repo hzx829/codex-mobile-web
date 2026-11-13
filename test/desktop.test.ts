@@ -16,14 +16,15 @@ test('desktop framing handles fragmented snapshots and rejects patch gaps',async
     while(buffer.length>=4&&buffer.length>=4+buffer.readUInt32LE(0)){
       const size=buffer.readUInt32LE(0),m=JSON.parse(buffer.subarray(4,4+size).toString());buffer=buffer.subarray(4+size);requests.push(m);
       if(m.type==='request'){
-        if(m.method==='thread-follower-load-complete-history')send({type:'broadcast',sourceClientId:'owner',method:'thread-stream-state-changed',params:{conversationId:'s',hostId:'local',change:{type:'snapshot',revision:1,conversationState:{id:'s',turns:[],title:'fixture'}}}},true);
         send(m.params?.fixtureError?{type:'response',requestId:m.requestId,resultType:'error',error:m.params.fixtureError}:{type:'response',requestId:m.requestId,resultType:'success',result:m.method==='initialize'?{clientId:'reader'}:{}});
       }
+      if(m.method==='thread-stream-following-changed'&&m.params.following)send({type:'broadcast',sourceClientId:'owner',method:'thread-stream-state-changed',params:{conversationId:'s',hostId:'local',change:{type:'snapshot',revision:1,conversationState:{id:'s',turns:[],title:'fixture'}}}},true);
     }
   });});
   server.listen(path);await once(server,'listening');const original=process.env.CODEX_IPC_PATH;process.env.CODEX_IPC_PATH=path;const desktop=new Desktop();
   try{
     const state=await desktop.follow('s');assert.equal(state.title,'fixture');assert.equal(desktop.clientId,'reader');
+    assert.equal(requests.some(request=>request.method==='thread-follower-load-complete-history'),false);
     const changed=once(desktop,'change');send({type:'broadcast',sourceClientId:'owner',method:'thread-stream-state-changed',params:{conversationId:'s',hostId:'local',change:{type:'patches',baseRevision:1,revision:2,patches:[{op:'replace',path:['title'],value:'updated'}]}}});await changed;assert.equal(desktop.states.get('s')?.state.title,'updated');
     const gap=once(desktop,'resync');send({type:'broadcast',sourceClientId:'owner',method:'thread-stream-state-changed',params:{conversationId:'s',change:{type:'patches',baseRevision:0,revision:3,patches:[]}}});await gap;assert.equal(desktop.states.has('s'),false);
     await desktop.request('thread-follower-interrupt-turn',{});assert.equal(requests.at(-1).version,4);

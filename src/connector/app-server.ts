@@ -58,7 +58,8 @@ export class AppServer extends EventEmitter {
   async start() {
     if (this.child) return;
     if(this.env.CODEX_PROFILE)throw new BridgeError('unsupported_profile','连接器暂不支持为 app-server 选择命名 profile。请使用默认配置，或连接已经使用该配置的官方桌面会话；不会自动换用其他模型。');
-    const args = ['app-server', '--stdio'];
+    // This client releases idle threads so the desktop can open them immediately.
+    const args = ['-c', 'thread_unload_delay_secs=0', 'app-server', '--stdio'];
     const child = spawn(this.bin, args, { cwd: this.env.CODEX_HOME || join(homedir(), '.codex'), env: { ...this.env }, windowsHide: true, stdio: 'pipe' });
     this.child = child;
     child.stderr.on('data', () => {}); // Native diagnostics can contain credentials; never forward them to the relay.
@@ -94,6 +95,19 @@ export class AppServer extends EventEmitter {
       this.pending.set(id, { resolve, reject, timer });
       try { this.write({ id, method, params }); } catch (e) { clearTimeout(timer); this.pending.delete(id); reject(e); }
     });
+  }
+  async unsubscribe(threadId:string,timeout=10_000):Promise<void> {
+    let closed=false,resolveClosed!:()=>void,timer:NodeJS.Timeout|undefined;
+    const completion=new Promise<void>(resolve=>{resolveClosed=resolve;});
+    const listener=(event:Json)=>{if(event.method==='thread/closed'&&event.params?.threadId===threadId){closed=true;resolveClosed();}};
+    this.on('event',listener);
+    try {
+      const result=await this.rpc('thread/unsubscribe',{threadId});
+      if(result.status==='notLoaded'||closed)return;
+      if(!['unsubscribed','notSubscribed'].includes(result.status))throw new BridgeError('runtime_error','会话释放未获确认');
+      // Unsubscribe acknowledges the subscription change before the native writer has shut down.
+      await Promise.race([completion,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new BridgeError('timeout','会话仍在释放，请稍后重试',true)),timeout);})]);
+    }finally{clearTimeout(timer);this.off('event',listener);}
   }
   respond(id: string, result: Json,timeout=10_000):Promise<void> {
     const req = this.requests.get(id);

@@ -68,7 +68,8 @@ try{
   const later=await control.handle({id:'later',action:'turn.send',payload:{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null,text:'Later fixture response.',opId:`${Date.now()}:${randomUUID()}`}});
   assert.equal(later.state,'accepted');await laterDone;
   hang=true;const reachedManagedFixture=new Promise<void>(resolve=>{onRequest=resolve;});
-  const interrupted=await runtime.rpc('turn/start',{threadId:view.id,input:[{type:'text',text:'Interrupted fixture response.'}]});await reachedManagedFixture;
+  const interruptedResult=await call('turn.send',{threadId:view.id,source:view.source,generation:control.generation,expectedTurnId:null,text:'Interrupted fixture response.'});
+  assert.equal(interruptedResult.state,'accepted');const interrupted={turn:{id:interruptedResult.turnId}};await reachedManagedFixture;
   const interruptedDone=event('turn/completed',p=>p.threadId===view.id);
   await runtime.rpc('turn/interrupt',{threadId:view.id,turnId:interrupted.turn.id});await interruptedDone;hang=false;
   const beforeEdit=await control.read(view.id);assert.equal(beforeEdit.turns.length,3);assert.equal(beforeEdit.turns[2].status,'interrupted');
@@ -111,8 +112,9 @@ try{
   hang=false;await call('turn.stop',{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:live.activeTurnId});await fastStopped;
   await control.drainQueue();await queueDone;assert.equal(receivedServiceTier,null);assert.equal(queuedRequests,1,'Queued input must reach inference exactly once after the active turn stops.');
   assert.deepEqual((await control.read(view.id)).queuedMessages,[]);
+  for(const id of [view.id,forked.threadId,stoppedFork.threadId])await (control as any).exclusive(id,async()=>{});
   const reloaded=await control.handle({id:'reload',action:'runtime.reload',payload:{generation:control.generation,expectedBin:nativeBin}});
-  assert.equal(reloaded.restored,3);
+  assert.equal(reloaded.restored,0,'Finished mobile threads must stay released across reload.');
   const restored=await control.read(view.id);assert.equal(restored.source,'connector');assert.equal(restored.turns.length,3);
   assert.equal((await control.read(forked.threadId)).turns.length,1);assert.equal((await control.read(stoppedFork.threadId)).turns.length,3);
   assert.equal((await control.read(stoppedFork.threadId)).turns.length,3,'Editing the original must preserve the fork.');

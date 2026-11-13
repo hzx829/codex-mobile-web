@@ -77,7 +77,7 @@ test('paginated history uses the turns endpoint when thread/read cannot include 
       this.calls.push({method,params});
       if(method==='thread/read'&&params.includeTurns)throw new BridgeError('runtime_error','paginated threads do not support thread/read(includeTurns=true)');
       if(method==='thread/read')return {thread:{id:'paged',cwd,name:'分页会话',turns:[]}};
-      if(method==='thread/turns/list')return {data:[{id:'new',status:'completed',items:[{id:'reply',type:'agentMessage',text:'完整回复'}]},{id:'old',status:'completed',items:[]}],nextCursor:'older'};
+      if(method==='thread/turns/list')return params.cursor?{data:[{id:'first',status:'completed',items:[]}],nextCursor:null}:{data:[{id:'new',status:'completed',items:[{id:'reply',type:'agentMessage',text:'完整回复'}]},{id:'old',status:'completed',items:[]}],nextCursor:'older'};
       throw Error(method);
     }
     close(){}
@@ -89,6 +89,9 @@ test('paginated history uses the turns endpoint when thread/read cannot include 
     assert.equal(view.source,'history');assert.equal(view.hasMore,true);assert.deepEqual(view.turns.map(t=>t.id),['old','new']);
     assert.equal(view.turns[1].items[0].text,'完整回复');
     assert.deepEqual(runtime.calls.at(-1),{method:'thread/turns/list',params:{threadId:'paged',limit:5,sortDirection:'desc',itemsView:'full'}});
+    const older=await control.read('paged',5,view.nextCursor!);
+    assert.deepEqual(older.turns.map(turn=>turn.id),['first']);assert.equal(older.nextCursor,null);
+    assert.equal(runtime.calls.at(-1).params.cursor,'older');
   } finally {control.close();}
 });
 

@@ -138,19 +138,21 @@ test('fork creates and names a managed thread through a finished turn even when 
       this.calls.push({method,params});
       if(method==='thread/fork')return {thread:{id:'branch',sessionId:'branch-session'},model:'model-a',modelProvider:'openai',approvalPolicy:'on-request'};
       if(method==='thread/name/set')return {};
+      if(method==='thread/unsubscribe')return {status:'unsubscribed'};
       if(method==='thread/read')return {thread:{id:'branch',sessionId:'branch-session',turns:[{id:'t1',status:'completed',items:[]}]}};
       assert.fail(method);
     }
+    async unsubscribe(threadId:string){await this.rpc('thread/unsubscribe',{threadId});}
     close(){}
   }
-  class Desktop extends EventEmitter{clientId='desktop';states=new Map();async follow(){return {id:'source',title:'Source task',cwd:'C:/work',turns:[{id:'t1',status:'interrupted',items:[]},{id:'later',status:'inProgress',items:[]}]};}close(){}}
+  class Desktop extends EventEmitter{clientId='desktop';states=new Map();async follow(id:string){if(id!=='source')throw new BridgeError('no_owner','no owner');return {id:'source',title:'Source task',cwd:'C:/work',turns:[{id:'t1',status:'interrupted',items:[]},{id:'later',status:'inProgress',items:[]}]};}close(){}}
   const runtime=new Runtime(),ledger=new Ledger(':memory:'),control=new Control(ledger,runtime as any,new Desktop() as any);
   try{
     const request={id:'fork',action:'session.fork' as const,payload:{threadId:'source',lastTurnId:'t1',opId:`${Date.now()}:${randomUUID()}`}};
     const first=await control.handle(request);
     assert.deepEqual(first,{state:'accepted',threadId:'branch',title:'Source task（分叉）',cwd:'C:/work'});
     assert.deepEqual(await control.handle(request),first);
-    assert.deepEqual(runtime.calls,[{method:'thread/fork',params:{threadId:'source',lastTurnId:'t1'}},{method:'thread/name/set',params:{threadId:'branch',name:'Source task（分叉）'}}]);
+    assert.deepEqual(runtime.calls,[{method:'thread/fork',params:{threadId:'source',lastTurnId:'t1'}},{method:'thread/name/set',params:{threadId:'branch',name:'Source task（分叉）'}},{method:'thread/read',params:{threadId:'branch',includeTurns:true}},{method:'thread/unsubscribe',params:{threadId:'branch'}}]);
     assert.equal(ledger.owns('branch'),true);
     const branch=await control.read('branch');
     assert.equal(branch.source,'connector');assert.equal(branch.sessionId,'branch-session');assert.equal(branch.canControl,true);
@@ -276,13 +278,13 @@ test('image-only turns validate the selected model and reach desktop with the fu
     async request(method:string,params:any){this.calls.push({method,params});return {result:{turn:{id:'next'}}};}close(){}
   }
   const desktop=new Desktop(),control=new Control(new Ledger(':memory:'),new Runtime() as any,desktop as any);
-  const images=['data:image/png;base64,iVBORw0KGgo=','data:image/jpeg;base64,/9j/2Q=='];
+  const images=Array.from({length:10},(_,i)=>`data:image/png;base64,${Buffer.from('image-'+i).toString('base64')}`);
   const send=(payload:any)=>control.handle({id:randomUUID(),action:'turn.send',payload:{threadId:'s',source:'desktop',generation:control.generation,expectedTurnId:desktop.active?'active':null,opId:`${Date.now()}:${randomUUID()}`,...payload}});
   try{
     const sent=await send({text:' \n ',images,model:'vision'});assert.equal(sent.state,'accepted');
     assert.deepEqual(desktop.calls.at(-1).params.turnStart.request.input,images.map(url=>({type:'image',url})));
     assert.equal(desktop.calls.at(-1).params.turnStart.request.model,'vision');
-    for(const payload of [{text:'',images},{text:'',images:[]},{text:'image',images:[...images,images[0]],model:'vision'},{text:'image',images:['data:image/png;base64,?'],model:'vision'}]){
+    for(const payload of [{text:'',images},{text:'',images:[]},{text:'image',images:Array(11).fill(images[0]),model:'vision'},{text:'image',images:['data:image/png;base64,?'],model:'vision'}]){
       const count=desktop.calls.filter(c=>c.method==='thread-follower-start-turn').length;
       assert.equal((await send(payload)).state,'failed');
       assert.equal(desktop.calls.filter(c=>c.method==='thread-follower-start-turn').length,count);
