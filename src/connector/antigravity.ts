@@ -1,6 +1,8 @@
 import {DatabaseSync} from 'node:sqlite';
 import {open, stat} from 'node:fs/promises';
-import {join} from 'node:path';
+import {isAbsolute, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {readProjectFile, downloadProjectFile} from './project.js';
 import {setTimeout as delay} from 'node:timers/promises';
 import {BridgeError, textRequired, type Json} from '../shared/types.js';
 import type {Ledger} from './ledger.js';
@@ -120,6 +122,24 @@ export class AntigravityBridge {
     if (action === 'antigravity.operation') return this.ledger.read(textRequired(p.opId, '操作标识', 100));
     const id = textRequired(p.conversationId, '会话', 36);
     if (!guid.test(id)) throw new BridgeError('invalid', 'Antigravity 会话 ID 无效');
+    if (action === 'antigravity.file.read' || action === 'antigravity.file.download') {
+      const path = textRequired(p.path, '文件路径', 4096);
+      if (/^[\\/]{2}/.test(path)) throw new BridgeError('invalid', '请选择本机文件');
+      const row = this.index(db => db.prepare('SELECT workspace_uris FROM conversation_summaries WHERE conversation_id=?').get(id));
+      if (!row) throw new BridgeError('missing', '桌面上找不到这条 Antigravity 会话');
+      let cwd = '';
+      if (!isAbsolute(path)) {
+        try {
+          const roots = JSON.parse(String(row.workspace_uris));
+          if (Array.isArray(roots) && roots.length === 1) {
+            const url = new URL(roots[0]);
+            if (!url.host) cwd = fileURLToPath(url);
+          }
+        } catch { /* A workspace without a single local root requires an absolute path. */ }
+      }
+      return action === 'antigravity.file.read' ? readProjectFile(cwd, path)
+        : downloadProjectFile(cwd, path, textRequired(p.revision, '文件版本', 64), p.offset);
+    }
     if (action === 'antigravity.read') return this.read(id);
     if (action === 'antigravity.watch') return this.read(id, textRequired(p.revision, '会话版本', 4096));
     if (action !== 'antigravity.send' && action !== 'antigravity.stop') throw new BridgeError('unsupported', '不支持此 Antigravity 操作');

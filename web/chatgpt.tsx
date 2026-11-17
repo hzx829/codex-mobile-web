@@ -1,4 +1,6 @@
 import {useEffect,useRef,useState,type ReactNode} from 'react';
+import {SafeMarkdown} from './content';
+import {useStableEvent} from './use-event';
 import {Icon} from './icons';
 import {operationId} from './client';
 import type {Json,RequestAction} from '../src/shared/types';
@@ -12,9 +14,9 @@ export function chatgptId(value:string){
 }
 function saved(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
 function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
-type Props={service:'chatgpt'|'antigravity';switcher:ReactNode;machine:string;connected:boolean;conversationId:string;call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;back:()=>void};
+type Props={inert:boolean;openFile:(path:string)=>void;openPreview:(url:string)=>void;previewError:string;service:'chatgpt'|'antigravity';switcher:ReactNode;machine:string;connected:boolean;conversationId:string;call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;back:()=>void};
 
-export function RemoteChatPanel({service,switcher,machine,connected,conversationId,call,go,back}:Props){
+export function RemoteChatPanel({service,switcher,machine,connected,conversationId,call,go,back,inert,openFile,openPreview,previewError}:Props){
   const isAntigravity=service==='antigravity',name=isAntigravity?'Antigravity':'ChatGPT';
   const key=`${service}:${machine}:${conversationId}`;
   const [bridge,setBridge]=useState<Json|null>(null),[items,setItems]=useState<Json[]>([]),[view,setView]=useState<Json|null>(null);
@@ -24,6 +26,7 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
   const lock=useRef(false),alive=useRef(true),scroll=useRef<HTMLDivElement>(null),stick=useRef(true);
   const request=useRef(call);request.current=call;
   function edit(text:string){setDraft(text);store(`${key}:draft`,text);}
+  const followup=useStableEvent((text:string)=>{if(!pending)edit(draft?draft+'\n'+text:text);});
   function remember(op:string){setPending(op);store(`${key}:pending`,op);}
   function failed(e:any){if(alive.current)setError(isAntigravity&&e?.code==='unsupported'?'请更新这台电脑上的连接器以使用 Antigravity。':e?.message||`${name} 操作失败`);}
   async function refresh(more=false,quiet=false){
@@ -99,10 +102,10 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
     void refresh();
   }
   const ready=connected&&(isAntigravity||bridge?.connected&&bridge?.pageReady);
-  return <main className="chatgpt-panel">
+  return <main className="chatgpt-panel" inert={inert}>
     <header className="chatgpt-header"><button aria-label={conversationId?`返回 ${name} 列表`:'返回 Codex'} onClick={()=>conversationId?go(''):back()}><Icon name="back"/></button><div><strong>{conversationId?view?.title||name:name}</strong><small>{connected?(isAntigravity?'电脑上的 Antigravity 对话':'浏览器账号中的聊天'):'电脑未连接'}</small></div><button disabled={!connected||busy} onClick={()=>void refresh()} aria-label="刷新">刷新</button></header>
-    {switcher}
-    {(error||watchError)&&<p className="chatgpt-notice error" role="alert">{error||watchError}</p>}
+    {!conversationId&&switcher}
+    {(error||watchError||previewError)&&<p className="chatgpt-notice error" role="alert">{error||watchError||previewError}</p>}
     {!isAntigravity&&connected&&bridge&&(!bridge.connected||!bridge.pageReady)&&<div className="chatgpt-setup"><h2>{bridge.connected?'等待 ChatGPT 页面':'连接 ChatGPT 浏览器'}</h2><p>{bridge.notice||'请在电脑打开已登录的 ChatGPT 页面，并在扩展中连接该标签页。'}</p><ol><li>在电脑扩展管理页加载准备好的 <code>.local/chatgpt-extension</code> 文件夹。</li><li>打开已登录目标账号的 ChatGPT 页面，点击扩展，选择“连接当前 ChatGPT 页面”。</li><li>保持页面打开，在这里刷新。</li></ol></div>}
     {!conversationId?<div className="chatgpt-list">
       <label>筛选已加载聊天<input value={query} onChange={event=>setQuery(event.target.value)} placeholder="聊天标题"/></label>
@@ -112,16 +115,19 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
       {ready&&(!isAntigravity||hasMore)&&<button disabled={busy} onClick={()=>void refresh(true)}>{busy?'正在读取…':'加载更多聊天'}</button>}
       {!isAntigravity&&<p className="chatgpt-help">使用扩展选定标签页的账号。搜索只筛选已加载的聊天。</p>}
     </div>:<>
-      <div className="chatgpt-messages" ref={scroll} onScroll={()=>{const element=scroll.current!;stick.current=element.scrollHeight-element.scrollTop-element.clientHeight<80;}}>
-        {view?.messages.map((message:Json)=><article key={message.id} className={`chatgpt-message ${message.role}`}><small>{message.role==='tool'?'工具':message.role==='user'?'你':name}</small><div>{message.text}</div></article>)}
+      <div className={isAntigravity?'timeline':'chatgpt-messages'} ref={scroll} onScroll={()=>{const element=scroll.current!;stick.current=element.scrollHeight-element.scrollTop-element.clientHeight<80;}}>
+        {view?.messages.map((message:Json)=>isAntigravity?message.role==='tool'
+          ?<details className="activity-group" key={message.id}><summary>工具调用<span className="activity-excerpt">{message.text}</span></summary><pre className="file-content">{message.text}</pre></details>
+          :<article key={message.id} className={`message ${message.role}`}><SafeMarkdown allowFileUrls text={message.text} openFile={openFile} openPreview={openPreview} onFollowup={followup}/></article>
+          :<article key={message.id} className={`chatgpt-message ${message.role}`}><small>{message.role==='tool'?'工具':message.role==='user'?'你':name}</small><div>{message.text}</div></article>)}
         {!view&&!error&&<p>{busy?'正在读取聊天…':isAntigravity?'连接电脑后读取对话。':'连接浏览器后读取聊天。'}</p>}
         {isAntigravity&&view&&!view.messages.length&&<p>桌面尚未记录可显示的消息。</p>}
         {view?.running&&<p role="status">{name} 正在运行…</p>}
       </div>
-      <footer className="chatgpt-footer">
+      <footer className={isAntigravity?'composer-area':'chatgpt-footer'}>
         {pending&&<div className="chatgpt-pending"><span>发送或停止结果待核实</span><button disabled={!connected||busy} onClick={()=>void check()}>核实回执</button><button disabled={busy} onClick={()=>{if(window.confirm('请先在聊天和电脑页面确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
-        <form onSubmit={event=>{event.preventDefault();void mutate('send');}}><textarea aria-label={`发送给 ${name}`} placeholder={`继续这个 ${name} 对话…`} readOnly={Boolean(pending)} value={draft} maxLength={50_000} onChange={event=>edit(event.target.value)} rows={3}/><div>{view?.running?<button type="button" disabled={!ready||busy||Boolean(pending)} onClick={()=>void mutate('stop')}>{isAntigravity?'停止此会话当前任务':'停止生成'}</button>:<button className="primary" disabled={!ready||!view||isAntigravity&&!view.canSend||busy||Boolean(pending)||!draft.trim()}>发送</button>}</div></form>
-        <small>{view?.notice||(!isAntigravity&&'使用电脑浏览器中的 ChatGPT，登录和草稿请在电脑处理。')}</small>
+        <form className={isAntigravity?'composer antigravity-composer':undefined} onSubmit={event=>{event.preventDefault();void mutate('send');}}><textarea aria-label={`发送给 ${name}`} placeholder={`继续这个 ${name} 对话…`} readOnly={Boolean(pending)} value={draft} maxLength={50_000} onChange={event=>edit(event.target.value)} rows={isAntigravity?2:3}/><div>{view?.running?<button type="button" disabled={!ready||busy||Boolean(pending)} onClick={()=>void mutate('stop')}>{isAntigravity?'停止此会话当前任务':'停止生成'}</button>:<button className="primary" disabled={!ready||!view||isAntigravity&&!view.canSend||busy||Boolean(pending)||!draft.trim()}>发送</button>}</div></form>
+        {!isAntigravity&&<small>{view?.notice||'使用电脑浏览器中的 ChatGPT，登录和草稿请在电脑处理。'}</small>}
       </footer>
     </>}
   </main>;

@@ -1,11 +1,13 @@
 import {randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
-import {request as httpRequest, type ClientRequest, type IncomingMessage} from 'node:http';
+import {request as httpRequest, type ClientRequest} from 'node:http';
 import {request as httpsRequest} from 'node:https';
+import type {Readable} from 'node:stream';
+import {htmlEntry, htmlEntryUrl, openHtmlResource} from './html-preview.js';
 import {WebSocket} from 'ws';
 import {BridgeError, textRequired, type Json} from '../shared/types.js';
 
-type HttpRoute={request:ClientRequest;response?:IncomingMessage};
+type HttpRoute={request?:ClientRequest;response?:Readable;paused?:boolean};
 
 export function localPreviewUrl(value:unknown):string {
   if(typeof value!=='string'||value.length>2048)throw new BridgeError('invalid','请输入本机网页地址');
@@ -15,37 +17,48 @@ export function localPreviewUrl(value:unknown):string {
 }
 
 export class BrowserPreview extends EventEmitter {
-  private active?:{id:string;threadId:string;url:URL};
+  private active?:{id:string;threadId:string;url:URL;entry?:string};
+  private generation=0;
   private requests=new Map<string,HttpRoute>();
   private sockets=new Map<string,WebSocket>();
   start(value:unknown,thread:unknown):Json {
     const threadId=textRequired(thread,'会话');
-    const url=new URL(localPreviewUrl(value));
+    return this.activate(threadId,new URL(localPreviewUrl(value)));
+  }
+  async startFile(value:unknown,thread:unknown):Promise<Json> {
+    const threadId=textRequired(thread,'会话'), generation=++this.generation;
+    const entry=await htmlEntry(value);
+    if(generation!==this.generation)throw new BridgeError('changed','网页预览已更换');
+    return this.activate(threadId,new URL(htmlEntryUrl(entry)),entry);
+  }
+  private activate(threadId:string,url:URL,entry?:string):Json {
     this.stop();
-    const id=randomUUID();this.active={id,threadId,url};
+    const id=randomUUID();this.active={id,threadId,url,entry};
     return {sessionId:id,threadId,url:url.toString()};
   }
   stopForThread(session:unknown,thread:unknown){
     return this.stop(textRequired(session,'预览会话'),textRequired(thread,'会话'));
   }
   stop(sessionId?:unknown,threadId?:unknown):boolean {
+    if(sessionId===undefined)this.generation++;
     if(!this.active||sessionId!==undefined&&sessionId!==this.active.id||threadId!==undefined&&threadId!==this.active.threadId)return false;
-    const active=this.active;this.active=undefined;
-    for(const route of this.requests.values())route.request.destroy();this.requests.clear();
+    const active=this.active;this.active=undefined;this.paused=false;
+    for(const route of this.requests.values()){route.request?.destroy();route.response?.destroy();}this.requests.clear();
     for(const socket of this.sockets.values())socket.terminate();this.sockets.clear();
     this.emit('ended',{sessionId:active.id,threadId:active.threadId});
     return true;
   }
-  pauseResponses(){for(const route of this.requests.values())route.response?.pause();}
-  resumeResponses(){for(const route of this.requests.values())route.response?.resume();}
+  private paused=false;
+  pauseResponses(){this.paused=true;for(const route of this.requests.values())route.response?.pause();}
+  resumeResponses(){this.paused=false;for(const route of this.requests.values())if(!route.paused)route.response?.resume();}
   handle(message:Json){
     if(message.type==='proxy.http.request'){this.http(message);return;}
     const id=message.id;if(typeof id!=='string')return;
     if(message.type==='proxy.http.pause'||message.type==='proxy.http.resume'||message.type==='proxy.http.cancel'){
       const route=this.requests.get(id),response=route?.response;
-      if(message.type==='proxy.http.pause')response?.pause();
-      else if(message.type==='proxy.http.resume')response?.resume();
-      else {route?.request.destroy();this.requests.delete(id);}
+      if(!route)return;
+      if(message.type==='proxy.http.cancel'){route.request?.destroy();response?.destroy();this.requests.delete(id);}
+      else {route.paused=message.type==='proxy.http.pause';if(route.paused||this.paused)response?.pause();else response?.resume();}
     }else if(message.type==='proxy.ws.open'){this.websocket(message);
     }else if(message.type==='proxy.ws.data'){
       const socket=this.sockets.get(id);
@@ -55,7 +68,8 @@ export class BrowserPreview extends EventEmitter {
   private target(message:Json):URL|undefined {
     if(!this.active||message.sessionId!==this.active.id||typeof message.path!=='string'||!message.path.startsWith('/')||message.path.startsWith('//'))return;
     const path=new URL(message.path,'http://preview.invalid');
-    return new URL(path.pathname+path.search,this.active.url.origin);
+    const target=new URL(this.active.url.origin);target.pathname=path.pathname;target.search=path.search;
+    return target;
   }
   private headers(raw:Json,target:URL):Record<string,string|string[]> {
     const headers:Record<string,string|string[]>={};
@@ -69,15 +83,35 @@ export class BrowserPreview extends EventEmitter {
     if(headers.referer){try{const from=new URL(String(headers.referer));headers.referer=target.origin+from.pathname+from.search;}catch{delete headers.referer;}}
     return headers;
   }
+  private async html(message:Json,target:URL,entry:string){
+    const id=message.id,route:HttpRoute={};this.requests.set(id,route);
+    try{
+      if(!['GET','HEAD'].includes(message.method)||message.headers?.['service-worker'])throw Error();
+      const {file,mime,size}=await openHtmlResource(entry,target.pathname);
+      if(this.requests.get(id)!==route){await file.close();return;}
+      this.emit('message',{type:'proxy.http.head',id,status:200,headers:{'content-type':mime,'content-length':String(size),'x-content-type-options':'nosniff','content-security-policy':"worker-src 'none'; object-src 'none'; base-uri 'self'"}});
+      if(message.method==='HEAD'){await file.close();this.requests.delete(id);this.emit('message',{type:'proxy.http.end',id});return;}
+      const stream=file.createReadStream();route.response=stream;
+      stream.on('data',(chunk:Buffer)=>this.emit('message',{type:'proxy.http.data',id,data:chunk.toString('base64')}));
+      stream.on('end',()=>{this.requests.delete(id);this.emit('message',{type:'proxy.http.end',id});});
+      stream.on('error',()=>{this.requests.delete(id);this.emit('message',{type:'proxy.http.fail',id});});
+      if(route.paused||this.paused)stream.pause();
+    }catch{
+      if(this.requests.get(id)!==route)return;
+      this.requests.delete(id);this.emit('message',{type:'proxy.http.head',id,status:404,headers:{}});this.emit('message',{type:'proxy.http.end',id});
+    }
+  }
   private http(message:Json){
     const target=this.target(message),id=message.id;
     if(!target||typeof id!=='string'||!['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'].includes(message.method)||typeof message.body!=='string'){this.emit('message',{type:'proxy.http.fail',id});return;}
+    if(this.active?.entry){void this.html(message,target,this.active.entry);return;}
     const body=Buffer.from(message.body,'base64');
     if(body.length>8*1024*1024){this.emit('message',{type:'proxy.http.fail',id});return;}
     const request=(target.protocol==='https:'?httpsRequest:httpRequest)(target,{method:message.method,headers:this.headers(message.headers,target)},response=>{
       const route=this.requests.get(id);if(!route)return response.destroy();route.response=response;
       this.emit('message',{type:'proxy.http.head',id,status:response.statusCode||502,headers:response.headers});
       response.on('data',(chunk:Buffer)=>this.emit('message',{type:'proxy.http.data',id,data:chunk.toString('base64')}));
+      if(route.paused||this.paused)response.pause();
       response.on('end',()=>{this.requests.delete(id);this.emit('message',{type:'proxy.http.end',id});});
       response.on('error',()=>{this.requests.delete(id);this.emit('message',{type:'proxy.http.fail',id});});
     });
@@ -87,7 +121,7 @@ export class BrowserPreview extends EventEmitter {
   }
   private websocket(message:Json){
     const target=this.target(message),id=message.id;
-    if(!target||typeof id!=='string'){this.emit('message',{type:'proxy.ws.close',id});return;}
+    if(this.active?.entry||!target||typeof id!=='string'){this.emit('message',{type:'proxy.ws.close',id});return;}
     const headers=this.headers(message.headers,target);
     target.protocol=target.protocol==='https:'?'wss:':'ws:';
     delete headers['sec-websocket-key'];delete headers['sec-websocket-version'];delete headers['sec-websocket-extensions'];delete headers['sec-websocket-protocol'];

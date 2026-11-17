@@ -4,6 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {mkdtemp, mkdir, appendFile, rm, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
 import {AntigravityBridge} from '../src/connector/antigravity.js';
 import {Ledger} from '../src/connector/ledger.js';
@@ -45,14 +46,24 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   const line = (step:object) => JSON.stringify(step)+'\n';
   await writeFile(transcript,line({type:'USER_INPUT',step_index:1,content:'<USER_REQUEST>hello</USER_REQUEST>\n<ADDITIONAL_METADATA>private</ADDITIONAL_METADATA>'})+
     line({type:'PLANNER_RESPONSE',step_index:2,thinking:'private',tool_calls:[{name:'read_file',args:{private:true}}]}));
-  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER)');
-  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?)').run(id,'Example','CASCADE_RUN_STATUS_IDLE','today',2,1,'before',0);
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)').run(id,'Example','CASCADE_RUN_STATUS_IDLE','today',2,1,'before',0,JSON.stringify([pathToFileURL(dir).href]));
   const writes:unknown[]=[];
   const bridge = new AntigravityBridge(dir,ledger,async (_dir,method,body)=>{
     writes.push({method,body});
     if(method==='CancelCascadeInvocation')throw new BridgeError('uncertain','lost response',true);
   });
   assert.deepEqual((await bridge.handle('antigravity.list',{})).data,[{id,title:'Example'}]);
+  await writeFile(join(dir,'示例.pdf'),'%PDF-1.7');
+  const pdf=await bridge.handle('antigravity.file.read',{conversationId:id,path:'示例.pdf'});
+  assert.equal(pdf.mime,'application/pdf');
+  const download={conversationId:id,path:pdf.path,revision:pdf.revision,offset:0};
+  const chunk=await bridge.handle('antigravity.file.download',download);
+  assert.equal(Buffer.from(chunk.data,'base64').toString(),'%PDF-1.7');
+  await assert.rejects(bridge.handle('antigravity.file.read',{conversationId:randomUUID(),path:pdf.path}),/找不到/);
+  await assert.rejects(bridge.handle('antigravity.file.read',{conversationId:id,path:'//server/share'}),/本机文件/);
+  await writeFile(pdf.path,'updated');
+  await assert.rejects(bridge.handle('antigravity.file.download',download),/文件已变化/);
   const view = await bridge.handle('antigravity.read',{conversationId:id});
   assert.deepEqual(view.messages,[{id:'1',role:'user',text:'hello'},{id:'2-tools',role:'tool',text:'read_file'}]);
   await appendFile(transcript,line({type:'PLANNER_RESPONSE',step_index:3,content:'done'}));

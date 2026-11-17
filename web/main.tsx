@@ -58,6 +58,8 @@ function App(){
   if(codexActive)lastCodex.current={machine,route};
   const codexRoute=codexActive?route:lastCodex.current.machine===machine?lastCodex.current.route:home;
   const {thread:selected,project,newChat}=codexRoute,showThread=Boolean(selected||newChat);
+  const previewThread=codexActive?selected:route.antigravity?'antigravity:'+route.antigravity:'';
+  const previewOwner=useRef({machine,thread:previewThread});previewOwner.current={machine,thread:previewThread};
   const threadMounted=codexActive&&showThread&&Boolean(token)&&status!=='auth_error';
   const [info,setInfo]=useState<Json|null>(null),[projects,setProjects]=useState<string[]>([]),[sessions,setSessions]=useState<Json[]>([]);
   const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
@@ -83,7 +85,7 @@ function App(){
   const compactPreview=useCompactPreview();
   const fileSequence=useRef(0),browserSequence=useRef(0);
   const [browserUrl,setBrowserUrl]=useState(defaultPreviewUrl),[browserRequest,setBrowserRequest]=useState<number|null>(null),[browserState,setBrowserSession]=useState<PreviewSession|null>(null);
-  const browserBusy=browserRequest!==null,browserSession=belongsToThread(browserState,machine,selected)?browserState:null;
+  const browserBusy=browserRequest!==null,browserSession=!browserState?.filePath&&belongsToThread(browserState,machine,previewThread)?browserState:null;
   const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived,service}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),timelineContent=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null),submitting=useRef(false);
   const scrollAnchor=useRef<{element:HTMLElement;top:number}|null>(null),lastScrollTop=useRef(0),olderRequest=useRef<object|null>(null);
@@ -92,7 +94,12 @@ function App(){
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
   const call=(action:RequestAction,payload:Json={},target=machine)=>client.current!.request(action,payload,target);
   const stillHere=()=>current.current.service==='codex'&&current.current.machine===machine&&current.current.selected===selected;
-  function closePreview(){browserSequence.current++;setPreviewState({tabs:[],activeId:null});}
+  function closePreview(){browserSequence.current++;if(browserState?.filePath)closeBrowser();setPreviewState({tabs:[],activeId:null});}
+  const leavePreview=useStableEvent(()=>{if(browserState)closeBrowser();});
+  useLayoutEffect(()=>{
+    setPreviewState({tabs:[],activeId:null});setBrowserRequest(null);setBrowserSession(null);setError('');
+    return ()=>{browserSequence.current++;fileSequence.current++;leavePreview();};
+  },[machine,service,route.antigravity]);
   function showPreview(next:PreviewTarget){
     const id=++previewIds.current;
     setPreviewState(old=>{const tabs=next.kind==='web'?old.tabs.filter(tab=>tab.target.kind!=='web'||tab.target.session.sessionId===next.session.sessionId):old.tabs;
@@ -101,7 +108,7 @@ function App(){
       :{tabs:[...tabs,{id,target:next}],activeId:id};});
     setSheet(null);
   }
-  function closePreviewTab(id:number){setPreviewState(old=>{const index=old.tabs.findIndex(tab=>tab.id===id);if(index<0)return old;const tabs=old.tabs.filter(tab=>tab.id!==id);return {tabs,activeId:old.activeId===id?tabs[Math.min(index,tabs.length-1)]?.id??null:old.activeId};});}
+  function closePreviewTab(id:number){browserSequence.current++;const target=previewState.tabs.find(tab=>tab.id===id)?.target;if(target?.kind==='file'&&target.file?.path&&target.file.path===browserState?.filePath)closeBrowser();setPreviewState(old=>{const index=old.tabs.findIndex(tab=>tab.id===id);if(index<0)return old;const tabs=old.tabs.filter(tab=>tab.id!==id);return {tabs,activeId:old.activeId===id?tabs[Math.min(index,tabs.length-1)]?.id??null:old.activeId};});}
   function fail(e:any){setError(e?.message||'操作失败，请重试');}
   function navigate(next:Route,replace=false){
     history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine},'',location.pathname);
@@ -315,23 +322,37 @@ function App(){
     }else if(current.current.machine===machine&&current.current.selected===id)setNotice('结果待核实，系统不会自动重发。');
     setBusy(false);setUploadProgress(null);void refreshSession();void list();
   }
-  async function openFile(reference:string,ownerMachine=machine,ownerThread=selected){
+  function fileRequest(action:'read'|'download',ownerMachine:string,threadId:string,payload:Json){
+    if(threadId.startsWith('antigravity:'))return call(`antigravity.file.${action}`,{conversationId:threadId.slice('antigravity:'.length),...payload},ownerMachine);
+    return call(`file.${action}`,{threadId,...payload},ownerMachine);
+  }
+  async function openFile(reference:string,ownerMachine=machine,ownerThread=previewThread){
     const {path,line}=fileReference(reference),request=++fileSequence.current;
+    const browserGeneration=browserSequence.current;
     const next:PreviewTarget={kind:'file',machineId:ownerMachine,threadId:ownerThread,path,line,request};
     setError('');showPreview(next);
-    try{const file=await call('file.read',{threadId:ownerThread,path},ownerMachine);setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,file}}:tab)}));}
+    try{const file=await fileRequest('read',ownerMachine,ownerThread,{path});setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,file}}:tab)}));
+      if(/\.html?$/i.test(file.name)&&fileSequence.current===request&&browserSequence.current===browserGeneration)void openBrowser({filePath:file.path},next);
+    }
     catch(e){setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,error:(e as Error)?.message||'文件读取失败'}}:tab)}));}
   }
-  async function openBrowser(url=browserUrl){
-    if(!connected||browserBusy||!selected)return;
-    const owner=machine,request=++browserSequence.current;
-    const address=url.trim();setBrowserUrl(address);
+  async function openBrowser(address:string|{filePath:string}=browserUrl,fileTarget?:Extract<PreviewTarget,{kind:'file'}>){
+    const thread=fileTarget?.threadId||previewThread,owner=fileTarget?.machineId||machine;
+    if(!connected||!thread)return;
+    const request=++browserSequence.current;
+    if(typeof address==='string'){address=address.trim();setBrowserUrl(address);}
+    const here=()=>previewOwner.current.machine===owner&&previewOwner.current.thread===previewThread&&request===browserSequence.current;
     setBrowserRequest(request);setError('');
     try{
-      const result=await openThreadPreview(call,owner,selected,address,()=>stillHere()&&request===browserSequence.current);
+      const result=await openThreadPreview(call,owner,thread,address,here);
       if(!result)return;
-      save(previewUrlKey(owner,selected),address);setBrowserSession(result);showPreview({kind:'web',session:result});
-    }catch(e){if(stillHere()&&request===browserSequence.current)fail(e);}finally{setBrowserRequest(old=>old===request?null:old);}
+      if(typeof address==='string'){
+        save(previewUrlKey(owner,thread),address);setBrowserSession(result);showPreview({kind:'web',session:result});
+      }else setBrowserSession({...result,filePath:address.filePath});
+    }catch(e){if(here()){
+      if(fileTarget)setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,fileTarget)?{...tab,target:{...tab.target,error:(e as Error).message}}:tab)}));
+      else fail(e);
+    }}finally{setBrowserRequest(old=>old===request?null:old);}
   }
   function closeBrowser(){const session=browserState;browserSequence.current++;setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});if(session)void call('preview.stop',{sessionId:session.sessionId,threadId:session.threadId},session.machineId).catch(()=>{});}
   async function attach(files:File[],data?:string){
@@ -418,15 +439,30 @@ function App(){
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>通过自部署中继继续电脑上的对话。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   const selectService=(next:Service)=>navigate(switchRoute(machine,route,next));
   const switcher=<ServiceSwitch active={service} disabled={busy||voiceBusy||imageLoading} select={selectService}/>;
+  const previewPane=preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:undefined}
+       tabs={previewState.tabs.map(tab=>({id:tab.id,title:previewTitle(tab.target)}))} activeTab={previewState.activeId}
+       selectTab={id=>setPreviewState(old=>({...old,activeId:id}))} closeTab={closePreviewTab}
+       compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel||modelPoint)} close={closePreview}>
+       {previewState.tabs.map(({id,target})=><div key={id} id={`preview-panel-${id}`} aria-labelledby={`preview-tab-${id}`} className="preview-tab-panel" role="tabpanel" hidden={id!==previewState.activeId}>
+         {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel allowFileUrls={target.threadId.startsWith('antigravity:')} key={target.request} file={target.file} connected={connected} line={target.line} openFile={path=>void openFile(path,target.machineId,target.threadId)}
+           htmlPreview={browserState?.filePath===target.file.path&&belongsToThread(browserState,target.machineId,target.threadId)?<WebViewer session={browserState} onEnd={closeBrowser}/>:browserBusy?<p role="status">正在打开网页…</p>:null}
+           htmlError={target.error} openHtml={()=>void openBrowser({filePath:target.file!.path},target)}
+           readFile={path=>fileRequest('read',target.machineId,target.threadId,{path})}
+           read={offset=>fileRequest('download',target.machineId,target.threadId,{path:target.file!.path,revision:target.file!.revision,offset})}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''),target.machineId,target.threadId)}>重试</button>}</div>)}
+         {target.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer text={target.text} compact={compactPreview}/></Suspense>}
+         {target.kind==='web'&&<WebViewer session={target.session} onEnd={closeBrowser}/>}
+         {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
+       </div>)}
+     </PreviewPane>;
   if(service!=='codex'){
     const field=service==='chatgpt'?'chat':'antigravity';
-    return <RemoteChatPanel key={JSON.stringify([machine,service,route[field],connected])} service={service} machine={machine} connected={connected}
-      conversationId={route[field]||''} call={call} go={id=>navigate({...home,[field]:id})} back={()=>selectService('codex')} switcher={switcher}/>;
+    return <div className="shell remote-shell"><RemoteChatPanel inert={Boolean(compactPreview&&preview)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error} key={JSON.stringify([machine,service,route[field],connected])} service={service} machine={machine} connected={connected}
+      conversationId={route[field]||''} call={call} go={id=>navigate({...home,[field]:id})} back={()=>selectService('codex')} switcher={switcher}/>{previewPane}</div>;
   }
   return <div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>
        <header className="home-header">{project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={busy} onClick={backToProjects}/><h1>{projectName(project)}</h1></>:<button className="home-identity" aria-label="选择电脑" onClick={()=>setSheet('computer')}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</span></button>}<IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
-      {switcher}
+      {!project&&!archived&&!searchQuery&&switcher}
       <div className="home-content">
         {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
         <section className="recent-section">{!listedThreads.length&&<h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2>}{groupThreads(listedThreads,preferences,searchQuery?'搜索结果':archived?'归档会话':'最近').map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]} time={relativeTime(s.updatedAt)} open={()=>{changePreference(s.id,{unread:false});navigate({...route,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
@@ -439,7 +475,6 @@ function App(){
 
     <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
        <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={backToSessions}/><button className="thread-title" onClick={e=>newChat?setSheet('projects'):openStatus(e.currentTarget)}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button></div></header>
-       <div className="mobile-service-switch">{switcher}</div>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
       {!connected&&<div className="banner">连接已断开，电脑上的任务会继续。</div>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
@@ -505,19 +540,7 @@ function App(){
        {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>}
        {sheet==='browser'&&selected&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);save(previewUrlKey(machine,selected),e.target.value);}} placeholder="http://127.0.0.1:5173"/></label><p className="muted">地址仅用于当前聊天。先在电脑启动网页服务，再打开预览。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
      </SheetPanel>}
-     {preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:undefined}
-       tabs={previewState.tabs.map(tab=>({id:tab.id,title:previewTitle(tab.target)}))} activeTab={previewState.activeId}
-       selectTab={id=>setPreviewState(old=>({...old,activeId:id}))} closeTab={closePreviewTab}
-       compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel||modelPoint)} close={closePreview}>
-       {previewState.tabs.map(({id,target})=><div key={id} id={`preview-panel-${id}`} aria-labelledby={`preview-tab-${id}`} className="preview-tab-panel" role="tabpanel" hidden={id!==previewState.activeId}>
-         {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel key={target.request} file={target.file} connected={connected} line={target.line} openFile={path=>void openFile(path,target.machineId,target.threadId)}
-           readFile={path=>call('file.read',{threadId:target.threadId,path},target.machineId)}
-           read={offset=>call('file.download',{threadId:target.threadId,path:target.file!.path,revision:target.file!.revision,offset},target.machineId)}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''),target.machineId,target.threadId)}>重试</button>}</div>)}
-         {target.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer text={target.text} compact={compactPreview}/></Suspense>}
-         {target.kind==='web'&&<WebViewer session={target.session} onEnd={closeBrowser}/>}
-         {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
-       </div>)}
-     </PreviewPane>}
+     {previewPane}
   </div>;
 }
 function MenuItem({icon,children,onClick,disabled=false}:{icon:IconName;children:ReactNode;onClick:()=>void;disabled?:boolean}){return <button className="menu-item" onClick={onClick} disabled={disabled}><Icon name={icon} size={21}/><span className="menu-copy">{children}</span></button>;}

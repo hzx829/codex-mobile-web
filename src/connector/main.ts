@@ -54,7 +54,7 @@ function connect() {
     try{
       if(m.action==='runtime.reload')chatgpt.prepareReload();
       if(control.updating&&(m.action==='antigravity.send'||m.action==='antigravity.stop'))throw new BridgeError('maintenance','连接器正在更新，请稍后重试');
-      const result=m.action==='preview.start'?browserPreview.start(m.payload?.url,m.payload?.threadId)
+      const result=m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
         :typeof m.action==='string'&&m.action.startsWith('chatgpt.')?await chatgpt.handle(m.action,m.payload)
         :typeof m.action==='string'&&m.action.startsWith('antigravity.')?await antigravity.handle(m.action,m.payload)

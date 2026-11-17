@@ -6,7 +6,22 @@ import {fileReference,localDocumentLink,fileViewer,samePreviewTarget} from '../w
 import {parseTaskDiff,diffCounts,diffTokens} from '../web/diff.js';
 import {DiffFileView} from '../web/diff-viewer.js';
 import {CodeViewer} from '../web/code-viewer.js';
+import {SafeMarkdown,markdownUrlTransform} from '../web/content.js';
 import {MarkdownViewer} from '../web/markdown-viewer.js';
+
+test('Antigravity prose and desktop artifact links use the shared Markdown renderer',()=>{
+  const path='file:///D:/project/%E6%8A%A5%E5%91%8A%20v2.pdf';
+  const text='### 审阅\n\n1. **文件**：[PDF]('+path+')、[幻灯片](file:///D:/slides/index.html)\n2. [远程文件](file://server/share/a.txt)';
+  const html=renderToStaticMarkup(createElement(SafeMarkdown,{text,allowFileUrls:true,openFile:()=>{},openPreview:()=>{},onFollowup:()=>{}}));
+  assert.match(html,/<h3>审阅<\/h3>/);assert.match(html,/<ol>/);assert.match(html,/<strong>文件<\/strong>/);
+  assert.equal(html.match(/class="inline-link"/g)?.length,2);
+  assert.doesNotMatch(html,/href="file:|file:\/\/server/);
+  assert.deepEqual(fileReference(markdownUrlTransform(path,'href',true)),{path:'D:/project/报告 v2.pdf'});
+  assert.equal(markdownUrlTransform('file:////server/share/file','href',true),'');
+  assert.equal(markdownUrlTransform('file:///%2fserver/share/file','href',true),'');
+  assert.equal(markdownUrlTransform('javascript:alert(1)','href',true),'');
+  assert.equal(fileViewer({path:'a',name:'slides.HTML',mime:'text/plain',revision:'x',size:2,text:'ok'}),'html');
+});
 
 test('file references preserve Windows paths, encoded spaces and source line locations',()=>{
   assert.deepEqual(fileReference('C:/work/My%20File.ts:12:3'),{path:'C:/work/My File.ts',line:12});

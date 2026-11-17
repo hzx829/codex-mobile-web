@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState} from 'react';
+import {useEffect,useRef,useState,type ReactNode} from 'react';
 import {MAX_DOWNLOAD_SIZE,type FilePreview,type FileChunk} from '../src/shared/types';
 import {receiveFile} from './file-download';
 import {fileViewer} from './preview-target';
@@ -6,7 +6,7 @@ import {CodeViewer} from './code-viewer';
 import {MarkdownViewer} from './markdown-viewer';
 import {PdfViewer} from './pdf-viewer';
 
-export function FilePreviewPanel({file,read,connected,line,openFile=()=>{},readFile}:{file:FilePreview;read:(offset:number)=>Promise<FileChunk>;connected:boolean;line?:number;openFile?:(path:string)=>void;readFile?:(path:string)=>Promise<FilePreview>}) {
+export function FilePreviewPanel({file,read,connected,line,openFile=()=>{},readFile,htmlPreview,openHtml,htmlError,allowFileUrls=false}:{allowFileUrls?:boolean;htmlPreview?:ReactNode;openHtml?:()=>void;htmlError?:string;file:FilePreview;read:(offset:number)=>Promise<FileChunk>;connected:boolean;line?:number;openFile?:(path:string)=>void;readFile?:(path:string)=>Promise<FilePreview>}) {
   const [bytes,setBytes]=useState(0),[busy,setBusy]=useState(false),[url,setUrl]=useState(''),[error,setError]=useState('');
   const [source,setSource]=useState(false),[zoom,setZoom]=useState(false);
   const [pdf,setPdf]=useState<Blob|null>(null);
@@ -38,7 +38,7 @@ export function FilePreviewPanel({file,read,connected,line,openFile=()=>{},readF
       <small>{file.size<1024?`${file.size} B`:file.size<1024*1024?`${(file.size/1024).toFixed(1)} KiB`:`${(file.size/1024/1024).toFixed(2)} MiB`}</small>
       {file.size>MAX_DOWNLOAD_SIZE?<p className="muted">预览与下载上限为 100 MiB，请在电脑获取此文件。</p>:url?<a className="primary" href={url} download={file.name}>保存到设备</a>:<button className="primary" disabled={busy||!connected} onClick={()=>void download()}>{busy?`正在接收 ${file.size?Math.floor(bytes/file.size*100):0}%`:kind==='pdf'?'打开 PDF':kind==='video'?'加载视频':'下载文件'}</button>}
       {busy&&<button onClick={()=>transfer.current?.abort()}>取消</button>}
-      {kind==='markdown'&&<button aria-pressed={source} onClick={()=>setSource(v=>!v)}>{source?'阅读':'查看原文'}</button>}
+      {(kind==='markdown'||kind==='html'&&file.text!==undefined)&&<button aria-pressed={source} onClick={()=>setSource(v=>!v)}>{source?'阅读':'查看原文'}</button>}
       {kind==='image'&&<button aria-pressed={zoom} onClick={()=>setZoom(v=>!v)}>{zoom?'适应宽度':'原始大小'}</button>}
     </div>
     {!connected&&<p className="preview-notice">电脑连接已断开，当前显示已接收的内容。</p>}
@@ -47,7 +47,8 @@ export function FilePreviewPanel({file,read,connected,line,openFile=()=>{},readF
     {kind==='pdf'&&pdf&&<PdfViewer blob={pdf}/>}
     {kind==='image'&&<div className={`image-viewer${zoom?' original':''}`}><img className="preview-image" src={`data:${file.mime};base64,${file.data}`} alt={file.name}/></div>}
     {kind==='video'&&url&&<div className="video-viewer"><video controls playsInline preload="metadata" src={url} onError={()=>setError('浏览器不支持该视频编码，请保存到设备打开。')}>浏览器无法播放此视频。</video></div>}
-    {kind==='markdown'&&!source&&<MarkdownViewer file={file} openFile={openFile} readFile={readFile}/>}
-    {(kind==='code'||kind==='markdown'&&source)&&<CodeViewer text={file.text!} name={file.name} line={line}/>}
+    {kind==='html'&&!source&&(htmlPreview||<div className="preview-empty">{htmlError&&<p role="alert">{htmlError}</p>}<button disabled={!connected} onClick={openHtml}>打开网页演示</button></div>)}
+    {kind==='markdown'&&!source&&<MarkdownViewer allowFileUrls={allowFileUrls} file={file} openFile={openFile} readFile={readFile}/>}
+    {(kind==='code'||(kind==='markdown'||kind==='html')&&source)&&<CodeViewer text={file.text!} name={file.name} line={line}/>}
   </>;
 }

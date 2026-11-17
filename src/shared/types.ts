@@ -1,5 +1,5 @@
 export type Json = Record<string, any>;
-export type AntigravityAction = `antigravity.${'list' | 'read' | 'watch' | 'send' | 'stop' | 'operation'}`;
+export type AntigravityAction = `antigravity.${'list' | 'read' | 'watch' | 'send' | 'stop' | 'operation' | 'file.read' | 'file.download'}`;
 export type RequestAction = AntigravityAction | 'chatgpt.status' | 'chatgpt.list' | 'chatgpt.read' | 'chatgpt.send' | 'chatgpt.stop' | 'chatgpt.operation' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }

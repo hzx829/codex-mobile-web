@@ -2,9 +2,19 @@ import {memo,useState} from 'react';
 import Markdown, {defaultUrlTransform} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type {Json} from '../src/shared/types';
+import {markdownFileUrl} from './preview-target';
 import {splitFollowups} from './followup';
 import {remarkFileCitations} from './file-citations';
 const windowsFilePath=/^[a-z]:(?:[\\/]|%5c|%2f)/i;
+export function markdownUrlTransform(url:string,key:string,allowFileUrls:boolean) {
+  if(key==='href'||key==='src'){
+    const file=markdownFileUrl(url);
+    if(file!==null)return allowFileUrls?file:'';
+    if(windowsFilePath.test(url))return url;
+    try{if(/^[\\/]{2}/.test(decodeURIComponent(url)))return '';}catch{return '';}
+  }
+  return defaultUrlTransform(url);
+}
 function localMediaPath(value:string|undefined) {
   if(!value)return false;
   let decoded=value;try{decoded=decodeURIComponent(value);}catch{}
@@ -17,8 +27,8 @@ function localPreviewLink(value:string) {
     return (url.protocol==='http:'||url.protocol==='https:')&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)&&!url.username&&!url.password?address:null;
   }catch{return null;}
 }
-export const SafeMarkdown=memo(function SafeMarkdown({text,openFile,openPreview,onFollowup}:{text:string;openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(prompt:string)=>void}){
-  return splitFollowups(text).map((part,index)=>part.kind==='followup'?<button className="followup" type="button" key={index} onClick={()=>onFollowup(part.prompt)}>{part.label} ↗</button>:<Markdown key={index} remarkPlugins={[remarkGfm,remarkFileCitations]} urlTransform={(url,key)=>(key==='href'||key==='src')&&windowsFilePath.test(url)?url:defaultUrlTransform(url)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
+export const SafeMarkdown=memo(function SafeMarkdown({text,openFile,openPreview,onFollowup,allowFileUrls=false}:{allowFileUrls?:boolean;text:string;openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(prompt:string)=>void}){
+  return splitFollowups(text).map((part,index)=>part.kind==='followup'?<button className="followup" type="button" key={index} onClick={()=>onFollowup(part.prompt)}>{part.label} ↗</button>:<Markdown key={index} remarkPlugins={[remarkGfm,remarkFileCitations]} urlTransform={(url,key)=>markdownUrlTransform(url,key,allowFileUrls)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
     if(!href)return <span>{children}</span>;
     const previewUrl=localPreviewLink(href);
     if(previewUrl)return <button className="inline-link" type="button" onClick={()=>openPreview(previewUrl)}>{children} · 打开预览</button>;

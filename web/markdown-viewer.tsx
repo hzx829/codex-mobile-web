@@ -1,5 +1,6 @@
 import {useEffect,useRef,useState} from 'react';
-import Markdown,{defaultUrlTransform} from 'react-markdown';
+import Markdown from 'react-markdown';
+import {markdownUrlTransform} from './content';
 import remarkGfm from 'remark-gfm';
 import type {FilePreview} from '../src/shared/types';
 import {localDocumentLink} from './preview-target';
@@ -11,9 +12,9 @@ function LocalImage({path,alt,readFile}:{path:string;alt:string;readFile:(path:s
   return file?<img src={`data:${file.mime};base64,${file.data}`} alt={alt}/>:<span className="muted">[{alt||'图片'}：{error||'加载中…'}]</span>;
 }
 
-export function MarkdownViewer({file,openFile,readFile}:{file:FilePreview;openFile:(path:string)=>void;readFile?:(path:string)=>Promise<FilePreview>}){
+export function MarkdownViewer({file,openFile,readFile,allowFileUrls=false}:{allowFileUrls?:boolean;file:FilePreview;openFile:(path:string)=>void;readFile?:(path:string)=>Promise<FilePreview>}){
   return <article className="document-markdown"><Markdown remarkPlugins={[remarkGfm]} skipHtml
-    urlTransform={(url,key)=>/^[a-z]:(?:[\\/]|%5c|%2f)/i.test(url)&&(key==='href'||key==='src')?url:defaultUrlTransform(url)}
+    urlTransform={(url,key)=>markdownUrlTransform(url,key,allowFileUrls)}
     components={{
       a:({href,children})=>{
         if(!href)return <span>{children}</span>;

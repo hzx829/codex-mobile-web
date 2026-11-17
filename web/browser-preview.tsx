@@ -1,6 +1,6 @@
 import {useState} from 'react';
 
-export type PreviewSession={sessionId:string;url:string;ticket:string;previewPort:number;machineId:string;threadId:string};
+export type PreviewSession={sessionId:string;url:string;ticket:string;previewPort:number;machineId:string;threadId:string;filePath?:string};
 
 export function previewLink(session:PreviewSession):string {
   const url=new URL(location.href);

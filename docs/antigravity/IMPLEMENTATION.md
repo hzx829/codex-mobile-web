@@ -4,16 +4,18 @@
 
 ## 已集成到 codex-mobile-web 的部分
 
-首页和对话页共用 **Codex / ChatGPT / Antigravity** 三个按钮，切换保留当前电脑，并在当前浏览器标签页按电脑恢复各应用上次打开的会话。旧版 ChatGPT 导航状态继续有效。更新时需同时使用新网页和新连接器，Antigravity 使用现有中继及 Token。
+手机只在各应用首页显示 **Codex / ChatGPT / Antigravity** 三个按钮，切换保留当前电脑，并在当前浏览器标签页按电脑恢复各应用上次打开的会话。旧版 ChatGPT 导航状态继续有效。更新时需同时使用新网页和新连接器，Antigravity 使用现有中继及 Token。
 
 当前实现从桌面 SQLite 摘要索引列出已有对话，从 `brain/<会话 ID>/.system_generated/logs/transcript.jsonl` 读取已记录的文字和工具名称。打开的会话用长轮询接收变化；最近 1 MiB 内最多展示 100 项。写入端验证本机 TLS 连接的进程归属后，通过 Hub 提交文字或请求停止此会话当前任务。遇到不确定的回执可回查，不自动重发。安装路径当前按 Windows 默认用户安装位置验证。以下的原生进度订阅、新建会话及审批属于后续实施项。真机的收发、停止与时延由人按第 4 节验收。[前端切换](../../web/service-switch.tsx) · [连接器](../../src/connector/antigravity.ts)
+
+回复使用 Codex 的 Markdown 排版。点击 `file:///` 链接时，手机向当前电脑和 Antigravity 会话请求文件。相对路径按会话唯一工作区解析。PDF 使用同一阅读器，PPTX 可保存到设备。HTML 在中继独立预览端口运行，连接器按需提供选中的页面及其目录下的图片、样式、字体和脚本。手机可直接打开带相对图片的演示文稿。人工验收可在同一条会话中分别点 PDF 和 HTML，检查 PDF 页码、演示图片与翻页，再返回列表切换应用。
 
 ## 1 · 先接上一条原生对话
 
 从 `%LOCALAPPDATA%\Programs\antigravity\resources\bin\language_server.exe` 和桌面 App 建立版本基线。本次静态核对的 `language_server.exe` SHA-256 以 `65CDB8D132FC6105` 开头。安装包内 `third_party/jetski/language_server_pb/language_server.proto`、`cortex_pb/cortex.proto`、`reactive_component_pb/reactive_component.proto` 的嵌入描述符可用于复核服务、请求字段、响应及流方向；记录结果时只需版本、方法与字段，不需要真实对话内容。
 
 1. **找对进程。** 连接器在当前 Windows 用户目录枚举 `~/.gemini/antigravity/daemon/hub_*.json`，核对 PID 的程序路径、桌面 Hub 启动参数和监听端口的所属 PID。本机已有多份失效记录。只连接核对过的回环端点；localhost 请求直连，不经系统上游代理。使用 HTTPS 时将本机证书校验策略限定到该端点，外部 WSS 始终正常验证证书。Hub 重启或发生歧义时重新发现，不能把旧 CSRF 发给接手同一端口的程序。
-2. **取得项目和 ID。** 先用已核对的本地 Hub 读会话摘要。项目映射优先用 Hub 数据；必要时只读 `~/.gemini/config/projects/*.json` 的 ID、名称和 `folderUri`。处理空资源、多个根目录、中文/空格、同名项目。打开会话后用真实 `cascade_id` 取元数据和最近步骤，不允许手机传原始端口、方法名或文件路径。
+2. **取得项目和 ID。** 先用已核对的本地 Hub 读会话摘要。项目映射优先用 Hub 数据；必要时只读 `~/.gemini/config/projects/*.json` 的 ID、名称和 `folderUri`。处理空资源、多个根目录、中文/空格、同名项目。打开会话后用真实 `cascade_id` 取元数据和最近步骤，手机请求 Hub 时只传已定义的动作和参数。
 3. **弄清一条增量。** 用 2.32.1 描述符构造订阅，核实组件 `id` 的实际取值、`protocol_version`、订阅者生命周期、首帧和后续 diff。社区旧版提供过 `application/connect+json` 与本机 CSRF header 的实现，可作为线索。流帧需要处理拆包、多个消息、结束和错误。只有协议基线明确才应用 diff；基线不明时把通知当作“需要刷新”，在**电脑本地**补读当前会话的尾段。流不可用仍可在打开页面期间用本地有界轮询，空闲时退避。[社区固定版本](https://github.com/figaro-develop/antigravity-remote-backend/blob/fdc990eec61c878f30fe598027e1e4c13cac29b5/src/agentapi/cascadeStream.ts)
 4. **核实写入。** 在专用测试项目里先选一条空闲桌面对话，由人从手机发一条可辨认的文字，桌面应在同一个原生 ID 中出现且只出现一次。分别记录“本机接口响应”“原生历史出现用户消息”“助手首段出现”。`SendUserCascadeMessage` 的成功响应可以为空，模型回答也可能很晚才到。
 5. **再测每一种控制。** 在测试任务中核对新建时的项目/工作区、审批允许和拒绝、过期审批、运行中发送和停止。能力按动作分别启用。若某类审批尚未解码，可提示用户回电脑处理并继续显示其他已验证动作。不能用新建 CLI 会话代替对原桌面任务的核实。
