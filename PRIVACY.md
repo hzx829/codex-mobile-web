@@ -10,6 +10,8 @@ Reviewed against version 0.1.3 on 2026-09-27. This describes the bridge implemen
 
 Uploaded documents remain in the current project's `.codex-mobile-attachments/` directory for later turns. They are not deleted automatically; remove them when no longer needed. Pending selections stay in browser memory. Partial uploads also remain on disk for retries. Queued messages store file references; the connector ledger retains upload IDs, filenames, sizes, project paths and conversation IDs.
 
+The Antigravity panel uses the same shared Token. It forwards desktop conversation titles, displayed messages, tool names and requested actions through the relay. The Windows connector reads the local Antigravity index and transcript files. The Hub CSRF token stays on the computer.
+
 ### Who you trust
 
 This is a single-user remote-control application. Trust the devices holding the shared Token, the OS account running the connector, and the operators of your relay and HTTPS proxy.
@@ -79,6 +81,8 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 <a id="简体中文"></a>
 
 ## 简体中文
+
+Antigravity 面板沿用共享 Token。中继可读取转发的桌面对话标题、已展示的消息、工具名和操作。Windows 连接器在本机读取索引与对话记录，连接桌面 Hub 的 CSRF Token 仅在电脑使用。
 
 上传的普通文件保存在当前项目的 `.codex-mobile-attachments/` 目录，供后续对话继续读取，不会自动删除；不再需要时可手动清理。未发送的选择保留在浏览器内存，未完成的上传也保留在磁盘以便续传。队列只保存文件引用；连接器数据库会保留上传标识、文件名、大小、项目路径和会话 ID。
 

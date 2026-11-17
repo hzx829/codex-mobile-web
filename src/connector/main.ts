@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { readConfig } from '../shared/config.js';
@@ -10,13 +10,16 @@ import { Ledger } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
 import { ChatGPTBridge } from './chatgpt.js';
+import { AntigravityBridge } from './antigravity.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
 if(config.codexHome)process.env.CODEX_HOME=config.codexHome;
 if(config.profile)process.env.CODEX_PROFILE=config.profile;
 mkdirSync(config.dataDir,{recursive:true});
-const control=new Control(new Ledger(join(config.dataDir,'operations.sqlite')));
+const ledger=new Ledger(join(config.dataDir,'operations.sqlite'));
+const control=new Control(ledger);
+const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
 const chatgpt=new ChatGPTBridge(config.dataDir,config.chatgptPort||3342);
@@ -50,9 +53,11 @@ function connect() {
     if(m.type!=='request')return;
     try{
       if(m.action==='runtime.reload')chatgpt.prepareReload();
+      if(control.updating&&(m.action==='antigravity.send'||m.action==='antigravity.stop'))throw new BridgeError('maintenance','连接器正在更新，请稍后重试');
       const result=m.action==='preview.start'?browserPreview.start(m.payload?.url,m.payload?.threadId)
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
         :typeof m.action==='string'&&m.action.startsWith('chatgpt.')?await chatgpt.handle(m.action,m.payload)
+        :typeof m.action==='string'&&m.action.startsWith('antigravity.')?await antigravity.handle(m.action,m.payload)
         :await control.handle(m as any);
       if(socket===ws)send({type:'response',id:m.id,result});
     }

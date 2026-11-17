@@ -1,7 +1,8 @@
 import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,useState,type ReactNode,type ClipboardEvent} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
-import {ChatGPTPanel} from './chatgpt';
+import {RemoteChatPanel} from './chatgpt';
+import {ServiceSwitch, serviceOf, switchRoute, type Service} from './service-switch';
 import {Icon,type IconName} from './icons';
 import {IconButton} from './icon-button';
 import {ConversationTurn} from './conversation';
@@ -52,8 +53,12 @@ function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
-  const {thread:selected,project,newChat}=route,showThread=Boolean(selected||newChat);
-  const threadMounted=showThread&&Boolean(token)&&status!=='auth_error';
+  const service=serviceOf(route),codexActive=service==='codex';
+  const lastCodex=useRef({machine,route:home});
+  if(codexActive)lastCodex.current={machine,route};
+  const codexRoute=codexActive?route:lastCodex.current.machine===machine?lastCodex.current.route:home;
+  const {thread:selected,project,newChat}=codexRoute,showThread=Boolean(selected||newChat);
+  const threadMounted=codexActive&&showThread&&Boolean(token)&&status!=='auth_error';
   const [info,setInfo]=useState<Json|null>(null),[projects,setProjects]=useState<string[]>([]),[sessions,setSessions]=useState<Json[]>([]);
   const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
   const [view,setView]=useState<SessionView|null>(null),[loading,setLoading]=useState(false),[loadingOlder,setLoadingOlder]=useState(false),[historyError,setHistoryError]=useState('');
@@ -79,14 +84,14 @@ function App(){
   const fileSequence=useRef(0),browserSequence=useRef(0);
   const [browserUrl,setBrowserUrl]=useState(defaultPreviewUrl),[browserRequest,setBrowserRequest]=useState<number|null>(null),[browserState,setBrowserSession]=useState<PreviewSession|null>(null);
   const browserBusy=browserRequest!==null,browserSession=belongsToThread(browserState,machine,selected)?browserState:null;
-  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
+  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived,service}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),timelineContent=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null),submitting=useRef(false);
   const scrollAnchor=useRef<{element:HTMLElement;top:number}|null>(null),lastScrollTop=useRef(0),olderRequest=useRef<object|null>(null);
-  current.current={machine,selected,project,newChat,searchQuery,archived};
+  current.current={machine,selected,project,newChat,searchQuery,archived,service};
   const connected=status==='online'&&machines.some(m=>m.id===machine),machineName=machines.find(m=>m.id===machine)?.name||'电脑';
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
   const call=(action:RequestAction,payload:Json={},target=machine)=>client.current!.request(action,payload,target);
-  const stillHere=()=>current.current.machine===machine&&current.current.selected===selected;
+  const stillHere=()=>current.current.service==='codex'&&current.current.machine===machine&&current.current.selected===selected;
   function closePreview(){browserSequence.current++;setPreviewState({tabs:[],activeId:null});}
   function showPreview(next:PreviewTarget){
     const id=++previewIds.current;
@@ -111,7 +116,7 @@ function App(){
   useEffect(()=>{history.replaceState({cmwRoute:route,cmwMachine:machine},'',location.pathname);rememberLocation(route,machine);},[machine]);
   async function refreshSession(){
     if(refreshing.current){again.current=true;return;}
-    const c={...current.current};if(!c.machine||!c.selected||!client.current?.ready)return;
+    const c={...current.current};if(c.service!=='codex'||!c.machine||!c.selected||!client.current?.ready)return;
     const seq=sequence.current,previous=viewRef.current;refreshing.current=true;
     try{const snapshot=await call('session.read',{threadId:c.selected,limit:HISTORY_PAGE_SIZE,known:previous?.id===c.selected?knownSnapshot(previous):undefined},c.machine);if(seq===sequence.current&&c.machine===current.current.machine&&c.selected===current.current.selected){const next=restoreSnapshot(previous,snapshot);startTransition(()=>{setView(old=>refreshHistory(old,next));setLoading(false);});}}
     catch(e){if(seq===sequence.current){fail(e);setLoading(false);}}
@@ -134,7 +139,7 @@ function App(){
   function scheduleRefresh(){if(refreshTimer.current||document.visibilityState!=='visible')return;refreshTimer.current=setTimeout(()=>{refreshTimer.current=undefined;void refreshSession();},250);}
   async function list(append=false,refresh=false){
     const c={...current.current};
-    const key=(value:typeof c)=>JSON.stringify([value.machine,value.project,value.searchQuery,value.archived]);
+    const key=(value:typeof c)=>JSON.stringify([value.service,value.machine,value.project,value.searchQuery,value.archived]);
     const here=()=>key(c)===key(current.current);
     await listLoader.current.load(key(c),()=>call('sessions.list',{cwd:c.project||undefined,search:c.searchQuery||undefined,archived:c.archived,cursor:append?cursor:undefined,refresh},c.machine),{
       start:()=>setListBusy(true),
@@ -157,12 +162,12 @@ function App(){
   });
   const voiceBusy=voice.state!=='idle',voiceLabel=voiceMode==='codex'?'Codex 识别':'系统键盘';
   function refreshInfo(){
-    if(!connected)return;const seq=++infoSequence.current;
+    const seq=++infoSequence.current;if(!connected||!codexActive)return;
     call('info',{cwd:effectiveCwd||undefined}).then(r=>{if(seq!==infoSequence.current)return;setInfo(r);setProjects(old=>[...new Set<string>([...r.roots,...old])]);setNewCwd(old=>old||r.roots[0]||'');}).catch(e=>{if(seq===infoSequence.current)fail(e);});
   }
-  useEffect(refreshInfo,[connected,machine,effectiveCwd]);
+  useEffect(refreshInfo,[connected,machine,effectiveCwd,codexActive]);
   useEffect(()=>{const timer=setTimeout(()=>setSearchQuery(search.trim()),250);return()=>clearTimeout(timer);},[search]);
-  useEffect(()=>{if(connected)void list();},[connected,machine,project,searchQuery,archived]);
+  useEffect(()=>{if(connected&&codexActive)void list();},[connected,machine,project,searchQuery,archived,codexActive]);
   useEffect(()=>{
     if(!token)return;
     const c=new Client(token,m=>{
@@ -191,7 +196,7 @@ function App(){
     window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',hidden);
     return()=>{flush();window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',hidden);};
   },[]);
-  useEffect(()=>{void refreshSession();},[connected]);
+  useEffect(()=>{void refreshSession();},[connected,codexActive]);
   useEffect(()=>{
     const viewport=window.visualViewport;if(!viewport)return;
     const resize=()=>{if(viewport.scale!==1)return;document.documentElement.style.setProperty('--viewport-height',`${viewport.height}px`);document.documentElement.style.setProperty('--viewport-top',`${viewport.offsetTop}px`);};
@@ -211,12 +216,12 @@ function App(){
   useEffect(()=>{const el=composer.current;if(!el)return;let width=el.clientWidth;const observer=new ResizeObserver(()=>{if(width!==el.clientWidth){width=el.clientWidth;resizeComposer();}});observer.observe(el);return()=>observer.disconnect();},[threadMounted]);
   useEffect(()=>{setPreviewState(old=>{let changed=false;const tabs=old.tabs.flatMap(tab=>{if(tab.target.kind!=='image')return [tab];const index=images.indexOf(tab.target.url);if(index<0){changed=true;return [];}const title=`待发送图片 ${index+1}/${images.length}`;if(title!==tab.target.title){changed=true;return [{...tab,target:{...tab.target,title}}];}return [tab];});if(!changed)return old;return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});},[images]);
   useEffect(()=>{
-    if(!connected)return;
+    if(!connected||!codexActive)return;
     const foreground=()=>{if(document.visibilityState!=='visible')return;if(current.current.selected)void refreshSession();else void list();};
     const timer=setInterval(foreground,5000);document.addEventListener('visibilitychange',foreground);
     return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',foreground);};
-  },[connected,project,searchQuery,archived]);
-  useEffect(()=>{if(connected&&pending&&!busy)void checkPending();},[connected,pending?.opId,busy]);
+  },[connected,project,searchQuery,archived,codexActive]);
+  useEffect(()=>{if(codexActive&&connected&&pending&&!busy)void checkPending();},[connected,pending?.opId,busy,codexActive]);
   useEffect(()=>{if(!notice||pending)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice,pending]);
   function editDraft(value:string){setDraft(value);draftSave.current.write(draftKey,value);}
   function insertFollowup(prompt:string){if(!draft.trimEnd().endsWith(prompt))editDraft(draft.trim()?`${draft.trimEnd()}\n\n${prompt}`:prompt);setNotice('已填入输入框，确认后发送。');composer.current?.focus();}
@@ -410,13 +415,19 @@ function App(){
   const conversation=useMemo(()=>view?.turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={Boolean(view.running)} source={view.source} latestUser={turn.id===latestUserTurn} disabled={!connected||busy||Boolean(pending)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} onFollowup={markdownFollowup} onCopy={conversationCopy} onEdit={conversationEdit} onFork={conversationFork} onDiff={conversationDiff} onBlocked={setNotice}/>),[view?.turns,view?.running,view?.source,latestUserTurn,connected,busy,Boolean(pending),markdownOpenFile,markdownOpenPreview,markdownFollowup,conversationCopy,conversationEdit,conversationFork,conversationDiff]);
   const feedback=<>{error&&<div className="feedback error" role="alert"><span>{error}</span><IconButton icon="close" label="关闭提示" onClick={()=>setError('')}/></div>}{notice&&<div className="feedback" role="status">{notice}</div>}{pending&&!busy&&<div className="pending"><button onClick={()=>void checkPending()}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先查看最新任务，确认这次操作的实际结果。清除提示不会重发旧操作。')){setOperation(null);setNotice('');}}}>我已核实</button></div>}</>;
 
-  if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>在手机上继续使用 Codex。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
-  if(route.chat!==undefined)return <ChatGPTPanel key={`${machine}:${route.chat}`} machine={machine} connected={connected} conversationId={route.chat} call={call} go={chat=>navigate({...home,chat})} back={()=>navigate(home)}/>;
+  if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>通过自部署中继继续电脑上的对话。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
+  const selectService=(next:Service)=>navigate(switchRoute(machine,route,next));
+  const switcher=<ServiceSwitch active={service} disabled={busy||voiceBusy||imageLoading} select={selectService}/>;
+  if(service!=='codex'){
+    const field=service==='chatgpt'?'chat':'antigravity';
+    return <RemoteChatPanel key={JSON.stringify([machine,service,route[field],connected])} service={service} machine={machine} connected={connected}
+      conversationId={route[field]||''} call={call} go={id=>navigate({...home,[field]:id})} back={()=>selectService('codex')} switcher={switcher}/>;
+  }
   return <div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>
        <header className="home-header">{project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={busy} onClick={backToProjects}/><h1>{projectName(project)}</h1></>:<button className="home-identity" aria-label="选择电脑" onClick={()=>setSheet('computer')}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</span></button>}<IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
+      {switcher}
       <div className="home-content">
-        <button className="project-row" onClick={()=>navigate({...home,chat:''})}><Icon name="chat"/><span>ChatGPT 聊天</span></button>
         {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
         <section className="recent-section">{!listedThreads.length&&<h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2>}{groupThreads(listedThreads,preferences,searchQuery?'搜索结果':archived?'归档会话':'最近').map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]} time={relativeTime(s.updatedAt)} open={()=>{changePreference(s.id,{unread:false});navigate({...route,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
           {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}
@@ -428,6 +439,7 @@ function App(){
 
     <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
        <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={backToSessions}/><button className="thread-title" onClick={e=>newChat?setSheet('projects'):openStatus(e.currentTarget)}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button></div></header>
+       <div className="mobile-service-switch">{switcher}</div>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
       {!connected&&<div className="banner">连接已断开，电脑上的任务会继续。</div>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}

@@ -6,6 +6,8 @@ Continue using Codex on your computer from your phone, through a relay you host.
 
 Browse projects and conversations, send instructions, steer or stop a running task, and respond to Codex approvals from a mobile browser. Execution stays on your computer, with its existing workspace, model configuration, and tools. No mobile app or project-operated account service is required.
 
+Use **Codex / ChatGPT / Antigravity** to switch apps on the same computer and self-hosted relay. Returning to an app restores its conversation. The ChatGPT panel connects to your browser extension. The Antigravity panel reads existing Windows desktop conversations and can submit text or request a stop. Its Hub adapter targets App 2.32.1 and still needs live desktop acceptance. Update both the web assets and Windows connector. [ChatGPT setup](CHATGPT.md) · [Antigravity implementation](docs/antigravity/IMPLEMENTATION.md)
+
 ## Features
 
 - Discover existing projects and conversations, including archived conversations.

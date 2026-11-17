@@ -36,6 +36,7 @@ export class Control extends EventEmitter {
   private contexts=new Map<string,ContextUsage|null>();
   private locks=new Map<string,Promise<unknown>>();
   private reloading=false;
+  get updating(){return this.reloading;}
   private reloadLease?:NodeJS.Timeout;
   private queueTimer:NodeJS.Timeout;
   private draining=false;
