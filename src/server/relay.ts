@@ -18,15 +18,15 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
     let frameOrigin="'none'";
     try{const origin=new URL(`${req.headers['x-forwarded-proto']==='https'?'https':'http'}://${req.headers.host}`);origin.port=String((preview.server.address() as any)?.port||previewPort);frameOrigin=origin.origin;}catch{}
-    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-src ${frameOrigin}; frame-ancestors 'none'; object-src 'none'; base-uri 'none'`);
+    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; font-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-src ${frameOrigin}; frame-ancestors 'none'; object-src 'none'; base-uri 'none'`);
     if(req.url==='/health'){res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');return;}
     try {
       const pathname=decodeURIComponent(new URL(req.url||'/', 'http://localhost').pathname);
       const file=resolve(staticDir,'.'+(pathname==='/'?'/index.html':pathname));
       if(!file.startsWith(resolve(staticDir)+sep))throw Error();
       if(!(await stat(file)).isFile())throw Error();
-      const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.json':'application/json','.webmanifest':'application/manifest+json','.png':'image/png'};
-      const asset=/^\/assets\/[\w.-]+-[\w-]{8,}\.(js|css)$/.test(pathname);
+      const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.wasm':'application/wasm','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.json':'application/json','.webmanifest':'application/manifest+json','.png':'image/png'};
+      const asset=/^\/assets\/[\w.-]+-[\w-]{8,}\.(m?js|css)$/.test(pathname);
       let body=await readFile(file);
       if(asset){
         res.setHeader('Cache-Control','public, max-age=31536000, immutable');res.setHeader('Vary','Accept-Encoding');
@@ -76,7 +76,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       }
       if(p.role==='phone'&&m.type==='request') {
         if(typeof m.id!=='string'||m.id.length>100||typeof m.action!=='string'||!m.payload||typeof m.payload!=='object'){ws.close(4400);return;}
-        if(m.action==='voice.transcribe'||m.action==='turn.send'&&Array.isArray(m.payload.images)&&m.payload.images.length)send(ws,{type:'received',id:m.id});
+        if(m.action==='voice.transcribe'||m.action==='file.uploadChunk'||m.action==='turn.send'&&(m.payload.images?.length||m.payload.files?.length))send(ws,{type:'received',id:m.id});
         if(m.action==='preview.start'||m.action==='preview.stop')try{
           m.payload.threadId=textRequired(m.payload.threadId,'会话');
           if(m.action==='preview.stop')m.payload.sessionId=textRequired(m.payload.sessionId,'预览会话');

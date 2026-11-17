@@ -126,3 +126,21 @@ test('video files expose playable metadata and transfer through the existing chu
     }
   }finally{await removeTestTemp(dir);}
 });
+
+test('PDFs bypass the text preview limit and use the existing validated download protocol',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'cmw-pdf-'));
+  try{
+    const name='中文 sales.PDF',data=Buffer.concat([Buffer.from('%PDF-1.7\n'),Buffer.alloc(2*1024*1024+17,0x20)]);
+    await writeFile(join(dir,name),data);
+    const file=await readProjectFile(dir,name);
+    assert.equal(file.mime,'application/pdf');assert.equal(fileViewer(file),'pdf');
+    assert.equal(file.text,undefined);assert.equal(file.data,undefined);assert.equal(file.notice,undefined);
+    assert.equal(fileViewer({...file,mime:'application/octet-stream',notice:'此类文件不支持预览'}),'pdf');
+    const html=renderToStaticMarkup(createElement(FilePreviewPanel,{file,connected:true,read:async()=>{throw Error('SSR must not transfer files');}}));
+    assert.match(html,/打开 PDF/);assert.doesNotMatch(html,/不支持预览|<iframe|<object/);
+    const blob=await receiveFile(file,offset=>downloadProjectFile(dir,name,file.revision,offset),new AbortController().signal);
+    assert.deepEqual(Buffer.from(await blob.arrayBuffer()),data);
+    const large=renderToStaticMarkup(createElement(FilePreviewPanel,{file:{...file,size:MAX_DOWNLOAD_SIZE+1},connected:true,read:async()=>{throw Error('must not transfer');}}));
+    assert.match(large,/100 MiB/);assert.doesNotMatch(large,/打开 PDF/);
+  }finally{await removeTestTemp(dir);}
+});

@@ -13,17 +13,20 @@ import {Ledger} from '../src/connector/ledger.js';
 import {indexedSessions} from '../src/connector/projects.js';
 import {BridgeError,type Json} from '../src/shared/types.js';
 import {submitTurn,editTurn} from '../web/turn-request.js';
+import {uploadAttachments} from '../web/file-upload.js';
 import {fastTier} from '../src/shared/models.js';
 const dir=await mkdtemp(join(tmpdir(),'cmw-native-')),home=join(dir,'codex'),project=join(dir,'project');await mkdir(home);await mkdir(project);
 const localConfig=JSON.parse(await readFile('.local/config.json','utf8').catch(()=>'{}'));
 const nativeBin=resolveCodex(process.env.CODEX_BIN||localConfig.codexBin);
 const queuedText='Queued normal-speed response.';
 const fixtureKey=randomUUID();let receivedModel='',receivedEffort='',receivedServiceTier:string|null=null,queuedRequests=0,receivedAuth=false,hang=false,onRequest:(()=>void)|undefined;
+let receivedUserText='';
 const api=createServer(async(req,res)=>{
   const chunks=[];for await(const chunk of req)chunks.push(chunk);let body:any={};try{body=JSON.parse(Buffer.concat(chunks).toString());}catch{}
   receivedModel=body.model||'';receivedAuth=req.headers.authorization===`Bearer ${fixtureKey}`;
   receivedEffort=body.reasoning?.effort||'';
   receivedServiceTier=body.service_tier??null;
+  receivedUserText=(body.input||[]).filter((item:Json)=>item.role==='user').at(-1)?.content?.filter((part:Json)=>part.type==='input_text').map((part:Json)=>part.text).join('\n')||'';
   // Steer may restart inference in the same turn; count only requests containing the queued input.
   if(body.input?.some((item:Json)=>item.role==='user'&&item.content?.some((part:Json)=>part.type==='input_text'&&part.text===queuedText)))queuedRequests++;
   const id=`resp_${randomUUID()}`,item={id:`msg_${randomUUID()}`,type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'FIXTURE_OK',annotations:[]}]};
@@ -65,7 +68,10 @@ try{
   const managed=await control.handle({id:'create',action:'session.create',payload:{cwd:project,opId:`${Date.now()}:${randomUUID()}`}});assert.equal(managed.state,'accepted');
   const view=await control.read(managed.threadId);assert.equal(view.canControl,true);assert.equal(view.turns.length,0);assert.equal(view.model,'mobile-fixture');
   const managedDone=event('turn/completed',p=>p.threadId===managed.threadId);
-  const submitted=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},'Return fixture response.',[],{model:'gpt-6-astra',effort:'high',approvalPolicy:''});assert.equal(submitted.state,'accepted');await managedDone;
+  const attachment=new File(['%PDF-1.7\nfixture'],'fixture.pdf');
+  const files=await uploadAttachments(call,view.id,[{id:randomUUID(),name:attachment.name,size:attachment.size,file:attachment}]);
+  const submitted=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},'Return fixture response.',[],{model:'gpt-6-astra',effort:'high',approvalPolicy:''},'steer',files);assert.equal(submitted.state,'accepted');await managedDone;
+  assert.match(receivedUserText,/fixture\.pdf/);assert.match(receivedUserText,/\.codex-mobile-attachments/);
   assert.equal(receivedModel,'gpt-6-astra');assert.equal(receivedEffort,'high');
   const final=await control.read(view.id);assert.equal(final.activeTurnId,null);assert.equal(final.canControl,true);
   const original=final.turns.at(-1)!,message=original.items.find(item=>item.role==='user')!;

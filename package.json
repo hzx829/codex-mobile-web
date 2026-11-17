@@ -32,6 +32,7 @@
     "test:relay-package": "tsx scripts/relay-package-check.ts"
   },
   "dependencies": {
+    "pdfjs-dist": "6.5.438",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-diff-view": "^3.3.3",

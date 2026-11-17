@@ -1,6 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { BridgeError, type Json } from '../shared/types.js';
+import type {FileAttachment} from '../shared/attachments.js';
+
+export type UploadRecord=FileAttachment&{threadId:string;cwd:string};
 
 function canonical(v: any): string {
   if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';
@@ -15,6 +18,7 @@ export class Ledger {
     this.db.exec(`PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, hash TEXT NOT NULL, state TEXT NOT NULL, result TEXT, updated INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS managed (id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS file_uploads (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, cwd TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS queued_messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, thread_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, error TEXT);
       UPDATE queued_messages SET state='uncertain', error='连接器在发送时重启，请核实会话；不会自动重发' WHERE state='sending';
       UPDATE operations SET state='uncertain', result=json_object('error',json_object('code','interrupted','message','连接器在发送时重启，请核实会话；不会自动重发')) WHERE id IN (SELECT id FROM queued_messages WHERE state='uncertain');
@@ -26,6 +30,8 @@ export class Ledger {
     return row?{state:row.state,...(row.result?JSON.parse(String(row.result)): {})}:{state:'unknown'};
   }
   owns(id:string){return Boolean(this.db.prepare('SELECT id FROM managed WHERE id=?').get(id));}
+  upload(id:string):UploadRecord|undefined {return this.db.prepare('SELECT id, thread_id AS threadId, cwd, name, size FROM file_uploads WHERE id=?').get(id) as UploadRecord|undefined;}
+  addUpload(file:UploadRecord){this.db.prepare('INSERT INTO file_uploads VALUES (?,?,?,?,?)').run(file.id,file.threadId,file.cwd,file.name,file.size);}
   claim(id:string){this.db.prepare('INSERT OR IGNORE INTO managed VALUES (?)').run(id);}
   queued(threadId?:string):Json[] {
     const rows=threadId===undefined?this.db.prepare('SELECT * FROM queued_messages ORDER BY seq').all():this.db.prepare('SELECT * FROM queued_messages WHERE thread_id=? ORDER BY seq').all(threadId);

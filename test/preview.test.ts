@@ -55,7 +55,7 @@ test('file markdown renders GFM without executing HTML or interpreting chat dire
   const html=renderToStaticMarkup(createElement(MarkdownViewer,{file,openFile:()=>{}}));
   assert.match(html,/<h1>Heading<\/h1>/);assert.match(html,/<table>/);assert.match(html,/class="inline-link"/);
   assert.doesNotMatch(html,/<script|<img|class="followup"/);assert.match(html,/follow-up/);
-  assert.equal(fileViewer(file),'markdown');assert.equal(fileViewer({...file,name:'slides.pptx',text:undefined}),'unsupported');assert.equal(fileViewer({...file,name:'report.pdf',text:undefined}),'unsupported');
+  assert.equal(fileViewer(file),'markdown');assert.equal(fileViewer({...file,name:'slides.pptx',text:undefined}),'unsupported');assert.equal(fileViewer({...file,name:'report.pdf',text:undefined}),'pdf');
   const code=renderToStaticMarkup(createElement(CodeViewer,{text:'const html = "<script>alert(1)</script>";',name:'example.ts',line:1}));
   assert.match(code,/token keyword/);assert.doesNotMatch(code,/<script>/);assert.match(code,/selected-line/);
 });

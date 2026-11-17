@@ -44,8 +44,8 @@ export class Client {
     if(!this.ready)return Promise.reject({code:'offline',message:'电脑尚未连接'});
     return new Promise((resolve,reject)=>{
       // The timer starts before the browser finishes sending the WebSocket frame.
-      // Image data can spend much of the ordinary 45 seconds on a slow uplink.
-      const timeout=action==='voice.transcribe'||action==='turn.send'&&Array.isArray(payload.images)&&payload.images.length?240_000:45_000;
+      // Attachments can spend much of the ordinary 45 seconds on a slow uplink.
+      const timeout=action==='voice.transcribe'||action==='file.uploadChunk'||action==='turn.send'&&(payload.images?.length||payload.files?.length)?240_000:45_000;
       const id=uuid();const timer=setTimeout(()=>{this.pending.delete(id);reject({code:'timeout',message:'回执超时，请核实操作结果',uncertain:true});},timeout);
       this.pending.set(id,{resolve,reject,timer,receiptTimeout:action==='voice.transcribe'?VOICE_REQUEST_TIMEOUT_MS+5000:45_000});
       try{this.ws!.send(JSON.stringify({type:'request',id,machineId,action,payload}));}

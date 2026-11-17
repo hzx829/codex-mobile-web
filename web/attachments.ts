@@ -1,4 +1,29 @@
 import {imageDataUrl,sourceImageDataUrl,validateImages,MAX_IMAGES,MAX_IMAGE_BYTES,MAX_IMAGE_INPUT_BYTES,MAX_TOTAL_IMAGE_BYTES} from '../src/shared/images';
+import {fileAttachment,validateAttachments,MAX_ATTACHMENTS,type FileAttachment} from '../src/shared/attachments';
+import {imageBytes} from '../src/shared/images';
+import {uuid} from './client';
+
+export type DraftFileAttachment=FileAttachment&{file?:File};
+
+export function clipboardFiles(data:DataTransfer):File[] {
+  const items=Array.from(data.items||[]).filter(item=>item.kind==='file').map(item=>item.getAsFile()).filter((file):file is File=>Boolean(file));
+  return items.length?items:Array.from(data.files||[]);
+}
+export function isImageFile(file:File):boolean {
+  return ['image/png','image/jpeg','image/webp'].includes(file.type)||!file.type&&/\.(png|jpe?g|webp)$/i.test(file.name);
+}
+export async function readAttachmentFiles(selection:File[],images:string[],files:DraftFileAttachment[],cancelled=()=>false) {
+  if(selection.length+images.length+files.length>MAX_ATTACHMENTS)throw Error(`图片和文件合计最多添加 ${MAX_ATTACHMENTS} 个`);
+  const photos=selection.filter(isImageFile),documents=selection.filter(file=>!isImageFile(file));
+  const budget=MAX_TOTAL_IMAGE_BYTES-images.reduce((sum,url)=>sum+imageBytes(url),0);
+  // Keep browser File handles; only read small slices when actually uploading.
+  const incoming=documents.map(file=>({...fileAttachment({id:uuid(),name:file.name,size:file.size}),file}));
+  const normalized=photos.map(file=>file.type?file:new File([file],file.name,{type:/\.png$/i.test(file.name)?'image/png':/\.webp$/i.test(file.name)?'image/webp':'image/jpeg'}));
+  const newImages=await readImageFiles(normalized,budget,cancelled);
+  if(cancelled())return null;
+  const next={images:appendImages(images,newImages),files:[...files,...incoming]};
+  validateAttachments(next.images,next.files);return next;
+}
 
 export function pastedImage(text:string):string|null {
   const value=text.trim();
@@ -29,7 +54,7 @@ export function imageFile(url:string):File {
 function readDataUrl(file:Blob):Promise<string> {
   return new Promise((resolve,reject)=>{
     const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));
-    reader.onerror=()=>reject(Error('图片读取失败'));reader.readAsDataURL(file);
+    reader.onerror=()=>reject(Error('文件读取失败'));reader.onabort=()=>reject(Error('文件读取已取消'));reader.readAsDataURL(file);
   });
 }
 async function decodeImage(file:Blob):Promise<{source:CanvasImageSource;width:number;height:number;close:()=>void}> {

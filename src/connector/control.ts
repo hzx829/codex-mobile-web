@@ -10,7 +10,9 @@ import { projectDirectory, readProjectFile, downloadProjectFile } from './projec
 import { nativeProjects, indexedSessions } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor } from '../shared/types.js';
-import {validateImages} from '../shared/images.js';
+import {imageBytes} from '../shared/images.js';
+import {validateAttachments,uploadId,fileAttachment} from '../shared/attachments.js';
+import {startUpload,appendUpload,attachmentLinks} from './attachments.js';
 import {contextUsage,accountLimits} from './usage.js';
 import {readModels,reasoningEffort} from './models.js';
 import {revertThread} from './revert.js';
@@ -63,6 +65,15 @@ export class Control extends EventEmitter {
     if(req.action==='runtime.reload')return this.reloadRuntime(p);
     if(this.reloading)throw new BridgeError('maintenance','连接器正在适配 Codex 更新，请稍后刷新');
     if(req.action==='voice.transcribe')return transcribeVoice(this.runtime,p);
+    if(req.action==='file.uploadStart'||req.action==='file.uploadChunk'){
+      const threadId=textRequired(p.threadId,'会话'),id=uploadId(p.id);
+      return this.exclusive(`upload:${id}`,async()=>{
+        if(req.action==='file.uploadChunk')return appendUpload(this.ledger,threadId,id,p.offset,p.data);
+        const session=await this.read(threadId,5);
+        if(session.source==='history')throw new BridgeError('read_only',session.notice||'请先接入当前会话');
+        return startUpload(this.ledger,threadId,session.cwd,p);
+      });
+    }
     if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.cancelQueued','turn.withdrawQueued','turn.steerQueued','turn.edit','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,async()=>{
@@ -145,7 +156,7 @@ export class Control extends EventEmitter {
       if(view.activeTurnId||view.turns.some(turn=>turn.id===starting&&turnFinished(turn.status)))this.starting.delete(id);
       else {view.activeTurnId=starting;view.running=true;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
     }
-    view.queuedMessages=this.ledger.queued(id).map(message=>({id:message.id,text:message.payload.text,imageCount:message.payload.images?.length||0,state:message.state,error:message.error}));
+    view.queuedMessages=this.ledger.queued(id).map(message=>({id:message.id,text:message.payload.text,imageCount:message.payload.images?.length||0,fileNames:message.payload.files?.map((file:Json)=>file.name)||[],imageBytes:(message.payload.images||[]).reduce((sum:number,url:string)=>sum+imageBytes(url),0),state:message.state,error:message.error}));
     view.generation=this.generation;return view;
   }
   private async desktopView(raw:Json,id:string,limit:number,cursor?:TurnCursor):Promise<SessionView> {
@@ -268,7 +279,7 @@ export class Control extends EventEmitter {
       if(!session.canControl)throw new BridgeError('read_only',session.notice||'当前任务暂不能追加');
       this.ledger.sending(queuedId);
       try {
-        const result=await this.mutate('turn.send',{threadId:id,source:p.source,generation:p.generation,expectedTurnId:p.expectedTurnId,opId:p.opId,text:message.payload.text,images:message.payload.images,mode:'steer'});
+        const result=await this.mutate('turn.send',{threadId:id,source:p.source,generation:p.generation,expectedTurnId:p.expectedTurnId,opId:p.opId,text:message.payload.text,images:message.payload.images,files:message.payload.files,mode:'steer'});
         this.ledger.finishQueued(queuedId,result);
         return {...result,queuedId};
       } catch(error) {
@@ -322,7 +333,7 @@ export class Control extends EventEmitter {
       if(session.source==='history')throw new BridgeError('read_only',session.notice||'当前会话暂不能操作');
       await this.turnInput(p,p.model||session.model);
       const settings=await this.turnSettings(p,session.model);
-      this.ledger.enqueue(p.opId,id,{threadId:id,source:session.source,text:p.text||'',images:p.images||[],...settings});
+      this.ledger.enqueue(p.opId,id,{threadId:id,source:session.source,text:p.text||'',images:p.images||[],files:(p.files||[]).map(fileAttachment),...settings});
       this.emit('change',id);return {threadId:id,kind:'queued'};
     }
     if(!session.canControl)throw new BridgeError('read_only',session.notice||'当前会话暂不能操作');
@@ -374,16 +385,16 @@ export class Control extends EventEmitter {
         else await this.runtime.rpc('turn/interrupt',{threadId:id,turnId:session.activeTurnId});
         return {threadId:id,turnId:session.activeTurnId,kind:'stop_requested'};
       }
+      if(session.activeTurnId&&(p.model||p.effort||p.approvalPolicy||p.serviceTier!==undefined))throw new BridgeError('active','运行中补充沿用当前设置；下一轮可以更换');
+      const settings=session.activeTurnId?{}:await this.turnSettings(p,session.model);
       const input=await this.turnInput(p,!session.activeTurnId&&p.model||session.model);
       let result:any;
       if(session.activeTurnId) {
-        if(p.model||p.effort||p.approvalPolicy||p.serviceTier!==undefined)throw new BridgeError('active','运行中补充沿用当前设置；下一轮可以更换');
         const params={input,expectedTurnId:session.activeTurnId};
         const text=input.filter(item=>item.type==='text').map(item=>item.text).join('\n');
         const restoreMessage={id:p.opId,text,cwd:session.cwd,createdAt:Date.now(),context:{prompt:text,workspaceRoots:session.cwd?[session.cwd]:[],textElements:[],imageAttachments:[],fileAttachments:[],pastedTextAttachments:[],addedFiles:[],commentAttachments:[],mcpAppModelContextAttachments:[]}};
         result=session.source==='desktop'?await this.desktop.request('thread-follower-steer-turn',{...context,...params,restoreMessage,clientUserMessageId:p.opId,attachments:[]}):await this.runtime.rpc('turn/steer',{threadId:id,...params});
       } else {
-        const settings=await this.turnSettings(p,session.model);
         const request:Json={threadId:id,input,...settings};
         if(session.source==='desktop')result=await this.startDesktopTurn(context,{...request,clientUserMessageId:p.opId});
         else result=await this.runtime.rpc('turn/start',request);
@@ -474,14 +485,19 @@ export class Control extends EventEmitter {
     return settings;
   }
   private async turnInput(p:Json,modelId:string):Promise<Json[]> {
-    const images=validateImages(p.images===undefined?[]:p.images);
-    const text=images.length&&(p.text===undefined||typeof p.text==='string'&&!p.text.trim())?'':textRequired(p.text,'输入');
+    const {images,files}=validateAttachments(p.images===undefined?[]:p.images,p.files===undefined?[]:p.files);
+    const text=(images.length||files.length)&&(p.text===undefined||typeof p.text==='string'&&!p.text.trim())?'':textRequired(p.text,'输入');
     // Desktop renders the original input before app-server supplies defaults.
     const input:Json[]=text?[{type:'text',text,text_elements:[]}]:[];
     if(images.length) {
       const models=await readModels(this.runtime),model=models.data?.find((m:Json)=>m.model===modelId);
       if(!model?.inputModalities?.includes('image'))throw new BridgeError('unsupported','当前模型未确认图片能力');
       input.push(...images.map((url:string)=>({type:'image',url})));
+    }
+    if(files.length){
+      const attachments=await attachmentLinks(this.ledger,p.threadId,files);
+      if(text)input[0].text+=`\n\n${attachments}`;
+      else input.unshift({type:'text',text:attachments,text_elements:[]});
     }
     return input;
   }

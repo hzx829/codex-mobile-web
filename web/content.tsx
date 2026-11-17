@@ -3,6 +3,7 @@ import Markdown, {defaultUrlTransform} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type {Json} from '../src/shared/types';
 import {splitFollowups} from './followup';
+import {remarkFileCitations} from './file-citations';
 const windowsFilePath=/^[a-z]:(?:[\\/]|%5c|%2f)/i;
 function localMediaPath(value:string|undefined) {
   if(!value)return false;
@@ -17,7 +18,7 @@ function localPreviewLink(value:string) {
   }catch{return null;}
 }
 export const SafeMarkdown=memo(function SafeMarkdown({text,openFile,openPreview,onFollowup}:{text:string;openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(prompt:string)=>void}){
-  return splitFollowups(text).map((part,index)=>part.kind==='followup'?<button className="followup" type="button" key={index} onClick={()=>onFollowup(part.prompt)}>{part.label} ↗</button>:<Markdown key={index} remarkPlugins={[remarkGfm]} urlTransform={(url,key)=>(key==='href'||key==='src')&&windowsFilePath.test(url)?url:defaultUrlTransform(url)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
+  return splitFollowups(text).map((part,index)=>part.kind==='followup'?<button className="followup" type="button" key={index} onClick={()=>onFollowup(part.prompt)}>{part.label} ↗</button>:<Markdown key={index} remarkPlugins={[remarkGfm,remarkFileCitations]} urlTransform={(url,key)=>(key==='href'||key==='src')&&windowsFilePath.test(url)?url:defaultUrlTransform(url)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
     if(!href)return <span>{children}</span>;
     const previewUrl=localPreviewLink(href);
     if(previewUrl)return <button className="inline-link" type="button" onClick={()=>openPreview(previewUrl)}>{children} · 打开预览</button>;

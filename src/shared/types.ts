@@ -1,5 +1,5 @@
 export type Json = Record<string, any>;
-export type RequestAction = 'chatgpt.status' | 'chatgpt.list' | 'chatgpt.read' | 'chatgpt.send' | 'chatgpt.stop' | 'chatgpt.operation' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
+export type RequestAction = 'chatgpt.status' | 'chatgpt.list' | 'chatgpt.read' | 'chatgpt.send' | 'chatgpt.stop' | 'chatgpt.operation' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
 export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string }
@@ -8,7 +8,7 @@ export const turnFinished=(status:unknown)=>status==='completed'||status==='inte
 export interface ContextUsage { usedTokens: number; windowTokens: number | null }
 export interface UsageLimit { id: string; name: string | null; usedPercent: number; windowMinutes: number | null; resetsAt: number | null }
 export interface ThreadStatus { threadId: string; limits: UsageLimit[]; limitsNotice?: string }
-export interface QueuedMessage { id: string; text: string; imageCount: number; state: 'queued' | 'sending' | 'failed' | 'uncertain'; error?: string }
+export interface QueuedMessage { id: string; text: string; imageCount: number; fileNames?: string[]; imageBytes?: number; state: 'queued' | 'sending' | 'failed' | 'uncertain'; error?: string }
 export interface SessionView {
   id: string; sessionId: string; title: string; cwd: string; model: string; provider: string; effort?: string; approvalPolicy?: string; serviceTier?: string | null;
   source: 'desktop' | 'connector' | 'history'; activeTurnId: string | null; running?: boolean; contextUsage?: ContextUsage | null;

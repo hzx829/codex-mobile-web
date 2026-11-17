@@ -8,6 +8,8 @@
 
 Reviewed against version 0.1.3 on 2026-09-27. This describes the bridge implementation, not the privacy practices of your model provider, hosting provider, browser, or configured tools. It is not an independent security audit.
 
+Uploaded documents remain in the current project's `.codex-mobile-attachments/` directory for later turns. They are not deleted automatically; remove them when no longer needed. Pending selections stay in browser memory. Partial uploads also remain on disk for retries. Queued messages store file references; the connector ledger retains upload IDs, filenames, sizes, project paths and conversation IDs.
+
 ### Who you trust
 
 This is a single-user remote-control application. Trust the devices holding the shared Token, the OS account running the connector, and the operators of your relay and HTTPS proxy.
@@ -20,7 +22,7 @@ The bridge has no required developer-operated backend or built-in analytics/tele
 
 | Connection | Data |
 | --- | --- |
-| Phone ↔ relay ↔ connector | Token during WebSocket authentication; computer names/IDs, project paths, conversation metadata and displayed history; context token usage, native account limit percentages and reset times; instructions, image attachments, task output, approvals/questions and replies, requested file previews, downloads and diffs; preview URL and proxied HTTP/WebSocket traffic, including page content and submitted form data; online status and change notifications |
+| Phone ↔ relay ↔ connector | Token during WebSocket authentication; computer names/IDs, project paths, conversation metadata and displayed history; context token usage, native account limit percentages and reset times; instructions, image and file attachments, task output, approvals/questions and replies, requested file previews, downloads and diffs; preview URL and proxied HTTP/WebSocket traffic, including page content and submitted form data; online status and change notifications |
 | Computer → configured providers/tools | Native Codex model requests and network activity performed by tasks/tools; the relay is not a model gateway |
 | Installation/build | npm dependencies, container images, and the Node license during Windows packaging if not cached; certificate setup contacts the configured certificate authority |
 
@@ -37,12 +39,12 @@ The voice choice is saved as `voice-provider` in browser `localStorage`. Audio s
 | Location | Stored data | Retention |
 | --- | --- | --- |
 | Browser `localStorage` | Token (`connection`), preview URLs per computer/thread (`browser-preview-url:*`; the unused legacy `browser-preview-url` may remain), text drafts (`draft:*`), local pins/sections/unread marks and saved thread titles/paths (`thread-preferences:*`), pending operations (`operation:*`) that may include submitted text | No time-based expiry. Success clears related pending data/drafts where applicable. Disconnect clears the Token, not local thread preferences, drafts or pending records |
-| Browser memory | Loaded conversations, file previews, download chunks and assembled files, preview pages, image attachments and UI state | Closing the file panel cancels reception and releases its download URL; no app-managed persistent message-history or download cache. Reload requires reselecting attachments. This does not guarantee secure erasure from browser/OS memory |
+| Browser memory | Loaded conversations, file previews, download chunks and assembled files, preview pages, image and file attachments and UI state | Closing the file panel cancels reception and releases its download URL; no app-managed persistent message-history or download cache. Reload requires reselecting attachments. This does not guarantee secure erasure from browser/OS memory |
 | Files saved on the phone/device | Files explicitly saved through the browser download link | Managed by the browser/OS; retained until the user deletes them. Disconnecting or clearing bridge storage does not delete saved files |
 | Preview browser cookies | Short-lived session cookie for the preview port and any cookies set by the proxied app | The session cookie stops granting access when the preview ends; the browser may retain cookies until cleared |
 | Connector `.local/config.json` | Relay address, Token, machine identity, selected local paths | Until changed/deleted; the app does not encrypt this file |
 | Connector `.local/connect.html`, `connect-qr.png` | Connection page and QR code containing the Token | Until regenerated/deleted; protect like the Token itself |
-| Connector `.local/operations.sqlite` | Operation IDs, payload hashes, states, result/error receipts, managed-session IDs; queued message text, images and settings | Queued payloads are deleted on confirmed dispatch or removal; failed/uncertain entries remain until removed. Operation rows older than seven days are removed when the ledger opens, except those still in the queue. Managed-session IDs do not expire automatically. Receipts may contain sensitive error details; SQLite deletion does not guarantee secure erasure from disk, WAL or backups |
+| Connector `.local/operations.sqlite` | Operation IDs, payload hashes, states, result/error receipts, managed-session IDs; queued message text, images, file references and settings; upload metadata | Queued payloads are deleted on confirmed dispatch or removal; failed/uncertain entries remain until removed. Operation rows older than seven days are removed when the ledger opens, except those still in the queue. Managed-session IDs and upload metadata do not expire automatically. Receipts may contain sensitive error details; SQLite deletion does not guarantee secure erasure from disk, WAL or backups |
 | Runtime logs | Startup, connection and error diagnostics | Windows `.local/*.log` has no app-defined rotation. Supplied Compose rotates each service's local logs at 5 MB × 3 files. Other deployments follow their own settings |
 | Relay process | Peers, routes and forwarded content in memory | No application database or deliberate disk storage of conversation/file payloads. This excludes host swap, crash dumps, infrastructure logging and operator modifications |
 | Relay deployment | Token in environment/configuration; Caddy certificate/configuration volumes when used | Until changed/removed by the operator |
@@ -78,6 +80,8 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 ## 简体中文
 
+上传的普通文件保存在当前项目的 `.codex-mobile-attachments/` 目录，供后续对话继续读取，不会自动删除；不再需要时可手动清理。未发送的选择保留在浏览器内存，未完成的上传也保留在磁盘以便续传。队列只保存文件引用；连接器数据库会保留上传标识、文件名、大小、项目路径和会话 ID。
+
 核对日期：2026-09-27，依据 0.1.3 实现。本说明描述中继与连接器，不代替模型服务商、云主机、浏览器或已配置工具的隐私说明，也不是独立安全审计。
 
 ### 需要信任谁
@@ -92,7 +96,7 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 | 连接 | 内容 |
 | --- | --- |
-| 手机 ↔ 中继 ↔ 连接器 | WebSocket 认证时的 Token；电脑名称/标识、项目路径、会话信息和展示的历史；上下文 token 用量、原生账号额度百分比及重置时间；指令、图片附件、任务输出、审批/问题及回应、主动请求的文件预览、下载和差异；预览地址及代理的 HTTP/WebSocket 内容（包括页面和表单数据）；在线状态和变更通知 |
+| 手机 ↔ 中继 ↔ 连接器 | WebSocket 认证时的 Token；电脑名称/标识、项目路径、会话信息和展示的历史；上下文 token 用量、原生账号额度百分比及重置时间；指令、图片与文件附件、任务输出、审批/问题及回应、主动请求的文件预览、下载和差异；预览地址及代理的 HTTP/WebSocket 内容（包括页面和表单数据）；在线状态和变更通知 |
 | 电脑 → 配置的模型服务/工具 | Codex 原生模型请求及任务/工具的网络活动；本中继不充当模型网关 |
 | 安装/构建 | npm 依赖、容器镜像；Windows 打包时未缓存的 Node 许可证；证书配置还会联系配置的证书签发机构 |
 
@@ -109,12 +113,12 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 | 位置 | 保存内容 | 保留方式 |
 | --- | --- | --- |
 | 浏览器 `localStorage` | Token（`connection`）、按电脑/thread 保存的预览地址（`browser-preview-url:*`；可能留有不再读取的旧键 `browser-preview-url`）、文字草稿（`draft:*`）、按电脑保存的置顶/分区/未读标记及会话标题/路径快照（`thread-preferences:*`）、可能含已提交文字的待核实记录（`operation:*`） | 无定时过期；成功后按情况清理对应记录/草稿。“断开连接”清除 Token，不清除本地会话偏好、草稿和待核实记录 |
-| 浏览器内存 | 已加载会话、文件预览、下载分块及组装后的文件、预览网页、图片附件与界面状态 | 关闭文件面板取消接收并释放下载链接；应用没有持久化消息历史或下载缓存，刷新后图片需重选；不保证浏览器/系统内存被安全擦除 |
+| 浏览器内存 | 已加载会话、文件预览、下载分块及组装后的文件、预览网页、图片与文件附件与界面状态 | 关闭文件面板取消接收并释放下载链接；应用没有持久化消息历史或下载缓存，刷新后附件需重选；不保证浏览器/系统内存被安全擦除 |
 | 手机/设备上已保存的文件 | 使用者通过浏览器下载链接主动保存的文件 | 由浏览器/系统管理，使用者删除前保留；断开连接或清理中继应用存储不会删除已保存文件 |
 | 预览网页 Cookie | 预览端口的短期会话 Cookie，以及被代理网页自行设置的 Cookie | 预览结束后会话 Cookie 不再授权访问；浏览器可能继续保存 Cookie，需自行清除 |
 | 连接器 `.local/config.json` | 中继地址、Token、电脑标识和选定的本地路径 | 修改/删除前保留，应用不加密此文件 |
 | 连接器 `.local/connect.html`、`connect-qr.png` | 含 Token 的连接页和二维码 | 重新生成/删除前保留，按 Token 同等保管 |
-| 连接器 `.local/operations.sqlite` | 操作 ID、载荷摘要、状态、结果/错误回执、托管会话 ID；排队消息的文字、图片及设置 | 排队内容在确认发送或移出时删除，失败和结果不明的条目保留到手动移出。打开数据库时删除超过七天且已不在队列中的操作记录；托管会话 ID 无自动过期。回执可能含敏感错误详情；SQLite 删除不保证清除磁盘、WAL 或备份中的副本 |
+| 连接器 `.local/operations.sqlite` | 操作 ID、载荷摘要、状态、结果/错误回执、托管会话 ID；排队消息的文字、图片、文件引用及设置；上传元数据 | 排队内容在确认发送或移出时删除，失败和结果不明的条目保留到手动移出。打开数据库时删除超过七天且已不在队列中的操作记录；托管会话 ID 和上传元数据无自动过期。回执可能含敏感错误详情；SQLite 删除不保证清除磁盘、WAL 或备份中的副本 |
 | 运行日志 | 启动、连接和错误诊断 | Windows `.local/*.log` 无应用层轮换；附带 Compose 对各服务按 5 MB × 3 文件轮换；其他部署依自身设置 |
 | 中继进程 | 内存中的连接、路由和转发内容 | 无应用数据库，不主动把聊天/文件正文持久化到磁盘；不涵盖系统交换空间、崩溃转储、基础设施日志或管理者修改 |
 | 中继部署 | 环境/配置中的 Token；使用 Caddy 时的证书和配置卷 | 管理者修改/删除前保留 |

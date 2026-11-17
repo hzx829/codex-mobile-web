@@ -38,6 +38,8 @@ async function httpRequest(url:string,options:{method?:string;headers?:Record<st
 test('only versioned assets are cached and gzip preserves their content',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'cmw-static-')),script='const greeting="hello";\n'.repeat(1000);
   await mkdir(join(dir,'assets'));await writeFile(join(dir,'assets','index-a1B2c3D4.js'),script);await writeFile(join(dir,'index.html'),'<main>Current entry</main>');
+  await writeFile(join(dir,'assets','pdf.worker-a1B2c3D4.mjs'),script);
+  await mkdir(join(dir,'pdfjs'));await writeFile(join(dir,'pdfjs','decoder.wasm'),Buffer.from([0,97,115,109]));
   const relay=createRelay('static-test-token',dir);relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');
   const base=`http://127.0.0.1:${(relay.server.address() as any).port}`;
   try{
@@ -49,6 +51,12 @@ test('only versioned assets are cached and gzip preserves their content',async()
       assert.equal(plain.headers.get('content-encoding'),null);assert.equal(await plain.text(),script);
     }
     for(const path of ['/','/health','/assets/missing-a1B2c3D4.js'])assert.equal((await httpRequest(base+path)).headers.get('cache-control'),'no-store');
+    const worker=await httpRequest(base+'/assets/pdf.worker-a1B2c3D4.mjs',{headers:{'Accept-Encoding':'gzip'}});
+    assert.match(worker.headers.get('content-type')!,/javascript/);assert.equal(gunzipSync(worker.bytes).toString(),script);
+    const policy=worker.headers.get('content-security-policy')!;
+    assert.match(policy,/worker-src 'self';/);assert.match(policy,/font-src 'self' blob:;/);
+    assert.match(policy,/'wasm-unsafe-eval'/);assert.doesNotMatch(policy,/'unsafe-eval'|'unsafe-inline'.*script-src/);
+    const wasm=await httpRequest(base+'/pdfjs/decoder.wasm');assert.equal(wasm.headers.get('content-type'),'application/wasm');
   }finally{await relay.close();await removeTestTemp(dir);}
 });
 
@@ -115,6 +123,10 @@ test('token gate, machine routing and receipt recovery after phone disconnect',a
     const received=waitFrame(second,m=>m.type==='received'&&m.id==='image'),imageResult=waitFrame(second,m=>m.type==='response'&&m.id==='image');
     second.send(imageRequest);
     await received;assert.equal((await imageResult).result.state,'accepted');
+    const fileRequest=JSON.stringify({...request,id:'file',action:'file.uploadChunk',payload:{opId:`${Date.now()}:${randomUUID()}`,threadId:'s',id:randomUUID(),offset:0,data:Buffer.alloc(FILE_CHUNK_SIZE).toString('base64')}});
+    assert.ok(Buffer.byteLength(fileRequest)<MAX_FRAME);
+    const fileReceived=waitFrame(second,m=>m.type==='received'&&m.id==='file'),fileResult=waitFrame(second,m=>m.type==='response'&&m.id==='file');
+    second.send(fileRequest);await fileReceived;assert.equal((await fileResult).result.state,'accepted');
     assert.equal((await httpRequest(`http://127.0.0.1:${port}/health`)).status,200);
   }finally{await relay.close();ledger.close();}
 });
@@ -161,7 +173,7 @@ test('preview tunnels HTTP and WebSocket only for its owner',async()=>{
     assert.equal((await httpRequest(`${proxy}/_bridge/enter?session=another&ticket=${session.ticket}`,{headers:{cookie},redirect:'manual'})).status,401);
     const restricted=await httpRequest(`${proxy}/no-frame`,{headers:{cookie}});assert.equal(restricted.headers.get('x-frame-options'),'DENY');assert.equal(restricted.headers.get('content-security-policy'),"frame-ancestors 'none'");
     const policy=(await httpRequest(`http://127.0.0.1:${(relay.server.address() as any).port}/health`)).headers.get('content-security-policy')!;
-    assert.ok(policy.includes(`frame-src ${proxy};`));assert.ok(policy.includes("script-src 'self';"));
+    assert.ok(policy.includes(`frame-src ${proxy};`));assert.ok(policy.includes("script-src 'self' 'wasm-unsafe-eval';"));
     assert.match(await (await httpRequest(proxy,{headers:{cookie}})).text(),/Local app/);
     assert.deepEqual(await (await httpRequest(`${proxy}/api`,{headers:{cookie}})).json(),{ok:true});
     assert.equal(await (await httpRequest(`${proxy}/echo`,{method:'POST',headers:{cookie},body:'hello'})).text(),'hello');
