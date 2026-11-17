@@ -1,4 +1,8 @@
 import {test} from 'node:test';
+import {createElement} from 'react';
+import {renderToStaticMarkup} from 'react-dom/server';
+import {AntigravityMessages,groupAntigravityMessages} from '../web/antigravity-messages.js';
+import type {AntigravityMessage} from '../src/shared/types.js';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
@@ -36,6 +40,21 @@ test('app switches restore each machine and app independently, including legacy 
   }
 });
 
+test('consecutive Antigravity tools share a Codex activity group without swallowing replies or crossing user turns', () => {
+  const messages: AntigravityMessage[] = [
+    {id:'1',role:'tool',text:'read_file、run_command'}, {id:'2',role:'tool',text:'read_file'},
+    {id:'3',role:'assistant',text:'**完成**'}, {id:'4',role:'tool',text:'edit_file'},
+    {id:'5',role:'user',text:'继续'}, {id:'6',role:'tool',text:'search'},
+  ];
+  const groups=groupAntigravityMessages(messages);
+  assert.deepEqual(groups.map(group=>group.length),[3,1,1,1,1]);
+  assert.deepEqual(groups[0].map(item=>item.text),['read_file','run_command','read_file']);
+  const html=renderToStaticMarkup(createElement(AntigravityMessages,{messages,running:true,openFile:()=>{},openPreview:()=>{},onFollowup:()=>{}}));
+  assert.equal(html.match(/class="activity-group"/g)?.length,3);
+  assert.match(html,/运行记录 · 3 项/);assert.match(html,/正在处理 · 1 项/);assert.match(html,/<strong>完成<\/strong>/);
+  assert.doesNotMatch(html,/read_file|class="activity-list"/);
+});
+
 test('desktop transcripts, watch updates and write receipts stay with the selected Antigravity conversation', async t => {
   const dir = await mkdtemp(join(tmpdir(),'cmw-antigravity-'));
   const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir,'conversation_summaries.db'));
@@ -48,10 +67,23 @@ test('desktop transcripts, watch updates and write receipts stay with the select
     line({type:'PLANNER_RESPONSE',step_index:2,thinking:'private',tool_calls:[{name:'read_file',args:{private:true}}]}));
   db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
   db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)').run(id,'Example','CASCADE_RUN_STATUS_IDLE','today',2,1,'before',0,JSON.stringify([pathToFileURL(dir).href]));
+  const models = [
+    {label:'Model High',modelOrAlias:{model:'MODEL_HIGH'}},
+    {label:'Retired',modelOrAlias:{model:'MODEL_RETIRED'},disabled:true},
+  ];
+  let advanceTurn=false;
+  const config={plannerConfig:{planModel:'MODEL_PREVIOUS',toolConfig:{custom:true}},executorConfig:{setting:1}};
   const writes:unknown[]=[];
   const bridge = new AntigravityBridge(dir,ledger,async (_dir,method,body)=>{
+    if(method==='GetCascadeModelConfigData')return {clientModelConfigs:models};
+    if(method==='GetTrajectoryTurns'){
+      assert.deepEqual(body,{cascadeId:id,stepIndices:[1]});
+      if(advanceTurn)db.exec("UPDATE conversation_summaries SET last_user_input_time='changed'");
+      return {turns:[{startStepIndex:1,firstStep:{userInput:{userConfig:config}}}]};
+    }
     writes.push({method,body});
     if(method==='CancelCascadeInvocation')throw new BridgeError('uncertain','lost response',true);
+    return {};
   });
   assert.deepEqual((await bridge.handle('antigravity.list',{})).data,[{id,title:'Example'}]);
   await writeFile(join(dir,'示例.pdf'),'%PDF-1.7');
@@ -77,12 +109,23 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   assert.ok(results.every(r=>r.state==='accepted'));
   assert.equal(writes.length,1);
   assert.deepEqual(writes[0],{method:'SendUserCascadeMessage',body:{cascadeId:id,items:[{text:'next'}],clientMessageId:payload.opId.split(':')[1]}});
+  assert.deepEqual(await bridge.handle('antigravity.models',{conversationId:id}),{models:[{id:'MODEL_HIGH',label:'Model High'}],current:'MODEL_PREVIOUS'});
+  const selected={...payload,model:'MODEL_HIGH',opId:makeOp()};
+  assert.equal((await bridge.handle('antigravity.send',selected)).state,'accepted');
+  assert.equal((await bridge.handle('antigravity.send',selected)).state,'accepted');
+  assert.deepEqual(writes[1],{method:'SendUserCascadeMessage',body:{cascadeId:id,items:[{text:'next'}],clientMessageId:selected.opId.split(':')[1],
+    cascadeConfig:{...config,plannerConfig:{...config.plannerConfig,planModel:'MODEL_HIGH'}}}});
+  await assert.rejects(bridge.handle('antigravity.send',{...selected,model:'MODEL_RETIRED'}),(error:BridgeError)=>error.code==='conflict');
+  for(const model of ['MODEL_RETIRED','MODEL_UNKNOWN'])assert.equal((await bridge.handle('antigravity.send',{...payload,opId:makeOp(),model})).state,'failed');
+  advanceTurn=true;
+  assert.equal((await bridge.handle('antigravity.send',{...selected,opId:makeOp()})).state,'failed');
+  assert.equal(writes.length,2);
   db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING',last_user_input_step_index=4");
   assert.equal((await bridge.handle('antigravity.stop',{...payload,opId:makeOp()})).state,'failed');
   const stop = {...payload,turn:(await bridge.handle('antigravity.read',{conversationId:id})).turn,opId:makeOp()};
   assert.equal((await bridge.handle('antigravity.stop',stop)).state,'uncertain');
   assert.equal((await bridge.handle('antigravity.stop',stop)).state,'uncertain');
   assert.equal((await bridge.handle('antigravity.operation',stop)).state,'uncertain');
-  assert.equal(writes.length,2);
+  assert.equal(writes.length,3);
   await assert.rejects(bridge.handle('antigravity.read',{conversationId:'../outside'}),/ID 无效/);
 });

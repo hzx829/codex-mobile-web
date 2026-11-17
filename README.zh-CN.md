@@ -6,7 +6,7 @@
 
 查看项目和会话、发送任务、补充要求、停止任务，以及回应 Codex 的审批和问题。任务仍在电脑上执行，沿用原有工作区、模型配置和工具。手机无需安装 App，也无需注册项目方账号。
 
-手机在各应用首页点 **Codex / ChatGPT / Antigravity** 切换，同一台电脑上的三个入口共用自部署中继。切回来会恢复上次打开的会话。ChatGPT 使用电脑浏览器扩展；Antigravity 读取 Windows 桌面已有对话，支持文字续聊和请求停止当前任务。对话按 Markdown 排版，点文件链接即可读 PDF、查看图片或代码、打开带本地图片的 HTML 演示，也可下载 PPTX。桌面 Hub 写入按 App 2.32.1 适配，需要同步更新中继网页与连接器，真实桌面收发待人工验收。[ChatGPT 配置](CHATGPT.md) · [Antigravity 接入与验收](docs/antigravity/IMPLEMENTATION.md)
+手机在各应用首页点 **Codex / ChatGPT / Antigravity** 切换，同一台电脑上的三个入口共用自部署中继。切回来会恢复上次打开的会话。ChatGPT 使用电脑浏览器扩展；Antigravity 读取 Windows 桌面已有对话，支持文字续聊和请求停止当前任务。输入框可选桌面提供的模型和档位，连续工具调用合并为可展开的运行记录。对话按 Markdown 排版，点文件链接即可读 PDF、查看图片或代码、打开带本地图片的 HTML 演示，也可下载 PPTX。桌面 Hub 写入按 App 2.32.1 适配，需要同步更新中继网页与连接器，真实桌面收发待人工验收。[ChatGPT 配置](CHATGPT.md) · [Antigravity 接入与验收](docs/antigravity/IMPLEMENTATION.md)
 
 ## 可以做什么
 

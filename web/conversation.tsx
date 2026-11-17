@@ -27,7 +27,7 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
     {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/><IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/></div>}
   </section>;
 });
-function ActivityGroup({items,running,openFile}:{items:MessageItem[];running:boolean;openFile:(path:string)=>void}){
+export function ActivityGroup({items,running,openFile}:{items:MessageItem[];running:boolean;openFile:(path:string)=>void}){
   const [open,setOpen]=useState(false);
   return <details className="activity-group" onToggle={e=>setOpen(e.currentTarget.open)}><summary>{running?'正在处理':'运行记录'} · {items.length} 项<span className="activity-excerpt">{activityLabel[items.at(-1)!.type]||'任务活动'}</span></summary>{open&&<div className="activity-list">{items.map(item=><ActivityItem key={item.id} item={item} openFile={openFile}/>)}</div>}</details>;
 }

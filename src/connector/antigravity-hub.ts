@@ -8,7 +8,7 @@ import {BridgeError, type Json} from '../shared/types.js';
 
 const exec = promisify(execFile);
 type Endpoint = {pid: number; httpsPort: number; csrfToken: string};
-export type HubMethod = 'SendUserCascadeMessage' | 'CancelCascadeInvocation';
+export type HubMethod = 'SendUserCascadeMessage' | 'CancelCascadeInvocation' | 'GetCascadeModelConfigData' | 'GetTrajectoryTurns';
 
 async function desktopEndpoint(dir: string): Promise<Endpoint> {
   const records = new Map<string, Endpoint>();
@@ -42,7 +42,8 @@ async function ownsSocket(hub: Endpoint, clientPort: number) {
   await exec(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {timeout: 7000, windowsHide: true});
 }
 
-export async function writeHub(dir: string, method: HubMethod, body: Json): Promise<void> {
+export async function callHub(dir: string, method: HubMethod, body: Json): Promise<Json> {
+  const reading = method === 'GetCascadeModelConfigData' || method === 'GetTrajectoryTurns';
   const hub = await desktopEndpoint(dir);
   const socket = connect({host: '127.0.0.1', port: hub.httpsPort, rejectUnauthorized: false});
   let dispatched = false;
@@ -58,7 +59,7 @@ export async function writeHub(dir: string, method: HubMethod, body: Json): Prom
     await ownsSocket(hub, socket.localPort!);
     if (socket.destroyed) throw new Error('Hub closed');
     const data = Buffer.from(JSON.stringify(body));
-    await new Promise<void>((resolve, reject) => {
+    return await new Promise<Json>((resolve, reject) => {
       const req = request({
         host: '127.0.0.1', port: hub.httpsPort, method: 'POST', createConnection: () => socket,
         path: '/exa.language_server_pb.LanguageServerService/' + method,
@@ -75,17 +76,19 @@ export async function writeHub(dir: string, method: HubMethod, body: Json): Prom
           reject(new Error('Unexpected Hub response'));
           return;
         }
-        let ack = '';
-        res.setEncoding('utf8');
-        res.on('data', part => {
-          ack += part;
-          if (ack.length > 8192) res.destroy(new Error('Unexpected Hub response size'));
+        const chunks: Buffer[] = [];
+        const limit = reading ? 16 * 1024 * 1024 : 8192;
+        let length = 0;
+        res.on('data', (part: Buffer) => {
+          length += part.length;
+          if (length > limit) res.destroy(new Error('Unexpected Hub response size'));
+          else chunks.push(part);
         });
         res.on('end', () => {
           try {
-            const result = JSON.parse(ack);
+            const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             if (!result || Array.isArray(result) || typeof result !== 'object' || result.error) throw new Error('Unexpected Hub receipt');
-            resolve();
+            resolve(result);
           } catch (error) { reject(error); }
         });
       });
@@ -95,6 +98,7 @@ export async function writeHub(dir: string, method: HubMethod, body: Json): Prom
     });
   } catch (error) {
     if (error instanceof BridgeError) throw error;
+    if (reading) throw new BridgeError('unavailable', '无法读取本机 Antigravity 设置，请确认桌面已打开并重试');
     throw new BridgeError(dispatched ? 'uncertain' : 'unavailable', dispatched
       ? '桌面回执未确认，请核对原会话' : '无法验证本机 Antigravity Hub，请确认桌面正在运行', dispatched);
   } finally {

@@ -8,6 +8,8 @@
 
 当前实现从桌面 SQLite 摘要索引列出已有对话，从 `brain/<会话 ID>/.system_generated/logs/transcript.jsonl` 读取已记录的文字和工具名称。打开的会话用长轮询接收变化；最近 1 MiB 内最多展示 100 项。写入端验证本机 TLS 连接的进程归属后，通过 Hub 提交文字或请求停止此会话当前任务。遇到不确定的回执可回查，不自动重发。安装路径当前按 Windows 默认用户安装位置验证。以下的原生进度订阅、新建会话及审批属于后续实施项。真机的收发、停止与时延由人按第 4 节验收。[前端切换](../../web/service-switch.tsx) · [连接器](../../src/connector/antigravity.ts)
 
+输入框中的模型按钮读取桌面 Hub 的 `GetCascadeModelConfigData`。手机按电脑和会话记住所选档位。发送前再次核对可选列表，并从 `GetTrajectoryTurns` 取原会话最近一条用户消息的配置，替换 `cascadeConfig.plannerConfig.planModel`。选择“沿用对话设置”可清除手机覆盖。连续工具调用复用 Codex 的折叠运行记录，展开可看各次调用；用户消息和助手回复保留在原位置。
+
 回复使用 Codex 的 Markdown 排版。点击 `file:///` 链接时，手机向当前电脑和 Antigravity 会话请求文件。相对路径按会话唯一工作区解析。PDF 使用同一阅读器，PPTX 可保存到设备。HTML 在中继独立预览端口运行，连接器按需提供选中的页面及其目录下的图片、样式、字体和脚本。手机可直接打开带相对图片的演示文稿。人工验收可在同一条会话中分别点 PDF 和 HTML，检查 PDF 页码、演示图片与翻页，再返回列表切换应用。
 
 ## 1 · 先接上一条原生对话

@@ -4,21 +4,20 @@ import {isAbsolute, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {readProjectFile, downloadProjectFile} from './project.js';
 import {setTimeout as delay} from 'node:timers/promises';
-import {BridgeError, textRequired, type Json} from '../shared/types.js';
+import {BridgeError, textRequired, type AntigravityMessage, type AntigravityModel, type Json} from '../shared/types.js';
 import type {Ledger} from './ledger.js';
-import {writeHub} from './antigravity-hub.js';
+import {callHub} from './antigravity-hub.js';
 
 const guid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const idle = 'CASCADE_RUN_STATUS_IDLE';
 const active = 'CASCADE_RUN_STATUS_RUNNING';
 const tailSize = 1024 * 1024;
-type Message = {id: string; role: 'user' | 'assistant' | 'tool'; text: string};
 type Summary = {id: string; title: string; status: string; notIdle: number | null; modified: string; steps: number; userStep: number | null; userTime: string | null};
 const columns = 'conversation_id AS id, title, status, not_fully_idle AS notIdle, last_modified_time AS modified, step_count AS steps, last_user_input_step_index AS userStep, last_user_input_time AS userTime';
 const turnKey = (summary: Summary) => JSON.stringify([summary.userStep, summary.userTime]);
 const canSend = (summary: Summary) => summary.status === idle && !summary.notIdle;
 
-async function messages(path: string): Promise<Message[]> {
+async function messages(path: string): Promise<AntigravityMessage[]> {
   const file = await open(path, 'r').catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') throw error;
     return null;
@@ -31,7 +30,7 @@ async function messages(path: string): Promise<Message[]> {
     const {bytesRead} = await file.read(data, 0, data.length, start);
     const lines = data.toString('utf8', 0, bytesRead).split('\n');
     if (start) lines.shift(); // The first line may start in the middle of a UTF-8 character.
-    const result = new Map<string, Message>();
+    const result = new Map<string, AntigravityMessage>();
     for (const line of lines) {
       let step;
       try { step = JSON.parse(line); } catch { continue; }
@@ -53,8 +52,8 @@ async function messages(path: string): Promise<Message[]> {
 export class AntigravityBridge {
   private writing = new Set<string>();
   private watchers = 0;
-  private recent = new Map<string, {revision: string; messages: Message[]}>();
-  constructor(private root: string, private ledger: Ledger, private write = writeHub) {}
+  private recent = new Map<string, {revision: string; messages: AntigravityMessage[]}>();
+  constructor(private root: string, private ledger: Ledger, private hub = callHub) {}
 
   private index<T>(read: (db: DatabaseSync) => T): T {
     let db: DatabaseSync | undefined;
@@ -72,6 +71,24 @@ export class AntigravityBridge {
     return row;
   }
 
+  private async models(): Promise<AntigravityModel[]> {
+    const result = await this.hub(join(this.root, 'daemon'), 'GetCascadeModelConfigData', {});
+    if (!Array.isArray(result.clientModelConfigs)) throw new BridgeError('unavailable', '桌面尚未提供模型列表，请稍后重试');
+    return result.clientModelConfigs.flatMap((config: Json) => {
+      const id = config.modelOrAlias?.model;
+      return !config.disabled && typeof id === 'string' && id && typeof config.label === 'string' && config.label
+        ? [{id, label: config.label}] : [];
+    });
+  }
+
+  private async turnConfig(summary: Summary): Promise<Json> {
+    if (summary.userStep == null || summary.userStep < 0) return {};
+    const {turns} = await this.hub(join(this.root, 'daemon'), 'GetTrajectoryTurns', {cascadeId: summary.id, stepIndices: [summary.userStep]});
+    const user = turns?.find((turn: Json) => (turn.startStepIndex ?? 0) === summary.userStep)?.firstStep?.userInput;
+    if (!user) throw new BridgeError('changed', '无法读取原会话的模型设置，请刷新后重试');
+    return user.userConfig ?? {};
+  }
+
   private async snapshot(id: string) {
     const summary = this.summary(id);
     const path = join(this.root, 'brain', id, '.system_generated', 'logs', 'transcript.jsonl');
@@ -81,7 +98,7 @@ export class AntigravityBridge {
     });
     const revision = JSON.stringify([summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, String(file?.mtimeNs), String(file?.size)]);
     return {path, revision, turn: turnKey(summary), title: summary.title || '未命名对话', running: summary.status === active,
-      canSend: canSend(summary)};
+      canSend: canSend(summary), supportsModelSelection: true};
   }
 
   private async read(id: string, known?: string) {
@@ -140,13 +157,19 @@ export class AntigravityBridge {
       return action === 'antigravity.file.read' ? readProjectFile(cwd, path)
         : downloadProjectFile(cwd, path, textRequired(p.revision, '文件版本', 64), p.offset);
     }
+    if (action === 'antigravity.models') {
+      const summary = this.summary(id);
+      const [models, config] = await Promise.all([this.models(), this.turnConfig(summary).catch(() => null)]);
+      return {models, current: config?.plannerConfig?.planModel ?? null};
+    }
     if (action === 'antigravity.read') return this.read(id);
     if (action === 'antigravity.watch') return this.read(id, textRequired(p.revision, '会话版本', 4096));
     if (action !== 'antigravity.send' && action !== 'antigravity.stop') throw new BridgeError('unsupported', '不支持此 Antigravity 操作');
     const text = action === 'antigravity.send' ? textRequired(p.text, '消息', 50_000) : undefined;
     const opId = textRequired(p.opId, '操作标识', 100);
     const turn = textRequired(p.turn, '对话轮次', 200);
-    return this.ledger.run(opId, {action, id, text, turn}, async () => {
+    const model = text && p.model !== undefined ? textRequired(p.model, '模型', 200) : undefined;
+    return this.ledger.run(opId, {action, id, text, turn, ...(model ? {model} : {})}, async () => {
       if (this.writing.has(id)) throw new BridgeError('busy', '此会话正在处理另一次操作');
       const summary = this.summary(id);
       if (turnKey(summary) !== turn || !(text ? canSend(summary) : summary.status === active)) throw new BridgeError('changed', '会话状态已变化，请刷新后再操作');
@@ -154,10 +177,21 @@ export class AntigravityBridge {
       try {
         const directory = join(this.root, 'daemon');
         if (text) {
-          await this.write(directory, 'SendUserCascadeMessage', {cascadeId: id, items: [{text}], clientMessageId: opId.split(':')[1]});
+          const message: Json = {cascadeId: id, items: [{text}], clientMessageId: opId.split(':')[1]};
+          if (model) {
+            const [models, config] = await Promise.all([this.models(), this.turnConfig(summary)]);
+            if (!models.some(option => option.id === model)) throw new BridgeError('invalid', '所选模型已不可用，请重新选择');
+            const plannerConfig = {...config.plannerConfig, planModel: model};
+            delete plannerConfig.requestedModel;
+            delete plannerConfig.modelName;
+            message.cascadeConfig = {...config, plannerConfig};
+            const latest = this.summary(id);
+            if (turnKey(latest) !== turn || !canSend(latest)) throw new BridgeError('changed', '会话状态已变化，请刷新后再发送');
+          }
+          await this.hub(directory, 'SendUserCascadeMessage', message);
           return {submitted: true};
         }
-        await this.write(directory, 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks: false});
+        await this.hub(directory, 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks: false});
         return {stopRequested: true};
       } finally { this.writing.delete(id); }
     });
