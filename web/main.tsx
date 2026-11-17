@@ -475,7 +475,8 @@ function App(){
           </div>
          </form>
          <input className="hidden" ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={e=>{void attach(Array.from(e.target.files||[]));e.target.value='';}}/>
-         <input className="hidden" ref={documentInput} type="file" multiple onChange={e=>{void attach(Array.from(e.target.files||[]));e.target.value='';}}/>
+         {/* Give mobile browsers document types so this entry does not offer media capture sources. */}
+         <input className="hidden" ref={documentInput} type="file" accept="application/*,text/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.xml,.zip" multiple onChange={e=>{void attach(Array.from(e.target.files||[]));e.target.value='';}}/>
       </div>
     </>}</main>
 
