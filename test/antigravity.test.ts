@@ -16,7 +16,7 @@ import {BridgeError} from '../src/shared/types.js';
 import {home, parseLocation} from '../web/route-state.js';
 import {serviceOf, switchRoute} from '../web/service-switch.js';
 
-test('app switches restore each machine and app independently, including legacy ChatGPT routes', () => {
+test('app switches restore each machine and app independently, and retired apps return to Codex', () => {
   const memory = new Map<string,string>();
   const original = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
   Object.defineProperty(globalThis, 'sessionStorage', {configurable: true, value: {
@@ -24,15 +24,18 @@ test('app switches restore each machine and app independently, including legacy 
   }});
   try {
     const id = randomUUID(), codex = {...home, thread:'native-thread', project:'D:/work'};
-    const ag = {...home, project:'file:///D:/work', antigravity:id}, chat = {...home, chat:id};
+    const ag = {...home, project:'file:///D:/work', antigravity:id}, cowork = {...home, cowork:'/cowork/cse_'+id};
     assert.deepEqual(switchRoute('pc', codex, 'antigravity'), {...home, antigravity:''});
-    assert.deepEqual(switchRoute('pc', ag, 'chatgpt'), {...home, chat:''});
-    assert.deepEqual(switchRoute('pc', chat, 'antigravity'), ag);
+    assert.deepEqual(switchRoute('pc', ag, 'cowork'), {...home, cowork:''});
+    assert.deepEqual(switchRoute('pc', cowork, 'antigravity'), ag);
     assert.deepEqual(switchRoute('pc', ag, 'codex'), codex);
     assert.deepEqual(switchRoute('other', home, 'antigravity'), {...home, antigravity:''});
-    for (const route of [ag, chat, codex]) assert.deepEqual(parseLocation({cmwRoute:route,cmwMachine:'pc'})?.route,route);
-    assert.equal(serviceOf(chat),'chatgpt');
-    assert.equal(parseLocation({cmwRoute:{...chat,antigravity:id},cmwMachine:'pc'}),null);
+    for (const route of [ag, cowork, codex]) assert.deepEqual(parseLocation({cmwRoute:route,cmwMachine:'pc'})?.route,route);
+    assert.equal(serviceOf(cowork),'cowork');
+    for (const retired of [{chat:id},{claude:id,project:'D:/work'}]) {
+      assert.deepEqual(parseLocation({cmwRoute:{...home,...retired},cmwMachine:'pc'}),{route:home,machine:'pc'});
+    }
+    assert.equal(parseLocation({cmwRoute:{...cowork,antigravity:id},cmwMachine:'pc'}),null);
     assert.equal(parseLocation({cmwRoute:{...home,antigravity:'../bad'},cmwMachine:'pc'}),null);
   } finally {
     if (original) Object.defineProperty(globalThis,'sessionStorage',original);

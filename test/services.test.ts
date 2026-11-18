@@ -17,31 +17,31 @@ const id='12345678-1234-1234-1234-123456789abc';
 test('connector routes app actions by prefix and keeps Codex as the fallback', async () => {
   const seen:string[]=[];let updating=false,prepared=0;
   const router=new ServiceRouter([
-    {prefix:'chatgpt',handle:async action=>{seen.push(action);return {ok:action};},mutations:['chatgpt.send'],prepareReload:()=>{prepared++;}},
-    {prefix:'antigravity',handle:async (action,payload)=>{seen.push(`${action}:${JSON.stringify(payload)}`);return {};}},
+    {prefix:'cowork',handle:async action=>{seen.push(action);return {ok:action};},prepareReload:()=>{prepared++;}},
+    {prefix:'antigravity',mutations:['antigravity.send'],handle:async (action,payload)=>{seen.push(`${action}:${JSON.stringify(payload)}`);return {};}},
   ],async request=>{seen.push(`codex:${request.action}`);return {};},()=>updating);
-  await router.handle({id:'1',action:'chatgpt.read',payload:{}});
+  await router.handle({id:'1',action:'cowork.read',payload:{}});
   await router.handle({id:'2',action:'antigravity.list',payload:undefined as any});
   await router.handle({id:'3',action:'session.read',payload:{}});
   await router.handle({id:'4',action:'runtime.reload',payload:{}});
-  assert.deepEqual(seen,['chatgpt.read','antigravity.list:{}','codex:session.read','codex:runtime.reload']);
+  assert.deepEqual(seen,['cowork.read','antigravity.list:{}','codex:session.read','codex:runtime.reload']);
   assert.equal(prepared,1);
   updating=true;
-  await assert.rejects(router.handle({id:'5',action:'chatgpt.send',payload:{}}),(error:BridgeError)=>error.code==='maintenance');
-  await router.handle({id:'6',action:'chatgpt.read',payload:{}});
+  await assert.rejects(router.handle({id:'5',action:'antigravity.send',payload:{}}),(error:BridgeError)=>error.code==='maintenance');
+  await router.handle({id:'6',action:'cowork.read',payload:{}});
   assert.throws(()=>new ServiceRouter([{prefix:'a',handle:async()=>({})},{prefix:'a',handle:async()=>({})}],async()=>({})));
 });
 
 test('phone app routes come from one registry', () => {
-  assert.deepEqual(SERVICE_IDS,['codex','chatgpt','antigravity','claude','cowork']);
+  assert.deepEqual(SERVICE_IDS,['codex','antigravity','cowork']);
   // Changing computers keeps the current app instead of falling back to Codex.
-  assert.deepEqual(serviceHome('chatgpt'),{...home,chat:''});
+  assert.deepEqual(serviceHome('cowork'),{...home,cowork:''});
   assert.deepEqual(serviceHome('antigravity','file:///c%3A/work'),{...home,project:'file:///c%3A/work',antigravity:''});
-  assert.deepEqual(serviceHome('chatgpt','C:/work'),{...home,chat:''});
+  assert.deepEqual(serviceHome('cowork','/project/'+id),{...home,project:'/project/'+id,cowork:''});
   const ag=withConversation(serviceHome('antigravity'),id);
   assert.equal(serviceOf(ag),'antigravity');assert.equal(routeConversation(ag),id);
   assert.equal(previewOwner(ag,'codex-thread'),'antigravity:'+id);
-  assert.equal(previewOwner(serviceHome('chatgpt'),'codex-thread'),'');
+  assert.equal(previewOwner(serviceHome('cowork'),'codex-thread'),'');
   assert.equal(previewOwner(home,'codex-thread'),'codex-thread');
   assert.deepEqual(fileOwner('antigravity:'+id),{service:'antigravity',id});
   assert.deepEqual(fileOwner('codex-thread'),{service:'codex',id:'codex-thread'});

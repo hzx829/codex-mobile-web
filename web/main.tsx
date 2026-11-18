@@ -1,9 +1,8 @@
 import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,useState,type ReactNode,type ClipboardEvent} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
-import {RemoteChatPanel} from './chatgpt';
+import {AntigravityPanel} from './antigravity';
 import {AntigravitySidebar} from './antigravity-sidebar';
-import {ClaudeCodePanel} from './claude-code';
 import {CoworkPanel} from './cowork';
 import {ChatSearch,HomeHeader,SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
@@ -58,9 +57,7 @@ function App(){
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const [remoteListRevision,refreshRemoteList]=useState(0);
-  const [claudeNewCwd,setClaudeNewCwd]=useState<string|null>(null);
   const service=serviceOf(route),codexActive=service==='codex';
-  useEffect(()=>setClaudeNewCwd(null),[machine,service]);
   const lastCodex=useRef({machine,route:home});
   if(codexActive)lastCodex.current={machine,route};
   const codexRoute=codexActive?route:lastCodex.current.machine===machine?lastCodex.current.route:home;
@@ -329,7 +326,7 @@ function App(){
   }
   function fileRequest(action:'read'|'download',ownerMachine:string,threadId:string,payload:Json){
     const owner=fileOwner(threadId);
-    if(owner.service==='antigravity'||owner.service==='claude')return call(`${owner.service}.file.${action}`,{conversationId:owner.id,...payload},ownerMachine);
+    if(owner.service==='antigravity')return call(`antigravity.file.${action}`,{conversationId:owner.id,...payload},ownerMachine);
     if(owner.service!=='codex')return Promise.reject(new Error('这个应用暂不支持读取文件'));
     return call(`file.${action}`,{threadId,...payload},ownerMachine);
   }
@@ -463,28 +460,17 @@ function App(){
      </PreviewPane>;
   const computerOptions=<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>;
   const fileOptions=<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>;
-  if(service==='chatgpt'){
-    return <div className="shell remote-shell"><RemoteChatPanel inert={Boolean(compactPreview&&preview)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
-      key={JSON.stringify([machine,service,remoteConversation,connected])} service="chatgpt" machine={machine} connected={connected}
-      conversationId={remoteConversation} call={call} go={id=>navigate(withConversation(serviceHome('chatgpt'),id))} back={()=>selectService('codex')} switcher={switcher}/>{previewPane}</div>;
-  }
-  if(service==='antigravity'||service==='claude'||service==='cowork'){
+  if(service==='antigravity'||service==='cowork'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
-    const open=(next:string)=>{setClaudeNewCwd(null);if(next!==id){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
-    const creatingClaude=service==='claude'&&!id&&claudeNewCwd!==null;
-    return <div className={`shell ${id||creatingClaude?'has-session':''}`}>
+    const open=(next:string)=>{if(next!==id){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
+    return <div className={`shell ${id?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
-        listAction={`${service}.list`} appName={serviceLabel(service)} onNew={service==='claude'?project=>setClaudeNewCwd(project):undefined}
+        listAction={`${service}.list`} appName={serviceLabel(service)}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
-      {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
-        machine={machine} newCwd={id?null:claudeNewCwd} created={next=>{setClaudeNewCwd(null);refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);}}
-        showImage={(url,title)=>showPreview({kind:'image',url,title})}
-        machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
-        showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
-        id&&service==='cowork'?<CoworkPanel key={JSON.stringify([machine,id])} id={id} inert={inert} machineName={machineName} connected={connected} back={()=>open('')} call={call}/>:
-        id?<RemoteChatPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
-        service="antigravity" machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
+      {id&&service==='cowork'?<CoworkPanel key={JSON.stringify([machine,id])} id={id} inert={inert} machineName={machineName} connected={connected} back={()=>open('')} call={call}/>:
+        id?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
+        machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}
       {sheet==='home'&&<SheetPanel title="选项" close={()=>setSheet(null)}>

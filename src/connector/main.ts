@@ -9,29 +9,23 @@ import { MAX_FRAME, BridgeError, type Json } from '../shared/types.js';
 import { Ledger } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
-import { ChatGPTBridge } from './chatgpt.js';
+import { CoworkBridge } from './cowork.js';
 import { AntigravityBridge } from './antigravity.js';
 import { ServiceRouter } from './services.js';
-import { ClaudeCodeBridge } from './claude-code.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
 if(config.codexHome)process.env.CODEX_HOME=config.codexHome;
 if(config.profile)process.env.CODEX_PROFILE=config.profile;
-if(config.claudeBin)process.env.CLAUDE_CODE_BIN=config.claudeBin;
 mkdirSync(config.dataDir,{recursive:true});
 const ledger=new Ledger(join(config.dataDir,'operations.sqlite'));
 const control=new Control(ledger);
 const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
-const claudeCode=new ClaudeCodeBridge(ledger);
-const chatgpt=new ChatGPTBridge(config.dataDir,config.chatgptPort||3342);
+const cowork=new CoworkBridge(config.dataDir,config.coworkPort||config.chatgptPort||3342);
 const services=new ServiceRouter([
-  {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond'],
-    prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
-  {prefix:'chatgpt',handle:(action,payload)=>chatgpt.handle(action,payload),mutations:['chatgpt.send','chatgpt.stop'],prepareReload:()=>chatgpt.prepareReload(),close:()=>chatgpt.close()},
-  {prefix:'cowork',handle:(action,payload)=>chatgpt.handleCowork(action,payload)},
+  {prefix:'cowork',handle:(action,payload)=>cowork.handle(action,payload),prepareReload:()=>cowork.prepareReload(),close:()=>cowork.close()},
   {prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']},
 ],request=>control.handle(request as any),()=>control.updating);
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;

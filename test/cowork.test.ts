@@ -1,15 +1,21 @@
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {once} from 'node:events';
+import {mkdtempSync, readFileSync, rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import type {AddressInfo} from 'node:net';
 import {test} from 'node:test';
 import {runInNewContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
+import {WebSocket, type WebSocketServer} from 'ws';
+import {CoworkBridge, coworkPairing} from '../src/connector/cowork.js';
 import {coworkThreadUrl} from '../src/shared/cowork.js';
 import {home,parseLocation} from '../web/route-state.js';
 
 const project='/project/12345678-1234-1234-1234-123456789abc';
 const thread='/cowork/cse_01MExample1234';
 const sidebar='/cowork/cse_01Pinned1234';
-const source=readFileSync('src/chatgpt-extension/cowork-page.js','utf8');
+const source=readFileSync('src/cowork-extension/cowork-page.js','utf8');
 
 function snapshot(html:string,path:string,kind:string,expectedPath=''){
   const {document,HTMLElement}=parseHTML(html);
@@ -52,4 +58,41 @@ test('Cowork routes restore project and conversation and constrain the external 
   assert.equal(parseLocation({cmwRoute:{...route,cowork:'//other.invalid/x'},cmwMachine:'pc'}),null);
   assert.equal(coworkThreadUrl(thread),'https://claude.ai'+thread);
   assert.equal(coworkThreadUrl(thread+'?token=bad'),'');
+});
+
+
+test('Cowork loopback requires pairing and serves the catalog and conversation over one connection',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'cmw-cowork-'));
+  const bridge=new CoworkBridge(dir,0);
+  t.after(()=>{bridge.close();rmSync(dir,{recursive:true,force:true});});
+  await bridge.ready;
+  const {server}=bridge as unknown as {server:WebSocketServer};
+  const pairing=coworkPairing(dir,(server.address() as AddressInfo).port);
+  await assert.rejects(bridge.handle('cowork.list'),{code:'browser_offline'});
+  const wrongOrigin=new WebSocket(pairing.url,{origin:'https://claude.ai'});
+  assert.equal((await once(wrongOrigin,'close'))[0],4403);
+  const origin='chrome-extension://'+('a'.repeat(32));
+  const wrongToken=new WebSocket(pairing.url,{origin});
+  await once(wrongToken,'open');
+  wrongToken.send(JSON.stringify({type:'hello',token:'0'.repeat(64)}));
+  assert.equal((await once(wrongToken,'close'))[0],4401);
+  const socket=new WebSocket(pairing.url,{origin});
+  await once(socket,'open');
+  socket.send(JSON.stringify({type:'hello',token:pairing.token}));
+  assert.deepEqual(JSON.parse(String((await once(socket,'message'))[0])),{type:'ready'});
+  const respond=(id:string,result:object)=>socket.send(JSON.stringify({type:'response',id,result}));
+  const requests:Array<{id:string;action:string;payload:unknown}>=[];
+  socket.on('message',data=>{
+    requests.push(JSON.parse(data.toString()));
+    if(requests.length!==2)return;
+    respond(requests[1].id,{title:'Project task',messages:[{id:'a',role:'assistant',text:'Done'}]});
+    respond(requests[0].id,{data:[{id:thread,title:'Project task'}],projects:[{id:project,name:'Delegate'}]});
+  });
+  await assert.rejects(bridge.handle('cowork.send'),{code:'unsupported'});
+  const [catalog,view]=await Promise.all([bridge.handle('cowork.list'),bridge.handle('cowork.read',{conversationId:thread})]);
+  assert.deepEqual(requests.map(({action,payload})=>({action,payload})),[
+    {action:'cowork.list',payload:{project:''}},{action:'cowork.read',payload:{conversationId:thread}},
+  ]);
+  assert.deepEqual(catalog,{data:[{id:thread,title:'Project task',updatedAt:0,running:false}],hasMore:false,projects:[{id:project,name:'Delegate',path:'Delegate'}]});
+  assert.deepEqual(view,{title:'Project task',messages:[{id:'a',role:'assistant',text:'Done'}]});
 });

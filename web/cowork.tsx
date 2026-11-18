@@ -28,9 +28,9 @@ export function CoworkPanel({id,inert,machineName,connected,back,call}:Props){
       {loading&&!view&&<p className="muted" role="status">正在读取 Cowork 会话…</p>}
       {!connected&&<p className="muted" role="status">电脑离线，连接后可刷新会话。</p>}
       {error&&<p className="error" role="alert">{error}</p>}
-      {view?.messages.map(message=><article key={message.id} className={`chatgpt-message ${message.role}`}><small>{message.role==='user'?'你':'Claude'}</small><div>{message.text}</div></article>)}
+      {view?.messages.map(message=><article key={message.id} className={`message ${message.role}`}><small>{message.role==='user'?'你':'Claude'}</small><div className="cowork-message">{message.text}</div></article>)}
     </div></div>
-    <footer className="chatgpt-footer">
+    <footer className="composer-area">
       {url&&<a href={url} target="_blank" rel="noreferrer">在 Claude 中打开</a>}
       {view&&<small>显示网页已载入的文字。续聊和附件在 Claude 中查看。</small>}
     </footer>

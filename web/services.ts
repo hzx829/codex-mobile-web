@@ -5,7 +5,7 @@ import {coworkThreadPath} from '../src/shared/cowork';
  * Every phone-side app lives in this table. Adding an app means adding one entry here,
  * a connector bridge with the same action prefix, and its panel in main.tsx.
  */
-type RemoteField = 'chat' | 'antigravity' | 'claude' | 'cowork';
+type RemoteField = 'antigravity' | 'cowork';
 type ServiceSpec = {
   label: string;
   /** Route field that holds the open conversation; Codex uses thread/project/newChat instead. */
@@ -19,9 +19,7 @@ type ServiceSpec = {
 
 export const SERVICES = {
   codex: {label: 'Codex'},
-  chatgpt: {label: 'ChatGPT', field: 'chat'},
   antigravity: {label: 'Antigravity', field: 'antigravity', keepsProject: true, threadPrefix: 'antigravity:'},
-  claude: {label: 'Claude Code', field: 'claude', keepsProject: true, threadPrefix: 'claude:'},
   cowork: {label: 'Cowork', field: 'cowork', keepsProject: true, conversationPattern: coworkThreadPath},
 } as const satisfies Record<string, ServiceSpec>;
 

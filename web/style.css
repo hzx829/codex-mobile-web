@@ -110,6 +110,7 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
 .conversation-skeleton > div:first-child { width: 76%; height: 52px; margin-left: auto; }
 .turn { margin-bottom: 22px; }
 .message { font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; margin: 0 0 16px; }
+.cowork-message { white-space: pre-wrap; }
 .message.conversation-status { font-size: 13px; color: var(--muted); }
 .message.user { margin-left: auto; width: fit-content; max-width: 88%; background: #f0f0f0; border-radius: 23px; padding: 11px 18px; }
 .user-entry { margin-bottom: 18px; }
