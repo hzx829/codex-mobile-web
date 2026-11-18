@@ -3,7 +3,10 @@ import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {WebSocket, WebSocketServer} from 'ws';
 import {BridgeError, type Json} from '../shared/types.js';
+import {coworkProjectPath, coworkThreadPath} from '../shared/cowork.js';
 import {Ledger} from './ledger.js';
+
+type PendingRequest={resolve:(value:Json)=>void;reject:(error:BridgeError)=>void;timer:NodeJS.Timeout;mutation:boolean;cowork:boolean};
 
 export function browserPairing(dataDir:string, port=3342){
   mkdirSync(dataDir,{recursive:true});
@@ -19,8 +22,9 @@ export function browserPairing(dataDir:string, port=3342){
 export class ChatGPTBridge {
   private server:WebSocketServer;
   private socket?:WebSocket;
+  private coworkSupported=false;
   private failure='';
-  private pending?:{id:string;resolve:(value:Json)=>void;reject:(error:BridgeError)=>void;timer:NodeJS.Timeout;mutation:boolean};
+  private pending=new Map<string,PendingRequest>();
   private ledger:Ledger;
   private maintenanceUntil=0;
   readonly ready:Promise<void>;
@@ -45,44 +49,71 @@ export class ChatGPTBridge {
           const expected=Buffer.from(pairing.token);
           if(message.type!=='hello'||supplied.length!==expected.length||!timingSafeEqual(supplied,expected)){ws.close(4401);return;}
           if(this.socket){ws.close(4409);return;}
-          authenticated=true;clearTimeout(auth);this.socket=ws;ws.send(JSON.stringify({type:'ready'}));return;
+          authenticated=true;clearTimeout(auth);this.socket=ws;this.coworkSupported=message.cowork===true;ws.send(JSON.stringify({type:'ready'}));return;
         }
         if(message.type==='ping'){ws.send(JSON.stringify({type:'pong'}));return;}
-        const pending=this.pending;
-        if(message.type!=='response'||!pending||message.id!==pending.id)return;
-        this.pending=undefined;clearTimeout(pending.timer);
+        if(message.type!=='response')return;
+        const pending=this.pending.get(message.id);
+        if(!pending)return;
+        this.pending.delete(message.id);clearTimeout(pending.timer);
         if(message.error)pending.reject(new BridgeError(String(message.error.code||'browser_error'),String(message.error.message||'浏览器操作失败'),Boolean(message.error.uncertain)));
         else if(!message.result||typeof message.result!=='object')pending.reject(new BridgeError('protocol','浏览器响应格式无效',pending.mutation));
         else pending.resolve(message.result);
       });
       ws.on('close',()=>{
         clearTimeout(auth);clearInterval(pulse);
-        if(this.socket!==ws)return;this.socket=undefined;
-        if(this.pending){const pending=this.pending;this.pending=undefined;clearTimeout(pending.timer);pending.reject(new BridgeError('browser_offline','ChatGPT 浏览器桥接已断开，请核实聊天内容',pending.mutation));}
+        if(this.socket!==ws)return;this.socket=undefined;this.coworkSupported=false;
+        for(const pending of this.pending.values()){
+          clearTimeout(pending.timer);pending.reject(new BridgeError('browser_offline','电脑浏览器桥接已断开，请重新连接',pending.mutation));
+        }
+        this.pending.clear();
       });
     });
   }
-  get busy(){return Boolean(this.pending);}
-  prepareReload(){if(this.busy)throw new BridgeError('active','ChatGPT 浏览器正在处理操作，请稍后更新');this.maintenanceUntil=Date.now()+60_000;}
+  get busy(){return this.pending.size>0;}
+  prepareReload(){if(this.busy)throw new BridgeError('active','电脑浏览器正在处理操作，请稍后更新');this.maintenanceUntil=Date.now()+60_000;}
   private request(action:string,payload:Json={}):Promise<Json>{
     if(Date.now()<this.maintenanceUntil)throw new BridgeError('active','连接器正在更新，请稍后重试');
     if(!this.socket||this.socket.readyState!==WebSocket.OPEN)throw new BridgeError('browser_offline','请在电脑浏览器的扩展中连接 ChatGPT 页面');
-    if(this.pending)throw new BridgeError('active','ChatGPT 页面正在处理另一项操作，请稍后重试');
+    const cowork=action.startsWith('cowork.');
+    if(cowork?this.pending.size>=4:[...this.pending.values()].some(pending=>!pending.cowork))throw new BridgeError('active','电脑浏览器正在处理另一项操作，请稍后重试');
     const socket=this.socket,id=randomUUID(),mutation=action==='send'||action==='stop';
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>{
-        this.pending=undefined;socket.terminate();
-        reject(new BridgeError('timeout','ChatGPT 页面响应超时，请刷新核实；不会自动重发',mutation));
+        this.pending.delete(id);if(!cowork)socket.terminate();
+        reject(new BridgeError('timeout',mutation?'ChatGPT 页面响应超时，请刷新核实；不会自动重发':'电脑浏览器响应超时，请稍后重试',mutation));
       },30_000);
-      this.pending={id,resolve,reject,timer,mutation};
+      this.pending.set(id,{resolve,reject,timer,mutation,cowork});
       socket.send(JSON.stringify({type:'request',id,action,payload}));
     });
+  }
+  async handleCowork(action:string,payload:Json):Promise<Json>{
+    if(action!=='cowork.list'&&action!=='cowork.read')throw new BridgeError('unsupported','不支持此 Cowork 操作');
+    if(!this.socket||this.socket.readyState!==WebSocket.OPEN)throw new BridgeError('browser_offline','请在电脑浏览器扩展中连接已登录的 Cowork 页面');
+    if(!this.coworkSupported)throw new BridgeError('unsupported','请重新加载电脑上的浏览器桥接扩展以使用 Cowork');
+    if(action==='cowork.read'){
+      if(typeof payload.conversationId!=='string'||!coworkThreadPath.test(payload.conversationId))throw new BridgeError('invalid','Cowork 会话链接无效');
+      const view=await this.request(action,{conversationId:payload.conversationId});
+      if(typeof view.title!=='string'||!Array.isArray(view.messages))throw new BridgeError('protocol','Cowork 会话响应格式无效');
+      return {title:view.title,messages:view.messages.filter(item=>typeof item?.id==='string'&&['user','assistant'].includes(item.role)&&typeof item.text==='string')};
+    }
+    const {project='',search='',offset=0}=payload;
+    if(typeof project!=='string'||(project!==''&&!coworkProjectPath.test(project)))throw new BridgeError('invalid','Cowork 项目链接无效');
+    if(typeof search!=='string'||search.length>200||!Number.isSafeInteger(offset)||offset<0)throw new BridgeError('invalid','Cowork 列表查询参数无效');
+    const result=await this.request(action,{project});
+    if(!Array.isArray(result.data)||!Array.isArray(result.projects))throw new BridgeError('protocol','Cowork 列表响应格式无效');
+    const query=search.trim().toLowerCase();
+    const matches=result.data.filter(item=>typeof item?.id==='string'&&coworkThreadPath.test(item.id)&&typeof item.title==='string'&&item.title.toLowerCase().includes(query));
+    return {data:matches.slice(offset,offset+50).map(({id,title})=>({id,title,updatedAt:0,running:false})),hasMore:matches.length>offset+50,
+      ...(!project&&!offset?{projects:result.projects.filter(item=>typeof item?.id==='string'&&coworkProjectPath.test(item.id)&&typeof item.name==='string').map(({id,name})=>({id,name,path:name}))}:{}),
+      ...(typeof result.notice==='string'?{notice:result.notice}:{})};
   }
   async handle(action:string,payload:Json={}):Promise<Json>{
     if(action==='chatgpt.operation')return this.ledger.read(String(payload.opId||''));
     if(action==='chatgpt.status'){
       if(!this.socket)return {connected:false,notice:this.failure?'浏览器桥接监听失败，请检查本地 3342 端口':'请安装本地扩展，并连接已登录的 ChatGPT 页面'};
-      return {connected:true,...await this.request('status')};
+      try{return {connected:true,...await this.request('status')};}
+      catch(error){if(error instanceof BridgeError&&error.code==='browser_offline')return {connected:false,notice:error.message};throw error;}
     }
     if(action==='chatgpt.list')return this.request('list',{more:payload.more===true});
     if(!['chatgpt.read','chatgpt.send','chatgpt.stop'].includes(action))throw new BridgeError('invalid','未知 ChatGPT 操作');

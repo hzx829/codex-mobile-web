@@ -6,7 +6,7 @@ import {createContext,runInContext} from 'node:vm';
 const source=readFileSync('src/chatgpt-extension/background.js','utf8');
 function worker(local:Record<string,any>,sendMessage:(id:number,payload:any)=>Promise<any>){
   const storage=(values:Record<string,any>)=>({get:async(key:string)=>key?{[key]:values[key]}:values,set:async(patch:any)=>Object.assign(values,patch),remove:async(keys:string|string[])=>{for(const key of [keys].flat())delete values[key];}});
-  const context=createContext({crypto,TextEncoder,Uint8Array,URL,Error,setTimeout:()=>0,setInterval:()=>0,clearInterval(){},
+  const context=createContext({crypto,TextEncoder,Uint8Array,URL,Error,importScripts(){},setTimeout:()=>0,setInterval:()=>0,clearInterval(){},
     chrome:{runtime:{id:'ext',getURL:(path:string)=>path,onMessage:{addListener(){}}},storage:{local:storage(local),session:storage({tabId:1})},tabs:{get:async()=>({id:1,url:'https://chatgpt.com/'}),sendMessage,onRemoved:{addListener(){}}},alarms:{create(){},onAlarm:{addListener(){}}}},
     fetch:async()=>({json:async()=>({url:'ws://127.0.0.1:3342/chatgpt',token:'a'.repeat(64)})}),WebSocket:class{static OPEN=1;readyState=0;}});
   runInContext(source,context);return (action:string,payload:any)=>{context.action=action;context.payload=payload;return runInContext('execute(action,payload)',context);};

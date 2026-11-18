@@ -1,6 +1,6 @@
-import {SERVICES, SERVICE_IDS, conversationId, remoteFields} from './services';
+import {SERVICES, SERVICE_IDS, isConversation, remoteFields} from './services';
 
-export type Route={thread:string;project:string;newChat:boolean;chat?:string;antigravity?:string;claude?:string};
+export type Route={thread:string;project:string;newChat:boolean;chat?:string;antigravity?:string;claude?:string;cowork?:string};
 export const home:Route={thread:'',project:'',newChat:false};
 export type SavedLocation={route:Route;machine:string};
 
@@ -14,7 +14,7 @@ export function parseLocation(value:unknown):SavedLocation|null{
   const field=present[0];
   if(field){
     const id=route[field];
-    if(typeof id!=='string'||id!==''&&!conversationId.test(id))return null;
+    if(typeof id!=='string'||id!==''&&!isConversation(field,id))return null;
     const service=SERVICE_IDS.find(item=>(SERVICES[item] as {field?:string}).field===field)!;
     const keepsProject=(SERVICES[service] as {keepsProject?:boolean}).keepsProject;
     return {route:{...home,project:keepsProject?route.project:'',[field]:id},machine:state.cmwMachine};

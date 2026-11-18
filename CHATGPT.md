@@ -6,7 +6,7 @@
 
 1. 在项目目录执行 `node --import tsx scripts/prepare-chatgpt-extension.ts`。
 2. 打开 `chrome://extensions` 或 `edge://extensions`，启用开发者模式，点击“加载已解压的扩展程序”，选择输出的 `.local/chatgpt-extension` 目录。
-3. 在浏览器打开 `https://chatgpt.com/`，登录要使用的账号，打开侧栏。点击 **ChatGPT Mobile Bridge** 扩展，选择“连接当前 ChatGPT 页面”。建议使用专门的标签页，保持电脑、浏览器、连接器运行。
+3. 在浏览器打开 `https://chatgpt.com/`，登录要使用的账号，打开侧栏。点击 **Mobile Web Browser Bridge** 扩展，选择“连接当前页面”。建议使用专门的标签页，保持电脑、浏览器、连接器运行。
 4. 刷新手机网页，打开首页 **ChatGPT**。可以加载侧栏更多聊天，或直接粘贴已有 ChatGPT 聊天链接。
 
 浏览器重启后需重新选择标签页。更新扩展时重新运行第 1 步，在扩展管理页点击重新加载，然后重新连接页面。端口默认 `127.0.0.1:3342`，可在连接器配置中设置 `chatgptPort`，修改后需重启连接器并重新准备扩展。
@@ -20,3 +20,9 @@
 自动检查覆盖本地配对、重连、请求路由、重复发送保护、页面 DOM 样例和构建。真实账号的登录、侧栏、续聊和停止生成由使用者在手机和电脑上验收。
 
 扩展后台按 [Chrome 官方 WebSocket 生命周期说明](https://developer.chrome.com/docs/extensions/how-to/web-platform/websockets)保持连接；页面脚本使用 [隔离的 content script](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts)。
+
+## Cowork
+
+同一扩展也支持 Cowork。更新扩展后，在电脑浏览器打开已登录的 [Claude](https://claude.ai/)，展开侧栏，点扩展的“连接当前页面”，并允许读取 `claude.ai`。保持页面和连接器运行，在 Mobile Web 选择 **Cowork**。
+
+列表来自已连接页面的侧栏和 Claude 项目页。打开项目会显示该项目页面已载入的 Cowork 会话。可在 Mobile Web 查看网页已显示的文字历史，并通过“在 Claude 中打开”继续对话或查看附件。桌面独有的旧本机会话仍在 Claude Desktop 中。浏览器首次连接和真实账号页面由使用者验收。

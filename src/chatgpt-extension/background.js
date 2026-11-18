@@ -1,3 +1,4 @@
+importScripts('cowork-page.js','cowork.js');
 let socket,connected=false,busy=false,notice='',connecting=false;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const error=(code,message,uncertain=false)=>Object.assign(new Error(message),{code,uncertain});
@@ -58,18 +59,22 @@ async function execute(action,payload){
 async function connect(){
   if(socket||connecting)return;connecting=true;
   try{
-    await selectedTab();
+    await selectedTab().catch(()=>selectedCoworkTab());
     const config=await (await fetch(chrome.runtime.getURL('pairing.json'))).json();
     if(!/^ws:\/\/127\.0\.0\.1:\d+\/chatgpt$/.test(config.url)||!/^[a-f0-9]{64}$/.test(config.token))throw error('config','本地配对文件无效，请重新运行安装准备脚本');
     const ws=new WebSocket(config.url);socket=ws;
     const pulse=setInterval(()=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'ping'}));},20_000);
-    ws.onopen=()=>ws.send(JSON.stringify({type:'hello',token:config.token}));
+    ws.onopen=()=>ws.send(JSON.stringify({type:'hello',token:config.token,cowork:true}));
     ws.onmessage=async event=>{
       let message;try{message=JSON.parse(event.data);}catch{return;}
       if(message.type==='ready'){connected=true;notice='';return;}
       if(message.type!=='request')return;
       let response;
-      if(busy)response={error:{code:'active',message:'ChatGPT 页面仍在处理上次操作'}};
+      if (['cowork.list','cowork.read'].includes(message.action)) {
+        try {response={result:await executeCowork(message.action,message.payload||{})};}
+        catch(e){response={error:{code:e.code||'page_unavailable',message:e.code?e.message:'无法读取 Cowork 页面，请检查电脑标签页后重试'}};}
+      }
+      else if(busy)response={error:{code:'active',message:'ChatGPT 页面仍在处理上次操作'}};
       else{
         busy=true;
         try{response={result:await execute(message.action,message.payload||{})};}
@@ -91,20 +96,33 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   // Binding is available only to our popup, never the page/content script.
   if(sender.id!==chrome.runtime.id||sender.tab)return;
   void(async()=>{
-    if(message.type==='bridge.status')return {connected,notice};
-    if(busy)throw error('active','正在处理手机操作，请稍后切换');
-    if(message.type==='bridge.unbind'){await chrome.storage.session.remove('tabId');socket?.close();socket=undefined;connected=false;notice='已断开';return {};}
+    if(message.type==='bridge.status')return {connected,notice,chatgpt:Boolean(await selectedTab().catch(()=>null)),cowork:Boolean(await selectedCoworkTab().catch(()=>null))};
+    const cowork=message.service==='cowork';
+    const key=cowork?'coworkTabId':'tabId';
+    if(busy&&!cowork)throw error('active','正在处理手机操作，请稍后切换');
+    if(message.type==='bridge.unbind'){await chrome.storage.session.remove(key);await disconnectIfUnbound();return {};}
     if(message.type==='bridge.bind'){
-      const tab=await chrome.tabs.get(message.tabId);if(!validTab(tab))throw error('invalid','请选择 ChatGPT 页面');
-      await chrome.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
-      await chrome.storage.session.set({tabId:tab.id});socket?.close();socket=undefined;connected=false;await connect();return {};
+      const tab=await chrome.tabs.get(message.tabId);
+      if(cowork?!isCoworkTab(tab):!validTab(tab))throw error('invalid',cowork?'请选择 Claude 页面':'请选择 ChatGPT 页面');
+      if(!cowork)await chrome.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
+      await chrome.storage.session.set({[key]:tab.id});await connect();return {};
     }
     throw error('invalid','未知操作');
   })().then(respond,e=>respond({error:e.message}));return true;
 });
 chrome.alarms.create('bridge-reconnect',{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(()=>void connect());
-chrome.tabs.onRemoved.addListener(async id=>{const {tabId}=await chrome.storage.session.get('tabId');if(id===tabId){await chrome.storage.session.remove('tabId');socket?.close();}});
+async function disconnectIfUnbound(){
+  if(await selectedTab().catch(()=>selectedCoworkTab()).catch(()=>null))return;
+  socket?.close();socket=undefined;connected=false;notice='已断开';
+}
+chrome.tabs.onRemoved.addListener(async id=>{
+  const {tabId,coworkTabId}=await chrome.storage.session.get(['tabId','coworkTabId']);
+  if(id===tabId)await chrome.storage.session.remove('tabId');
+  else if(id===coworkTabId)await chrome.storage.session.remove('coworkTabId');
+  else return;
+  await disconnectIfUnbound();
+});
 // Keep only receipt hashes/status, never cookies, auth tokens, or message text.
 void chrome.storage.local.get(null).then(values=>chrome.storage.local.remove(Object.entries(values).filter(([key,value])=>key.startsWith('operation:')&&value.at<Date.now()-7*86400_000).map(([key])=>key)));
 void connect();

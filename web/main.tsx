@@ -4,6 +4,7 @@ import {Client,operationId} from './client';
 import {RemoteChatPanel} from './chatgpt';
 import {AntigravitySidebar} from './antigravity-sidebar';
 import {ClaudeCodePanel} from './claude-code';
+import {CoworkPanel} from './cowork';
 import {ChatSearch,HomeHeader,SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,withConversation,type Service} from './services';
@@ -56,7 +57,7 @@ function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
-  const [antigravityListRevision,refreshAntigravityList]=useState(0);
+  const [remoteListRevision,refreshRemoteList]=useState(0);
   const [claudeNewCwd,setClaudeNewCwd]=useState<string|null>(null);
   const service=serviceOf(route),codexActive=service==='codex';
   useEffect(()=>setClaudeNewCwd(null),[machine,service]);
@@ -467,27 +468,28 @@ function App(){
       key={JSON.stringify([machine,service,remoteConversation,connected])} service="chatgpt" machine={machine} connected={connected}
       conversationId={remoteConversation} call={call} go={id=>navigate(withConversation(serviceHome('chatgpt'),id))} back={()=>selectService('codex')} switcher={switcher}/>{previewPane}</div>;
   }
-  if(service==='antigravity'||service==='claude'){
+  if(service==='antigravity'||service==='claude'||service==='cowork'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
-    const open=(next:string)=>{setClaudeNewCwd(null);if(next!==id){navigate(withConversation(route,next));if(!next)refreshAntigravityList(value=>value+1);}};
+    const open=(next:string)=>{setClaudeNewCwd(null);if(next!==id){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
     const creatingClaude=service==='claude'&&!id&&claudeNewCwd!==null;
     return <div className={`shell ${id||creatingClaude?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
-        revision={antigravityListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
+        revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
         listAction={`${service}.list`} appName={serviceLabel(service)} onNew={service==='claude'?project=>setClaudeNewCwd(project):undefined}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
-        machine={machine} newCwd={id?null:claudeNewCwd} created={next=>{setClaudeNewCwd(null);refreshAntigravityList(value=>value+1);navigate(withConversation(route,next),true);}}
+        machine={machine} newCwd={id?null:claudeNewCwd} created={next=>{setClaudeNewCwd(null);refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);}}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
+        id&&service==='cowork'?<CoworkPanel key={JSON.stringify([machine,id])} id={id} inert={inert} machineName={machineName} connected={connected} back={()=>open('')} call={call}/>:
         id?<RemoteChatPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         service="antigravity" machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}
       {sheet==='home'&&<SheetPanel title="选项" close={()=>setSheet(null)}>
         <MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>
-        <MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);refreshAntigravityList(value=>value+1);}}>刷新项目与会话</MenuItem>
+        <MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);refreshRemoteList(value=>value+1);}}>刷新项目与会话</MenuItem>
         <MenuItem icon="logout" onClick={logout}>断开连接</MenuItem>
       </SheetPanel>}
       {sheet==='computer'&&<SheetPanel title="电脑" close={()=>setSheet(null)}>{computerOptions}</SheetPanel>}

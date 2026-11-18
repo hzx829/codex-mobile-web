@@ -10,8 +10,8 @@
   --panel: #f7f7f7;
 }
 * { box-sizing: border-box; }
-.service-switch { display: flex; gap: 2px; align-self: center; margin: 4px auto 8px; padding: 3px; border-radius: 14px; background: #ededed; flex: 0 0 auto; }
-.service-switch button { min-height: 36px; padding: 5px 13px; border-radius: 11px; font-size: 14px; color: #565656; }
+.service-switch { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px; max-width: calc(100% - 12px); align-self: center; margin: 4px auto 8px; padding: 3px; border-radius: 14px; background: #ededed; flex: 0 0 auto; }
+.service-switch button { min-height: 36px; padding: 5px 10px; border-radius: 11px; font-size: 14px; color: #565656; white-space: nowrap; }
 .service-switch button[aria-pressed="true"] { background: white; color: #171717; box-shadow: 0 1px 3px #0002; font-weight: 600; }
 body { margin: 0; }
 button, input, textarea, select { font: inherit; color: inherit; }

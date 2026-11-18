@@ -17,12 +17,12 @@ async function setup(t:any){
   const port=(bridge as any).server.address().port;
   const {token}=JSON.parse(await readFile(join(dir,'chatgpt-pairing.json'),'utf8'));
   t.after(async()=>{const server=(bridge as any).server,closed=once(server,'close');bridge.close();await closed;await rm(dir,{recursive:true,force:true});});
-  async function attach(options:{origin?:string;token?:string}={}){
+  async function attach(options:{origin?:string;token?:string;cowork?:boolean}={}){
     const ws=new WebSocket(`ws://127.0.0.1:${port}/chatgpt`,{origin:options.origin||origin});
     const closed=once(ws,'close');
     await once(ws,'open');
     const response=once(ws,'message');
-    ws.send(JSON.stringify({type:'hello',token:options.token||token}));
+    ws.send(JSON.stringify({type:'hello',token:options.token||token,cowork:options.cowork}));
     if(options.origin||options.token)return {ws,closed};
     assert.equal(JSON.parse(String((await response)[0])).type,'ready');return {ws,closed};
   }
@@ -68,4 +68,24 @@ test('ChatGPT routing validates IDs and prevents reload during an in-flight requ
 test('saved ChatGPT routes never select a Codex thread',()=>{
   assert.deepEqual(parseLocation({cmwRoute:{thread:'codex-thread',project:'C:/work',newChat:true,chat:id},cmwMachine:'pc'}),{route:{...home,chat:id},machine:'pc'});
   assert.equal(parseLocation({cmwRoute:{...home,chat:'invalid'},cmwMachine:'pc'}),null);
+});
+
+test('Cowork uses the paired extension for independent read-only requests',async t=>{
+  const {bridge,attach}=await setup(t),{ws}=await attach({cowork:true});
+  const requests:any[]=[],thread='/cowork/cse_01MExample1234',project=`/project/${id}`;
+  ws.on('message',raw=>{
+    const request=JSON.parse(String(raw));requests.push(request);
+    if(requests.length!==2)return;
+    for(const entry of requests.toReversed()){
+      const result=entry.action==='cowork.list'?{data:[{id:thread,title:'历史会话'},{id:thread+'/invalid',title:'历史会话'}],projects:[{id:project,name:'Delegate'}]}
+        :{title:'历史会话',messages:[{id:'1',role:'user',text:'Hi'}]};
+      ws.send(JSON.stringify({type:'response',id:entry.id,result}));
+    }
+  });
+  await assert.rejects(bridge.handleCowork('cowork.send',{conversationId:thread}),{code:'unsupported'});
+  await assert.rejects(bridge.handleCowork('cowork.read',{conversationId:'https://wrong.example/'}),{code:'invalid'});
+  const [list,view]=await Promise.all([bridge.handleCowork('cowork.list',{search:'历史'}),bridge.handleCowork('cowork.read',{conversationId:thread})]);
+  assert.deepEqual(list.data,[{id:thread,title:'历史会话',updatedAt:0,running:false}]);
+  assert.deepEqual(list.projects,[{id:project,name:'Delegate',path:'Delegate'}]);
+  assert.equal(view.messages[0].text,'Hi');
 });

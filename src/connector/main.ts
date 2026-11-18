@@ -31,6 +31,7 @@ const services=new ServiceRouter([
   {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond'],
     prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
   {prefix:'chatgpt',handle:(action,payload)=>chatgpt.handle(action,payload),mutations:['chatgpt.send','chatgpt.stop'],prepareReload:()=>chatgpt.prepareReload(),close:()=>chatgpt.close()},
+  {prefix:'cowork',handle:(action,payload)=>chatgpt.handleCowork(action,payload)},
   {prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']},
 ],request=>control.handle(request as any),()=>control.updating);
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
