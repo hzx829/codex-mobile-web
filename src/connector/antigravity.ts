@@ -12,10 +12,19 @@ const guid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const idle = 'CASCADE_RUN_STATUS_IDLE';
 const active = 'CASCADE_RUN_STATUS_RUNNING';
 const tailSize = 1024 * 1024;
-type Summary = {id: string; title: string; status: string; notIdle: number | null; modified: string; steps: number; userStep: number | null; userTime: string | null};
-const columns = 'conversation_id AS id, title, status, not_fully_idle AS notIdle, last_modified_time AS modified, step_count AS steps, last_user_input_step_index AS userStep, last_user_input_time AS userTime';
+type Summary = {id: string; title: string; status: string; notIdle: number | null; modified: string; steps: number; userStep: number | null; userTime: string | null; workspaces: string};
+const columns = 'conversation_id AS id, title, status, not_fully_idle AS notIdle, last_modified_time AS modified, step_count AS steps, last_user_input_step_index AS userStep, last_user_input_time AS userTime, workspace_uris AS workspaces';
+const workspaceEntries = "json_each(CASE WHEN json_valid(workspace_uris) THEN workspace_uris ELSE '[]' END)";
 const turnKey = (summary: Summary) => JSON.stringify([summary.userStep, summary.userTime]);
 const canSend = (summary: Summary) => summary.status === idle && !summary.notIdle;
+
+function localWorkspace(value: unknown) {
+  if(typeof value!=='string')return '';
+  try {const url=new URL(value);return url.host?'':fileURLToPath(url);} catch {return '';}
+}
+function singleWorkspace(value: string) {
+  try {const roots=JSON.parse(value);return Array.isArray(roots)&&roots.length===1?localWorkspace(roots[0]):'';} catch {return '';}
+}
 
 function readIssue(step: Json): AntigravityIssue {
   const error = typeof step.error === 'string' ? step.error : '';
@@ -110,8 +119,9 @@ export class AntigravityBridge {
       if (e.code !== 'ENOENT') throw e;
       return null;
     });
-    const revision = JSON.stringify([summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, String(file?.mtimeNs), String(file?.size)]);
-    return {path, revision, turn: turnKey(summary), title: summary.title || '未命名对话', running: summary.status === active,
+    const cwd=singleWorkspace(summary.workspaces);
+    const revision = JSON.stringify([summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, cwd, String(file?.mtimeNs), String(file?.size)]);
+    return {path, revision, turn: turnKey(summary), title: summary.title || '未命名对话', cwd, running: summary.status === active,
       canSend: canSend(summary), supportsModelSelection: true};
   }
 
@@ -147,8 +157,19 @@ export class AntigravityBridge {
   async handle(action: string, p: Json): Promise<Json> {
     if (action === 'antigravity.list') {
       const offset = Number.isSafeInteger(p.offset) && p.offset >= 0 ? p.offset : 0;
-      const rows = this.index(db => db.prepare(`SELECT conversation_id AS id, title FROM conversation_summaries ORDER BY last_modified_time DESC, conversation_id LIMIT 51 OFFSET ?`).all(offset));
-      return {data: rows.slice(0, 50).map(row => ({id: row.id, title: row.title || '未命名对话'})), hasMore: rows.length > 50};
+      const project=p.project?textRequired(p.project,'项目',4096):null;
+      const search=p.search?textRequired(p.search,'搜索内容',200):null;
+      return this.index(db=>{
+        const rows=db.prepare(`SELECT conversation_id AS id, title, status, last_modified_time AS modified FROM conversation_summaries
+          WHERE (? IS NULL OR EXISTS (SELECT 1 FROM ${workspaceEntries} AS workspace WHERE workspace.value=?))
+          AND (? IS NULL OR instr(lower(coalesce(nullif(title,''),'未命名对话')),lower(?))>0)
+          ORDER BY last_modified_time DESC, conversation_id LIMIT 51 OFFSET ?`).all(project,project,search,search,offset);
+        const projects=!offset&&!search?db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text' ORDER BY uri`).all().flatMap(({uri})=>{
+          const path=localWorkspace(uri);return path?[{id:uri,path}]:[];
+        }):undefined;
+        return {data:rows.slice(0,50).map(row=>({id:row.id,title:row.title||'未命名对话',
+          running:row.status===active,updatedAt:Date.parse(String(row.modified))||0})),hasMore:rows.length>50,projects};
+      });
     }
     if (action === 'antigravity.operation') return this.ledger.read(textRequired(p.opId, '操作标识', 100));
     const id = textRequired(p.conversationId, '会话', 36);
@@ -158,16 +179,7 @@ export class AntigravityBridge {
       if (/^[\\/]{2}/.test(path)) throw new BridgeError('invalid', '请选择本机文件');
       const row = this.index(db => db.prepare('SELECT workspace_uris FROM conversation_summaries WHERE conversation_id=?').get(id));
       if (!row) throw new BridgeError('missing', '桌面上找不到这条 Antigravity 会话');
-      let cwd = '';
-      if (!isAbsolute(path)) {
-        try {
-          const roots = JSON.parse(String(row.workspace_uris));
-          if (Array.isArray(roots) && roots.length === 1) {
-            const url = new URL(roots[0]);
-            if (!url.host) cwd = fileURLToPath(url);
-          }
-        } catch { /* A workspace without a single local root requires an absolute path. */ }
-      }
+      const cwd=isAbsolute(path)?'':singleWorkspace(String(row.workspace_uris));
       return action === 'antigravity.file.read' ? readProjectFile(cwd, path)
         : downloadProjectFile(cwd, path, textRequired(p.revision, '文件版本', 64), p.offset);
     }

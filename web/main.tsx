@@ -2,7 +2,10 @@ import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,u
 import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
 import {RemoteChatPanel} from './chatgpt';
-import {ServiceSwitch, serviceOf, switchRoute, type Service} from './service-switch';
+import {AntigravitySidebar} from './antigravity-sidebar';
+import {ChatSearch,HomeHeader,SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight} from './chat-layout';
+import {ServiceSwitch, switchRoute} from './service-switch';
+import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceOf,withConversation,type Service} from './services';
 import {Icon,type IconName} from './icons';
 import {IconButton} from './icon-button';
 import {connectionLost,ConversationStatus,ConversationTurn} from './conversation';
@@ -21,7 +24,7 @@ import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images'
 import {MAX_ATTACHMENTS,validateAttachments} from '../src/shared/attachments';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {DraftSave} from './draft-save';
-import {ThreadMenu,ThreadRow} from './thread-menu';
+import {relativeTime,ThreadMenu,ThreadRow} from './thread-menu';
 import type {MenuPoint} from './popover';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {groupThreads,visibleThreads,rememberThreads,saveThread,type ThreadPreferences,type ThreadPreference} from './thread-preferences';
@@ -43,7 +46,6 @@ const load=(key:string,fallback:any)=>{try{return JSON.parse(localStorage.getIte
 const save=(key:string,value:any)=>{try{localStorage.setItem(key,JSON.stringify(value));}catch{}};
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:'网页预览';
-function relativeTime(value:number){if(!value)return '';const elapsed=Math.max(0,Date.now()-(value<1e12?value*1000:value));const minutes=Math.floor(elapsed/60_000);return minutes<1?'刚刚':minutes<60?`${minutes}分钟`:minutes<1440?`${Math.floor(minutes/60)}小时`:`${Math.floor(minutes/1440)}天`;}
 function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('token');if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
 const savedLocation=initialLocation();
 type PreviewTab={id:number;target:PreviewTarget};
@@ -53,12 +55,13 @@ function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
+  const [antigravityListRevision,refreshAntigravityList]=useState(0);
   const service=serviceOf(route),codexActive=service==='codex';
   const lastCodex=useRef({machine,route:home});
   if(codexActive)lastCodex.current={machine,route};
   const codexRoute=codexActive?route:lastCodex.current.machine===machine?lastCodex.current.route:home;
   const {thread:selected,project,newChat}=codexRoute,showThread=Boolean(selected||newChat);
-  const previewThread=codexActive?selected:route.antigravity?'antigravity:'+route.antigravity:'';
+  const remoteConversation=routeConversation(route),previewThread=previewOwnerOf(route,selected);
   const previewOwner=useRef({machine,thread:previewThread});previewOwner.current={machine,thread:previewThread};
   const threadMounted=codexActive&&showThread&&Boolean(token)&&status!=='auth_error';
   const [info,setInfo]=useState<Json|null>(null),[projects,setProjects]=useState<string[]>([]),[sessions,setSessions]=useState<Json[]>([]);
@@ -99,7 +102,7 @@ function App(){
   useLayoutEffect(()=>{
     setPreviewState({tabs:[],activeId:null});setBrowserRequest(null);setBrowserSession(null);setError('');
     return ()=>{browserSequence.current++;fileSequence.current++;leavePreview();};
-  },[machine,service,route.antigravity]);
+  },[machine,service,remoteConversation]);
   function showPreview(next:PreviewTarget){
     const id=++previewIds.current;
     setPreviewState(old=>{const tabs=next.kind==='web'?old.tabs.filter(tab=>tab.target.kind!=='web'||tab.target.session.sessionId===next.session.sessionId):old.tabs;
@@ -218,9 +221,7 @@ function App(){
     observer.observe(el);observer.observe(content);
     return()=>{observer.disconnect();cancelAnimationFrame(frame);};
   },[threadMounted]);
-  function resizeComposer(){const el=composer.current;if(!el)return;el.style.overflowY='hidden';el.style.height='auto';const height=el.scrollHeight;el.style.height=`${Math.min(Math.max(height,44),144)}px`;el.style.overflowY=height>145?'auto':'hidden';}
-  useLayoutEffect(resizeComposer,[draft,threadMounted]);
-  useEffect(()=>{const el=composer.current;if(!el)return;let width=el.clientWidth;const observer=new ResizeObserver(()=>{if(width!==el.clientWidth){width=el.clientWidth;resizeComposer();}});observer.observe(el);return()=>observer.disconnect();},[threadMounted]);
+  useComposerHeight(composer,draft,threadMounted);
   useEffect(()=>{setPreviewState(old=>{let changed=false;const tabs=old.tabs.flatMap(tab=>{if(tab.target.kind!=='image')return [tab];const index=images.indexOf(tab.target.url);if(index<0){changed=true;return [];}const title=`待发送图片 ${index+1}/${images.length}`;if(title!==tab.target.title){changed=true;return [{...tab,target:{...tab.target,title}}];}return [tab];});if(!changed)return old;return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});},[images]);
   useEffect(()=>{
     if(!connected||!codexActive)return;
@@ -323,7 +324,9 @@ function App(){
     setBusy(false);setUploadProgress(null);void refreshSession();void list();
   }
   function fileRequest(action:'read'|'download',ownerMachine:string,threadId:string,payload:Json){
-    if(threadId.startsWith('antigravity:'))return call(`antigravity.file.${action}`,{conversationId:threadId.slice('antigravity:'.length),...payload},ownerMachine);
+    const owner=fileOwner(threadId);
+    if(owner.service==='antigravity')return call(`antigravity.file.${action}`,{conversationId:owner.id,...payload},ownerMachine);
+    if(owner.service!=='codex')return Promise.reject(new Error('这个应用暂不支持读取文件'));
     return call(`file.${action}`,{threadId,...payload},ownerMachine);
   }
   async function openFile(reference:string,ownerMachine=machine,ownerThread=previewThread){
@@ -374,7 +377,7 @@ function App(){
     try{const data=pastedImage(e.clipboardData.getData('text/plain'));if(data){e.preventDefault();void attach([],data);}}
     catch(error){e.preventDefault();fail(error);}
   }
-  function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');history.replaceState({cmwRoute:home,cmwMachine:id},'',location.pathname);rememberLocation(home,id);setMachine(id);setRoute(home);}
+  function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');const next=id?serviceHome(service):home;history.replaceState({cmwRoute:next,cmwMachine:id},'',location.pathname);rememberLocation(next,id);setMachine(id);setRoute(next);}
   function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);changeMachine('');}
   async function copyText(text:string){
       if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
@@ -444,7 +447,7 @@ function App(){
        selectTab={id=>setPreviewState(old=>({...old,activeId:id}))} closeTab={closePreviewTab}
        compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel||modelPoint)} close={closePreview}>
        {previewState.tabs.map(({id,target})=><div key={id} id={`preview-panel-${id}`} aria-labelledby={`preview-tab-${id}`} className="preview-tab-panel" role="tabpanel" hidden={id!==previewState.activeId}>
-         {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel allowFileUrls={target.threadId.startsWith('antigravity:')} key={target.request} file={target.file} connected={connected} line={target.line} openFile={path=>void openFile(path,target.machineId,target.threadId)}
+         {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel allowFileUrls={fileOwner(target.threadId).service!=='codex'} key={target.request} file={target.file} connected={connected} line={target.line} openFile={path=>void openFile(path,target.machineId,target.threadId)}
            htmlPreview={browserState?.filePath===target.file.path&&belongsToThread(browserState,target.machineId,target.threadId)?<WebViewer session={browserState} onEnd={closeBrowser}/>:browserBusy?<p role="status">正在打开网页…</p>:null}
            htmlError={target.error} openHtml={()=>void openBrowser({filePath:target.file!.path},target)}
            readFile={path=>fileRequest('read',target.machineId,target.threadId,{path})}
@@ -454,14 +457,37 @@ function App(){
          {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
        </div>)}
      </PreviewPane>;
-  if(service!=='codex'){
-    const field=service==='chatgpt'?'chat':'antigravity';
-    return <div className="shell remote-shell"><RemoteChatPanel inert={Boolean(compactPreview&&preview)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error} key={JSON.stringify([machine,service,route[field],service==='chatgpt'&&connected])} service={service} machine={machine} connected={connected}
-      conversationId={route[field]||''} call={call} go={id=>navigate({...home,[field]:id})} back={()=>selectService('codex')} switcher={switcher}/>{previewPane}</div>;
+  const computerOptions=<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>;
+  const fileOptions=<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>;
+  if(service==='chatgpt'){
+    return <div className="shell remote-shell"><RemoteChatPanel inert={Boolean(compactPreview&&preview)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
+      key={JSON.stringify([machine,service,remoteConversation,connected])} service="chatgpt" machine={machine} connected={connected}
+      conversationId={remoteConversation} call={call} go={id=>navigate(withConversation(serviceHome('chatgpt'),id))} back={()=>selectService('codex')} switcher={switcher}/>{previewPane}</div>;
+  }
+  if(service==='antigravity'){
+    const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
+    const open=(next:string)=>{if(next!==id){navigate(withConversation(route,next));if(!next)refreshAntigravityList(value=>value+1);}};
+    return <div className={`shell ${id?'has-session':''}`}>
+      <AntigravitySidebar key={machine} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
+        revision={antigravityListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome('antigravity',project))}
+        chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
+      {id?<RemoteChatPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
+        service="antigravity" machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
+        showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
+        <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}
+      {sheet==='home'&&<SheetPanel title="选项" close={()=>setSheet(null)}>
+        <MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>
+        <MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);refreshAntigravityList(value=>value+1);}}>刷新项目与会话</MenuItem>
+        <MenuItem icon="logout" onClick={logout}>断开连接</MenuItem>
+      </SheetPanel>}
+      {sheet==='computer'&&<SheetPanel title="电脑" close={()=>setSheet(null)}>{computerOptions}</SheetPanel>}
+      {sheet==='file'&&<SheetPanel title="查看项目文件" close={()=>setSheet(null)}>{fileOptions}</SheetPanel>}
+      {previewPane}
+    </div>;
   }
   return <div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>
-       <header className="home-header">{project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={busy} onClick={backToProjects}/><h1>{projectName(project)}</h1></>:<button className="home-identity" aria-label="选择电脑" onClick={()=>setSheet('computer')}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}</span></button>}<IconButton icon="more" label="更多选项" className="round" onClick={()=>setSheet('home')}/></header>
+      <HomeHeader project={projectName(project)} machineName={machineName} connected={connected} relayOnline={status==='online'} back={backToProjects} backDisabled={busy} chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {!project&&!archived&&!searchQuery&&switcher}
       <div className="home-content">
         {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
@@ -470,11 +496,13 @@ function App(){
           {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
         </section>
       </div>
-      <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><label className="search-pill"><Icon name="search"/><input aria-label="搜索聊天" placeholder="搜索聊天…" value={search} maxLength={200} onChange={e=>setSearch(e.target.value)}/>{search&&<IconButton icon="close" label="清除搜索" onClick={()=>setSearch('')}/>}</label><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={startNew}/></div></div>
+      <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><ChatSearch value={search} change={setSearch}/><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={startNew}/></div></div>
     </aside>
 
     <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
-       <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={backToSessions}/><button className="thread-title" onClick={e=>newChat?setSheet('projects'):openStatus(e.currentTarget)}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button></div></header>
+      <ThreadHeader title={visibleTitle} project={projectName(newChat?newCwd:view?.cwd||project)||'项目'} machineName={machineName} connected={connected} back={backToSessions} backDisabled={busy} onTitle={element=>newChat?setSheet('projects'):openStatus(element)}>
+        <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button>
+      </ThreadHeader>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
       <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!,up=el.scrollTop<lastScrollTop.current;lastScrollTop.current=el.scrollTop;sticky.current=!up&&el.scrollHeight-el.scrollTop-el.clientHeight<24;if(up&&el.scrollTop<160&&!historyError)void loadOlder();}}>
@@ -510,7 +538,7 @@ function App(){
           {imageLoading&&<span className="attachment-count" role="status">正在处理附件，大图会自动压缩…</span>}
           {uploadProgress&&<div className="upload-progress" role="status"><span>正在上传 {uploadProgress.index}/{uploadProgress.count} · {Math.floor(uploadProgress.loaded/uploadProgress.size*100)}% · {uploadProgress.name}</span><progress value={uploadProgress.loaded} max={uploadProgress.size} aria-label={`正在上传 ${uploadProgress.name}`}/></div>}
           {voiceBusy&&<div className="voice-status" role="status"><span>{voice.state==='starting'?'正在请求麦克风…':voice.state==='recording'?'录音中 · 最长 2 分钟':'正在识别…'}</span><button type="button" onClick={voice.cancel}>取消</button></div>}
-          <textarea ref={composer} aria-label="任务输入" placeholder={queueNext?'当前任务完成后发送…':newChat||!view?.turns.length?'接下来我们该写什么代码？':`在 ${machineName} 上继续…`} value={draft} readOnly={busy} onChange={e=>editDraft(e.target.value)} onPaste={paste} rows={1} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing&&window.matchMedia('(pointer: fine)').matches){e.preventDefault();void submit();}}}/>
+          <textarea ref={composer} aria-label="任务输入" placeholder={queueNext?'当前任务完成后发送…':newChat||!view?.turns.length?'接下来我们该写什么代码？':`在 ${machineName} 上继续…`} value={draft} readOnly={busy} onChange={e=>editDraft(e.target.value)} onPaste={paste} rows={1} onKeyDown={e=>submitOnDesktop(e,()=>void submit())}/>
           <div className="composer-toolbar">
             <IconButton icon="plus" label="添加与选项" className="composer-add" disabled={busy||imageLoading} onClick={()=>setSheet('add')}/>
             <IconButton icon="shield" label={`许可：${activeApproval==='never'?'不提示':activeApproval==='on-request'?'按需审批':'电脑配置'}`} className={`composer-permission${activeApproval==='never'?' unrestricted':''}`} disabled={busy} onClick={()=>setSheet('approval')}/>
@@ -518,7 +546,7 @@ function App(){
             <div className="composer-actions">
               {view?.activeTurnId&&!newChat&&Boolean(draft.trim()||attachmentCount||busy)&&<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('turn.stop',target())}/>}
               <IconButton icon={voice.state==='recording'?'stop':'mic'} label={voice.state==='recording'?'结束录音并识别':voice.state==='transcribing'?'正在识别':voice.state==='starting'?'正在请求麦克风':`语音输入：${voiceLabel}`} className={voice.state==='recording'?'recording round':''} disabled={busy||voice.state==='starting'||voice.state==='transcribing'||voiceMode==='codex'&&!connected} onClick={()=>{if(voice.state==='recording')voice.stop();else{setError('');setNotice('');voice.start();}}}/>
-              {view?.activeTurnId&&!newChat&&!draft.trim()&&!attachmentCount&&!busy?<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('turn.stop',target())}/>:<button className={`black round send${sending?' sending':''}`} aria-label={sending?'正在发送':queueNext?'完成后发送':'发送消息'} aria-busy={sending} disabled={!canWrite||!draft.trim()&&!attachmentCount} onPointerDown={e=>e.preventDefault()}><Icon name={sending?'more':'send'} size={21}/></button>}
+              {view?.activeTurnId&&!newChat&&!draft.trim()&&!attachmentCount&&!busy?<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('turn.stop',target())}/>:<SendMessageButton sending={sending} label={queueNext?'完成后发送':'发送消息'} disabled={!canWrite||!draft.trim()&&!attachmentCount}/>}
             </div>
           </div>
          </form>
@@ -533,12 +561,12 @@ function App(){
      {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
      {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',approval:'许可',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页',voice:'语音输入'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
        {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
-      {sheet==='computer'&&<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>}
+      {sheet==='computer'&&computerOptions}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setApproval('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
        {sheet==='approval'&&<><p className="muted">下次发送时使用所选许可。</p><label>审批策略<select disabled={busy} value={approval} onChange={e=>setApproval(e.target.value)}><option value="">沿用当前设置 · {approvalLabel}</option><option value="on-request">按需审批</option><option value="never">不提示审批</option></select></label><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}
        {sheet==='voice'&&<><label>识别方式<select value={voiceMode} onChange={e=>{const mode=voiceProvider(e.target.value);setVoiceMode(mode);save('voice-provider',mode);}}><option value="codex">Codex 识别</option><option value="keyboard">系统键盘</option></select></label><p className="muted">{voiceMode==='codex'?'点麦克风开始录音，再点结束，文字填入输入框。需要 HTTPS 和电脑上的 ChatGPT 登录；录音经中继、电脑发送到语音服务。':'点麦克风打开输入框，再使用手机键盘上的听写。'}</p><p className="muted">选择保存在当前浏览器。</p><button className="primary" onClick={()=>setSheet(null)}>完成</button></>}
        {sheet==='add'&&<><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>{selected&&<MenuItem icon="browser" disabled={!connected} onClick={()=>setSheet('browser')}>打开本机网页</MenuItem>}<MenuItem icon="image" disabled={busy||imageLoading||!canImage||attachmentCount>=MAX_ATTACHMENTS} onClick={()=>fileInput.current?.click()}>添加图片<span className="menu-detail">大图自动压缩</span></MenuItem><MenuItem icon="file" disabled={busy||imageLoading||attachmentCount>=MAX_ATTACHMENTS} onClick={()=>documentInput.current?.click()}>添加文件<span className="menu-detail">PDF、Word 等</span></MenuItem><p className="muted">附件 {attachmentCount}/{MAX_ATTACHMENTS} · 文件每个最多 100 MiB</p>{!canImage&&<p className="muted">当前模型未确认图片能力。</p>}{error&&<p className="error" role="alert">{error}</p>}{selected&&<><MenuItem icon="file" onClick={()=>setSheet('file')}>查看项目文件</MenuItem><MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);void refreshSession();}}>刷新会话</MenuItem></>}{newChat&&<MenuItem icon="folder" disabled={busy} onClick={()=>setSheet('projects')}>选择项目</MenuItem>}</>}
-       {sheet==='file'&&<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>}
+       {sheet==='file'&&fileOptions}
        {sheet==='browser'&&selected&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);save(previewUrlKey(machine,selected),e.target.value);}} placeholder="http://127.0.0.1:5173"/></label><p className="muted">地址仅用于当前聊天。先在电脑启动网页服务，再打开预览。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
      </SheetPanel>}
      {previewPane}

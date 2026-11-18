@@ -24,7 +24,7 @@ test('app switches restore each machine and app independently, including legacy 
   }});
   try {
     const id = randomUUID(), codex = {...home, thread:'native-thread', project:'D:/work'};
-    const ag = {...home, antigravity:id}, chat = {...home, chat:id};
+    const ag = {...home, project:'file:///D:/work', antigravity:id}, chat = {...home, chat:id};
     assert.deepEqual(switchRoute('pc', codex, 'antigravity'), {...home, antigravity:''});
     assert.deepEqual(switchRoute('pc', ag, 'chatgpt'), {...home, chat:''});
     assert.deepEqual(switchRoute('pc', chat, 'antigravity'), ag);
@@ -66,7 +66,9 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   await writeFile(transcript,line({type:'USER_INPUT',step_index:1,content:'<USER_REQUEST>hello</USER_REQUEST>\n<ADDITIONAL_METADATA>private</ADDITIONAL_METADATA>'})+
     line({type:'PLANNER_RESPONSE',step_index:2,thinking:'private',tool_calls:[{name:'read_file',args:{private:true}}]}));
   db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
-  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)').run(id,'Example','CASCADE_RUN_STATUS_IDLE','today',2,1,'before',0,JSON.stringify([pathToFileURL(dir).href]));
+  const insert=db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)');
+  const older='2026-11-17T02:00:00.000Z',project=pathToFileURL(dir).href;
+  insert.run(id,'Example','CASCADE_RUN_STATUS_IDLE',older,2,1,'before',0,JSON.stringify([project]));
   const models = [
     {label:'Model High',modelOrAlias:{model:'MODEL_HIGH'}},
     {label:'Retired',modelOrAlias:{model:'MODEL_RETIRED'},disabled:true},
@@ -85,7 +87,19 @@ test('desktop transcripts, watch updates and write receipts stay with the select
     if(method==='CancelCascadeInvocation')throw new BridgeError('uncertain','lost response',true);
     return {};
   });
-  assert.deepEqual((await bridge.handle('antigravity.list',{})).data,[{id,title:'Example'}]);
+  const listed=await bridge.handle('antigravity.list',{});
+  assert.deepEqual(listed.data,[{id,title:'Example',running:false,updatedAt:Date.parse(older)}]);
+  assert.deepEqual(listed.projects,[{id:project,path:dir}]);
+  assert.deepEqual((await bridge.handle('antigravity.list',{project:'file:///other',search:'exam'})).data,[]);
+  assert.deepEqual((await bridge.handle('antigravity.list',{project,search:'no match'})).data,[]);
+  const updated='2026-11-18T02:00:00.000Z';
+  for(let i=0;i<50;i++)insert.run(randomUUID(),'Other conversation','CASCADE_RUN_STATUS_RUNNING',updated,2,1,'before',0,JSON.stringify([project]));
+  const firstPage=await bridge.handle('antigravity.list',{project});
+  assert.equal(firstPage.hasMore,true);
+  assert.equal(firstPage.data.length,50);
+  assert.ok(firstPage.data.every((item:{id:string;running:boolean;updatedAt:number})=>item.id!==id&&item.running&&item.updatedAt===Date.parse(updated)));
+  assert.equal((await bridge.handle('antigravity.list',{project,offset:50})).data[0].id,id);
+  assert.equal((await bridge.handle('antigravity.list',{project,search:'exam'})).data[0].id,id);
   await writeFile(join(dir,'示例.pdf'),'%PDF-1.7');
   const pdf=await bridge.handle('antigravity.file.read',{conversationId:id,path:'示例.pdf'});
   assert.equal(pdf.mime,'application/pdf');
@@ -97,6 +111,7 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   await writeFile(pdf.path,'updated');
   await assert.rejects(bridge.handle('antigravity.file.download',download),/文件已变化/);
   const view = await bridge.handle('antigravity.read',{conversationId:id});
+  assert.equal(view.cwd,dir);
   assert.deepEqual(view.messages,[{id:'1',role:'user',text:'hello'},{id:'2-tools',role:'tool',text:'read_file'}]);
   await appendFile(transcript,line({type:'PLANNER_RESPONSE',step_index:3,content:'done'}));
   const delta = await bridge.handle('antigravity.watch',{conversationId:id,revision:view.revision});
