@@ -11,19 +11,30 @@ import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
 import { ChatGPTBridge } from './chatgpt.js';
 import { AntigravityBridge } from './antigravity.js';
+import { ServiceRouter } from './services.js';
+import { ClaudeCodeBridge } from './claude-code.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
 if(config.codexHome)process.env.CODEX_HOME=config.codexHome;
 if(config.profile)process.env.CODEX_PROFILE=config.profile;
+if(config.claudeBin)process.env.CLAUDE_CODE_BIN=config.claudeBin;
 mkdirSync(config.dataDir,{recursive:true});
 const ledger=new Ledger(join(config.dataDir,'operations.sqlite'));
 const control=new Control(ledger);
 const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
+const claudeCode=new ClaudeCodeBridge(ledger);
 const chatgpt=new ChatGPTBridge(config.dataDir,config.chatgptPort||3342);
-await control.start();
+const services=new ServiceRouter([
+  {prefix:'chatgpt',handle:(action,payload)=>chatgpt.handle(action,payload),mutations:['chatgpt.send','chatgpt.stop'],prepareReload:()=>chatgpt.prepareReload(),close:()=>chatgpt.close()},
+  {prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']},
+  {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond'],
+    prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
+],request=>control.handle(request as any),()=>control.updating);
+// Codex is optional: without it the other apps on this computer must still reach the phone.
+await control.start().catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
 let proxyBackpressure:NodeJS.Timeout|undefined;
 const dirtyIds=new Set<string|null>();
@@ -52,13 +63,9 @@ function connect() {
     if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
     if(m.type!=='request')return;
     try{
-      if(m.action==='runtime.reload')chatgpt.prepareReload();
-      if(control.updating&&(m.action==='antigravity.send'||m.action==='antigravity.stop'))throw new BridgeError('maintenance','连接器正在更新，请稍后重试');
       const result=m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
-        :typeof m.action==='string'&&m.action.startsWith('chatgpt.')?await chatgpt.handle(m.action,m.payload)
-        :typeof m.action==='string'&&m.action.startsWith('antigravity.')?await antigravity.handle(m.action,m.payload)
-        :await control.handle(m as any);
+        :await services.handle({id:String(m.id),action:m.action,payload:m.payload&&typeof m.payload==='object'?m.payload:{}});
       if(socket===ws)send({type:'response',id:m.id,result});
     }
     catch(e){const err=e instanceof BridgeError?e:new BridgeError('computer_error','电脑处理失败，请查看本机状态');if(socket===ws)send({type:'response',id:m.id,error:{code:err.code,message:err.message,uncertain:err.uncertain}});}
@@ -77,4 +84,4 @@ control.on('change',(id:string|null)=>{
   dirty=setTimeout(()=>{dirty=undefined;try{for(const threadId of dirtyIds)send({type:'changed',threadId,generation:control.generation});}catch{}dirtyIds.clear();},200);
 });
 connect();
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);void browserPreview.stop();chatgpt.close();socket?.close();control.close();process.exit(0);});
+for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);void browserPreview.stop();services.close();socket?.close();control.close();process.exit(0);});

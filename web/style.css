@@ -354,3 +354,11 @@ small, .muted { color: var(--muted); font-size: 13px; line-height: 1.65; }
   .composer-model { gap: 3px; padding-inline: 3px; }
   .home-bottom { padding-inline: 22px; }
 }
+
+.claude-select{flex:0 1 auto;min-width:0;max-width:34%;height:34px;border:0;background:transparent;color:#555;font-size:13px;padding:0 4px;text-overflow:ellipsis}
+.claude-project{display:flex;align-items:center;gap:8px;margin:14px auto 0;max-width:420px;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:#fff;color:var(--muted)}
+.claude-project input{flex:1;min-width:0;border:0;background:transparent;font-size:15px;outline:none}
+.claude-question{margin:8px 0 12px}
+.claude-question input{width:100%;margin-top:6px}
+.request .choices button.chosen{background:#111;color:#fff}
+.request button.primary{background:#111;color:#fff}

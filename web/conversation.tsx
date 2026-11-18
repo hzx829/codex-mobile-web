@@ -6,7 +6,7 @@ import {Icon} from './icons';
 import {IconButton} from './icon-button';
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const statusLabel:Record<string,string>={inProgress:'进行中',completed:'已完成',interrupted:'已停止',failed:'失败'};
-const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划'};
+const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划',fileRead:'读取文件',codeSearch:'搜索代码',subagent:'子任务',toolCall:'使用工具'};
 
 export const connectionLost='与电脑的连接中断，正在重连…';
 export function ConversationStatus({children}:{children:ReactNode}) {
@@ -18,11 +18,13 @@ type Props={
   openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(text:string)=>void;
   onCopy:(text:string)=>void;onEdit:(turnId:string,itemId:string,text:string)=>Promise<void>;
   onFork:(turn:TurnView)=>void;onDiff:(turn:TurnView)=>void;onBlocked:(reason:string)=>void;
+  /** Apps without edit or fork support pass a reason / hide the fork button. */
+  editBlocked?:string;hideFork?:boolean;
 };
-export const ConversationTurn=memo(function ConversationTurn({turn,running,source,latestUser,disabled,openFile,openPreview,onFollowup,onCopy,onEdit,onFork,onDiff,onBlocked}:Props){
+export const ConversationTurn=memo(function ConversationTurn({turn,running,source,latestUser,disabled,openFile,openPreview,onFollowup,onCopy,onEdit,onFork,onDiff,onBlocked,editBlocked,hideFork}:Props){
   const groups=useMemo(()=>groupItems(turn.items),[turn.items]);
   const lastReply=turn.items.filter(item=>item.role==='assistant').at(-1);
-  const editReason=running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(item=>item.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':source==='desktop'&&!latestUser?'桌面会话目前只能改写最近一条用户消息':'';
+  const editReason=editBlocked||(running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(item=>item.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':source==='desktop'&&!latestUser?'桌面会话目前只能改写最近一条用户消息':'');
   return <section className="turn">
     {groups.map((group,index)=>group[0].role==='activity'?<ActivityGroup key={`activity-${index}`} items={group} running={turn.status==='inProgress'} openFile={openFile}/>:group.map(item=>{
       if(item.role==='status')return <ConversationStatus key={item.id}>{item.text}</ConversationStatus>;
@@ -30,7 +32,7 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
       return item.role==='user'?<UserMessage key={item.id} text={item.text} editReason={editReason} disabled={disabled} blocked={onBlocked} copy={()=>onCopy(item.text)} resend={text=>onEdit(turn.id,item.id,text)}>{body}</UserMessage>:<article className={`message ${item.role}`} key={item.id}>{body}</article>;
     }))}
     <div className="turn-status">{turn.status!=='completed'&&(statusLabel[turn.status]||turn.status)}{turn.diff&&<button onClick={()=>onDiff(turn)}><Icon name="file" size={14}/>查看修改</button>}</div>{turn.error&&<p className="error">{turn.error}</p>}
-    {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/><IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/></div>}
+    {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/>{!hideFork&&<IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/>}</div>}
   </section>;
 });
 export function ActivityGroup({items,running,openFile}:{items:MessageItem[];running:boolean;openFile:(path:string)=>void}){

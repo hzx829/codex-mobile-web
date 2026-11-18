@@ -42,6 +42,8 @@ export class Control extends EventEmitter {
   private queueTimer:NodeJS.Timeout;
   private draining=false;
   private closed=false;
+  private restartTimer?:NodeJS.Timeout;
+  private restartDelay=1000;
   constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions) {
     super();
     runtime.on('event',(e:Json)=>{
@@ -61,13 +63,28 @@ export class Control extends EventEmitter {
       if(e.method==='turn/completed')this.scheduleRelease(e.params.threadId);
       this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
     });
-    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.generation=randomUUID();this.emit('change',null);});
+    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.generation=randomUUID();this.emit('change',null);this.scheduleRestart();});
     desktop.on('change',(id:string)=>this.emit('change',id));
     desktop.on('resync',(id:string)=>{this.emit('change',id);});
     desktop.on('offline',()=>{this.generation=randomUUID();this.emit('change',null);});
     this.queueTimer=setInterval(()=>void this.drainQueue(),1000);this.queueTimer.unref();
   }
-  async start(){await this.runtime.start();await this.desktop.connect().catch(()=>{});}
+  /** Starts Codex; on failure keeps retrying in the background so other apps on this connector stay usable. */
+  async start(){
+    try{await this.runtime.start();this.restartDelay=1000;}
+    catch(error){this.scheduleRestart();throw error;}
+    finally{await this.desktop.connect().catch(()=>{});}
+  }
+  private scheduleRestart(){
+    if(this.closed||this.reloading||this.restartTimer)return;
+    const delay=this.restartDelay;this.restartDelay=Math.min(60_000,delay*2);
+    this.restartTimer=setTimeout(()=>{
+      this.restartTimer=undefined;
+      if(this.closed||this.reloading)return;
+      Promise.resolve().then(()=>this.runtime.start()).then(()=>{this.restartDelay=1000;this.emit('change',null);},()=>this.scheduleRestart());
+    },delay);
+    this.restartTimer.unref?.();
+  }
   async handle(req:BridgeRequest):Promise<any> {
     const p=req.payload||{};
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
@@ -566,7 +583,7 @@ export class Control extends EventEmitter {
       }
       if(p.prepareOnly===true){
         prepared=true;
-        this.reloadLease=setTimeout(()=>{this.reloading=false;this.reloadLease=undefined;this.emit('change',null);},60000);
+        this.reloadLease=setTimeout(()=>{this.reloading=false;this.reloadLease=undefined;if(!this.runtime.child)this.scheduleRestart();this.emit('change',null);},60000);
         this.reloadLease.unref();
         return {prepared:true,generation:this.generation,threadIds:ids,runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},leaseMs:60000};
       }
@@ -581,7 +598,7 @@ export class Control extends EventEmitter {
         throw new BridgeError('runtime_error','Codex 切换失败，已恢复原运行端；请修复适配后重试');
       }
       throw error;
-    }finally{if(!prepared)this.reloading=false;}
+    }finally{if(!prepared){this.reloading=false;if(!this.runtime.child)this.scheduleRestart();}}
   }
-  close(){this.closed=true;clearInterval(this.queueTimer);clearTimeout(this.reloadLease);this.desktop.close();this.runtime.close();this.ledger.close();}
+  close(){this.closed=true;clearTimeout(this.restartTimer);clearInterval(this.queueTimer);clearTimeout(this.reloadLease);this.desktop.close();this.runtime.close();this.ledger.close();}
 }

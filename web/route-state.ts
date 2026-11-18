@@ -1,6 +1,6 @@
 import {SERVICES, SERVICE_IDS, conversationId, remoteFields} from './services';
 
-export type Route={thread:string;project:string;newChat:boolean;chat?:string;antigravity?:string};
+export type Route={thread:string;project:string;newChat:boolean;chat?:string;antigravity?:string;claude?:string};
 export const home:Route={thread:'',project:'',newChat:false};
 export type SavedLocation={route:Route;machine:string};
 

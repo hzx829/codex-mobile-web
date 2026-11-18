@@ -3,9 +3,10 @@ import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
 import {RemoteChatPanel} from './chatgpt';
 import {AntigravitySidebar} from './antigravity-sidebar';
+import {ClaudeCodePanel} from './claude-code';
 import {ChatSearch,HomeHeader,SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
-import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceOf,withConversation,type Service} from './services';
+import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,withConversation,type Service} from './services';
 import {Icon,type IconName} from './icons';
 import {IconButton} from './icon-button';
 import {connectionLost,ConversationStatus,ConversationTurn} from './conversation';
@@ -56,7 +57,9 @@ function App(){
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const [antigravityListRevision,refreshAntigravityList]=useState(0);
+  const [claudeNewCwd,setClaudeNewCwd]=useState<string|null>(null);
   const service=serviceOf(route),codexActive=service==='codex';
+  useEffect(()=>setClaudeNewCwd(null),[machine,service]);
   const lastCodex=useRef({machine,route:home});
   if(codexActive)lastCodex.current={machine,route};
   const codexRoute=codexActive?route:lastCodex.current.machine===machine?lastCodex.current.route:home;
@@ -325,7 +328,7 @@ function App(){
   }
   function fileRequest(action:'read'|'download',ownerMachine:string,threadId:string,payload:Json){
     const owner=fileOwner(threadId);
-    if(owner.service==='antigravity')return call(`antigravity.file.${action}`,{conversationId:owner.id,...payload},ownerMachine);
+    if(owner.service==='antigravity'||owner.service==='claude')return call(`${owner.service}.file.${action}`,{conversationId:owner.id,...payload},ownerMachine);
     if(owner.service!=='codex')return Promise.reject(new Error('这个应用暂不支持读取文件'));
     return call(`file.${action}`,{threadId,...payload},ownerMachine);
   }
@@ -464,14 +467,21 @@ function App(){
       key={JSON.stringify([machine,service,remoteConversation,connected])} service="chatgpt" machine={machine} connected={connected}
       conversationId={remoteConversation} call={call} go={id=>navigate(withConversation(serviceHome('chatgpt'),id))} back={()=>selectService('codex')} switcher={switcher}/>{previewPane}</div>;
   }
-  if(service==='antigravity'){
+  if(service==='antigravity'||service==='claude'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
-    const open=(next:string)=>{if(next!==id){navigate(withConversation(route,next));if(!next)refreshAntigravityList(value=>value+1);}};
-    return <div className={`shell ${id?'has-session':''}`}>
-      <AntigravitySidebar key={machine} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
-        revision={antigravityListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome('antigravity',project))}
+    const open=(next:string)=>{setClaudeNewCwd(null);if(next!==id){navigate(withConversation(route,next));if(!next)refreshAntigravityList(value=>value+1);}};
+    const creatingClaude=service==='claude'&&!id&&claudeNewCwd!==null;
+    return <div className={`shell ${id||creatingClaude?'has-session':''}`}>
+      <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
+        revision={antigravityListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
+        listAction={`${service}.list`} appName={serviceLabel(service)} onNew={service==='claude'?project=>setClaudeNewCwd(project):undefined}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
-      {id?<RemoteChatPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
+      {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
+        machine={machine} newCwd={id?null:claudeNewCwd} created={next=>{setClaudeNewCwd(null);refreshAntigravityList(value=>value+1);navigate(withConversation(route,next),true);}}
+        showImage={(url,title)=>showPreview({kind:'image',url,title})}
+        machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
+        showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
+        id?<RemoteChatPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         service="antigravity" machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}

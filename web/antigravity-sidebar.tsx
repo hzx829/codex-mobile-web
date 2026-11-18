@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState,type ReactNode} from 'react';
 import {ChatSearch,HomeHeader,workspaceName} from './chat-layout';
 import {Icon} from './icons';
+import {IconButton} from './icon-button';
 import {relativeTime,ThreadRow} from './thread-menu';
 import {SessionListLoader} from './session-list-loader';
 import {useStableEvent} from './use-event';
@@ -10,10 +11,14 @@ type Project={id:string;path:string};
 type Thread={id:string;title:string;updatedAt:number;running:boolean};
 type Page={data:Thread[];hasMore:boolean;projects?:Project[]};
 type Props={
+  /** List action and wording of the app this sidebar shows; defaults to Antigravity. */
+  listAction?:RequestAction;appName?:string;
+  /** Starts a new conversation in the shown project; omitted for apps that cannot create one. */
+  onNew?:(project:string)=>void;
   selected:string;project:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;switcher:ReactNode;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseProject:(id:string)=>void;chooseComputer:()=>void;more:()=>void;
 };
-export function AntigravitySidebar({selected,project,machineName,connected,relayOnline,inert,revision,switcher,call,open,chooseProject,chooseComputer,more}:Props){
+export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',onNew,selected,project,machineName,connected,relayOnline,inert,revision,switcher,call,open,chooseProject,chooseComputer,more}:Props){
   const [search,setSearch]=useState(''),[query,setQuery]=useState(''),[projects,setProjects]=useState<Project[]>([]);
   const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean}|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
@@ -24,7 +29,7 @@ export function AntigravitySidebar({selected,project,machineName,connected,relay
   const load=useStableEvent((more=false)=>{
     if(!connected)return;
     const offset=more?current?.offset||0:0;
-    void loader.current.load(key,():Promise<Page>=>call('antigravity.list',{project,search:query,offset}),{
+    void loader.current.load(key,():Promise<Page>=>call(listAction,{project,search:query,offset}),{
       start:()=>{setBusy(true);setError('');},
       result:result=>{
         if(result.projects)setProjects(result.projects);
@@ -54,11 +59,11 @@ export function AntigravitySidebar({selected,project,machineName,connected,relay
         <nav aria-label={heading}>{visible.map(item=><ThreadRow key={item.id} thread={{...item,status:item.running?{type:'active'}:undefined}} selected={selected===item.id}
           time={relativeTime(item.updatedAt)} open={()=>open(item.id)}/>)}</nav>
         {busy&&!visible.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:
-          !visible.length&&!error&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':query?'没有找到匹配的会话。':'还没有 Antigravity 会话。'}</p>}
+          !visible.length&&!error&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':query?'没有找到匹配的会话。':`还没有 ${appName} 会话。`}</p>}
         {error&&<p className="error" role="alert">{error} {connected&&<button type="button" onClick={()=>load()}>重试</button>}</p>}
         {current?.hasMore&&<button className="more-link" disabled={!connected||busy} onClick={()=>load(true)}>{busy?'正在加载…':'加载更多'}</button>}
       </section>
     </div>
-    <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/></div></div>
+    <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/>{onNew&&<IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected} onClick={()=>onNew(projectLabel||'')}/>}</div></div>
   </aside>;
 }
