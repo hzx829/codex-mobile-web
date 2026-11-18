@@ -17,14 +17,14 @@
 
 ## 边界
 
-- 终端或 IDE 正在运行的会话不能被接管。transcript 20 秒内有写入的会话视为可能在运行，手机继续前需确认；确认后连接器以 `resume` 接入。两个进程同时续写同一会话会损坏历史。
+- 手机继续终端或 IDE 的会话前，请先结束另一端的任务。连接器把 20 秒内写过的会话视为可能仍在运行，并提示确认。这项检查依赖 transcript 的修改时间，长时间无写入的任务仍可能在运行。
 - 连接器运行的会话空闲 5 分钟后释放进程，之后终端可以 `claude --resume` 接着用。
 - 旧消息改写、分叉、文件附件（非图片）暂不支持。
 - Claude Code 的诊断输出不会转发到中继。
 
 ## 配置
 
-连接器按以下顺序找 `claude`：配置 `claudeBin`（或环境变量 `CLAUDE_CODE_BIN`）→ `PATH` 中的 `claude.exe` → `%USERPROFILE%\.local\bin\claude.exe` → SDK 自带程序（仅源码目录可用）。登录、模型默认值、CLAUDE.md、MCP 和权限规则都沿用电脑上的 Claude Code 设置。
+连接器按以下顺序找 `claude`，依次检查 `claudeBin`（或环境变量 `CLAUDE_CODE_BIN`）、`PATH`、`%USERPROFILE%\.local\bin\claude.exe` 和 SDK 自带程序（源码目录可用）。登录、模型默认值、CLAUDE.md、MCP 和权限规则沿用电脑上的 Claude Code 设置。接入会话时默认按规则审批，手机可以为当前会话选择权限模式。
 
 ## 待人工验收
 

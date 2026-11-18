@@ -1,4 +1,5 @@
 import {EventEmitter} from 'node:events';
+import {randomUUID} from 'node:crypto';
 import {existsSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {delimiter, join} from 'node:path';
@@ -60,7 +61,6 @@ export class LiveSession {
   closed = false;
   interrupting = false;
   hint = '';
-  next = 0;
   constructor(public cwd: string, public query: Query, public inbox: Inbox, public model: string, public permissionMode: PermissionMode) {}
   get pending() {return [...this.requests.values()].map(request => request.view);}
 }
@@ -102,7 +102,7 @@ export class ClaudeRuntime extends EventEmitter {
   constructor(private load: () => Promise<QueryFn>, private executable = () => findClaude(), private idleMs = 5 * 60_000) {super();}
 
   get(id: string) {return this.live.get(id);}
-  get busy() {return [...this.live.values()].some(session => session.running || session.requests.size);}
+  get busy() {return [...this.live.values()].some(session => session.running || session.requests.size || session.inbox.size);}
 
   private touch(session: LiveSession) {
     session.version++;
@@ -151,19 +151,21 @@ export class ClaudeRuntime extends EventEmitter {
       };
       const cleanup = () => {clearTimeout(timer);this.off('change', done);this.off('closed', done);};
       this.on('change', done);this.on('closed', done);
+      done();
     });
   }
 
   private async consume(session: LiveSession) {
     try {
       for await (const message of session.query as AsyncIterable<SDKMessage>) {
+        if (session.closed) break;
         const m = message as Json;
         if (m.session_id && !session.id) {session.id = m.session_id;this.live.set(session.id, session);}
         if (m.type === 'system' && m.subtype === 'init') {
           if (typeof m.model === 'string') session.model = m.model;
           if (PERMISSION_MODES.includes(m.permissionMode)) session.permissionMode = m.permissionMode;
         } else if (m.type === 'system' && m.subtype === 'session_state_changed') {
-          session.running = m.state !== 'idle';
+          session.running = m.state !== 'idle' || session.inbox.size > 0;
         } else if (m.type === 'result') {
           session.running = session.inbox.size > 0;
           session.error = m.subtype === 'success' || session.interrupting ? '' : (Array.isArray(m.errors) ? m.errors.join('\n') : '') || 'Claude Code 本轮出错';
@@ -194,13 +196,14 @@ export class ClaudeRuntime extends EventEmitter {
 
   /** Ends the process so another client (terminal, IDE) may resume the session. */
   release(session: LiveSession) {
-    if (session.running || session.requests.size) return;
+    if (session.running || session.requests.size || session.inbox.size) return;
     session.inbox.close();
     setTimeout(() => {if (!session.closed) {try {session.query.close();} catch {}this.closeSession(session);}}, 10_000).unref?.();
   }
 
   private ask(session: LiveSession, tool: string, input: Record<string, unknown>, context: {signal: AbortSignal; suggestions?: PermissionUpdate[]; title?: string; description?: string; displayName?: string; decisionReason?: string}): Promise<PermissionResult> {
-    const id = String(++session.next);
+    if (session.closed || context.signal.aborted) return Promise.resolve({behavior: 'deny', message: '已取消'});
+    const id = randomUUID();
     const asked = tool === 'AskUserQuestion' ? questions(input) : undefined;
     const kind: ClaudeRequestView['kind'] = asked ? 'question' : tool === 'ExitPlanMode' ? 'plan' : 'permission';
     const view: ClaudeRequestView = {
@@ -252,13 +255,16 @@ export class ClaudeRuntime extends EventEmitter {
   async interrupt(session: LiveSession) {
     if (!session.running) throw new BridgeError('changed', '当前没有正在运行的任务');
     session.interrupting = true;
-    await session.query.interrupt();
+    try {await session.query.interrupt();}
+    catch (error) {session.interrupting = false;throw error;}
   }
 
   async configure(session: LiveSession, model?: string, permissionMode?: PermissionMode) {
+    if (session.inbox.closed) throw new BridgeError('offline', 'Claude Code 会话正在释放，请稍后重试');
+    if (permissionMode === 'bypassPermissions' && permissionMode !== session.permissionMode)
+      throw new BridgeError('invalid', '“全部允许”只能在新建或重新接入会话时选择');
     if (model && model !== session.model) {await session.query.setModel(model);session.model = model;}
     if (permissionMode && permissionMode !== session.permissionMode) {
-      if (permissionMode === 'bypassPermissions') throw new BridgeError('invalid', '“全部允许”只能在新建或重新接入会话时选择');
       await session.query.setPermissionMode(permissionMode);session.permissionMode = permissionMode;
     }
   }

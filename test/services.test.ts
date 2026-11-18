@@ -1,6 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
+import {randomUUID} from 'node:crypto';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {ServiceRouter} from '../src/connector/services.js';
 import {Control} from '../src/connector/control.js';
 import {AppServer} from '../src/connector/app-server.js';
@@ -47,6 +50,12 @@ test('phone app routes come from one registry', () => {
 test('a missing Codex does not stop the connector, and a crashed runtime restarts', async () => {
   const missing=new AppServer('',{...process.env,CODEX_BIN:'codex.cmd'});
   await assert.rejects(missing.start(),(error:BridgeError)=>error.code==='codex_missing');
+  const unavailable=new AppServer(join(tmpdir(),randomUUID(),'codex.exe'));
+  const startup=unavailable.start();
+  assert.equal(unavailable.start(),startup);
+  await Promise.all([assert.rejects(startup),assert.rejects(unavailable.rpc('config/read'))]);
+  assert.equal(unavailable.child,null);
+  await assert.rejects(unavailable.start());
 
   class Runtime extends EventEmitter{
     child:object|null=null;starts=0;fail=true;requests=new Map();

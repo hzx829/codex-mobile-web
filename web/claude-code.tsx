@@ -20,7 +20,7 @@ type Props={
 type Request={id:string;kind:'permission'|'question'|'plan';tool:string;title:string;detail:string;canRemember:boolean;questions?:{question:string;header:string;multiSelect:boolean;options:{label:string;description:string}[]}[]};
 const noop=()=>{};
 const notEditable=()=>Promise.reject(new Error('Claude Code 会话暂不支持改写旧消息'));
-const MODES:[string,string][]=[['','沿用电脑设置'],['default','每次询问'],['acceptEdits','自动接受编辑'],['plan','只做计划'],['bypassPermissions','全部允许（慎用）']];
+const MODES:[string,string][]=[['','默认审批'],['default','按规则审批'],['acceptEdits','自动接受编辑'],['plan','只做计划'],['bypassPermissions','全部允许（慎用）']];
 function load(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
 function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
 
@@ -31,9 +31,8 @@ export function ClaudeCodePanel(props:Props){
   const scope=`claude:${machine}:${conversationId||'new'}`;
   const [view,setView]=useState<Json|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
   const [draft,setDraft]=useState(()=>load(`${scope}:draft`)),[images,setImages]=useState<string[]>([]),[pending,setPending]=useState(()=>load(`${scope}:pending`));
-  const [model,setModel]=useState(()=>load(`claude:${machine}:model`)),[mode,setMode]=useState(()=>load(`claude:${machine}:mode`));
+  const [model,setModel]=useState(()=>load(`claude:${machine}:model`)),[mode,setMode]=useState('');
   const [models,setModels]=useState<Json[]|null>(null),[cwd,setCwd]=useState(newCwd||''),[projects,setProjects]=useState<string[]>([]);
-  const [confirmed,setConfirmed]=useState(false);
   const request=useRef(call);request.current=call;
   const alive=useRef(true),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null),picker=useRef<HTMLInputElement>(null);
   useComposerHeight(composer,draft,true);
@@ -41,10 +40,10 @@ export function ClaudeCodePanel(props:Props){
   function edit(text:string){setDraft(text);store(`${scope}:draft`,text);}
   function remember(op:string){setPending(op);store(`${scope}:pending`,op);}
   function failed(e:any){if(alive.current)setError(e?.code==='unsupported'?'请更新这台电脑上的连接器以使用 Claude Code。':e?.message||'Claude Code 操作失败');}
-  const refresh=useStableEvent(async()=>{
+  const refresh=useStableEvent(async(clearError=true)=>{
     if(!connected||creating)return;
     setBusy(true);
-    try{const next=await request.current('claude.read',{conversationId});if(alive.current){setView(next);setError('');setWatchError('');}}
+    try{const next=await request.current('claude.read',{conversationId});if(alive.current){setView(next);if(clearError)setError('');setWatchError('');}}
     catch(e){failed(e);}
     finally{if(alive.current)setBusy(false);}
   });
@@ -86,7 +85,7 @@ export function ClaudeCodePanel(props:Props){
       if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
       else setError(result.error?.message||'结果待核实，请刷新会话查看。');
     }catch(e:any){if(!e?.uncertain&&alive.current)remember('');failed(e);}
-    finally{lock.current=false;if(alive.current)setBusy(false);void refresh();}
+    finally{lock.current=false;if(alive.current)setBusy(false);void refresh(false);}
     return false;
   }
   async function check(){
@@ -98,28 +97,26 @@ export function ClaudeCodePanel(props:Props){
       else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
       else setError('结果尚未确认。请刷新会话并在电脑核实；系统不会自动重发。');
     }catch(e){failed(e);}finally{lock.current=false;if(alive.current)setBusy(false);}
-    void refresh();
+    void refresh(false);
   }
   useEffect(()=>{if(connected&&pending)void check();},[connected]);
 
   const running=Boolean(view?.running),external=Boolean(view?.external&&!view?.controlled);
+  const selectedMode=mode==='bypassPermissions'&&view?.controlled?'':mode;
   async function send(steer=false){
     const text=draft.trim();
     if(!text&&!images.length)return;
-    const settings={...(model?{model}:{}),...(mode?{permissionMode:mode}:{})};
+    const settings={...(model?{model}:{}),...(selectedMode?{permissionMode:selectedMode}:{})};
     if(creating){
       if(!cwd.trim()){setError('请选择项目目录');return;}
       stick.current=true;
       await mutate('claude.create',{cwd:cwd.trim(),text,images,...settings},result=>{edit('');setImages([]);props.created(result.conversationId);});
       return;
     }
-    if(external&&!confirmed){
-      if(!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
-      setConfirmed(true);
-    }
+    if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
     stick.current=true;
-    await mutate('claude.send',{conversationId,text,images,...settings,...(steer?{mode:'steer'}:{}),...(external||confirmed?{confirmIdle:true}:{})},
-      ()=>{edit('');setImages([]);setNotice(running?steer?'已追加到当前任务':'已排队，当前任务结束后发送':'');});
+    await mutate('claude.send',{conversationId,text,images,...settings,...(steer?{mode:'steer'}:{}),...(external?{confirmIdle:true}:{})},
+      ()=>{edit('');setImages([]);if(selectedMode==='bypassPermissions')setMode('');setNotice(running?steer?'已追加到当前任务':'已排队，当前任务结束后发送':'');});
   }
   async function addImages(files:File[]){
     if(!files.length)return;
@@ -142,7 +139,6 @@ export function ClaudeCodePanel(props:Props){
     catch(e){failed(e);}
   }
   function chooseModel(value:string){setModel(value);store(`claude:${machine}:model`,value);}
-  function chooseMode(value:string){setMode(value);store(`claude:${machine}:mode`,value);}
 
   const copy=useStableEvent((text:string)=>void copyText(text).catch(()=>setError('复制失败，请长按选择文字')));
   const followup=useStableEvent((text:string)=>{edit(draft.trim()?`${draft.trimEnd()}\n\n${text}`:text);composer.current?.focus();});
@@ -162,7 +158,7 @@ export function ClaudeCodePanel(props:Props){
       {creating?<div className="new-chat-welcome"><h1>交给 Claude Code</h1>
         <label className="claude-project"><Icon name="folder" size={18}/><input list="claude-projects" aria-label="项目目录" placeholder="电脑上的项目目录" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>
         <datalist id="claude-projects">{projects.map(path=><option key={path} value={path}/>)}</datalist></div>:<>
-        {view?.truncated&&<p className="muted">只显示最近 60 轮。</p>}
+        {view?.truncated&&<p className="muted">仅显示近期记录，完整会话可在电脑查看。</p>}
         {!view&&busy&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source={view?.controlled?'connector':'history'} latestUser={false} disabled={!canWrite}
           openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={notEditable} onFork={noop} onDiff={noop} onBlocked={setNotice} editBlocked="Claude Code 会话暂不支持改写旧消息" hideFork/>)}
@@ -194,7 +190,7 @@ export function ClaudeCodePanel(props:Props){
             {model&&!(models||[]).some(item=>item.id===model)&&<option value={model}>{modelLabel}</option>}
             {(models||[]).map(item=><option key={item.id} value={item.id} title={item.description}>{item.label}</option>)}
           </select>
-          <select className="claude-select" aria-label="权限模式" value={mode} disabled={!connected||busy} onChange={e=>chooseMode(e.target.value)}>
+          <select className="claude-select" aria-label="权限模式" value={selectedMode} disabled={!connected||busy} onChange={e=>setMode(e.target.value)}>
             {MODES.filter(([value])=>value!=='bypassPermissions'||creating||!view?.controlled).map(([value,label])=><option key={value} value={value}>{value===''&&view?.permissionMode?`权限：${MODES.find(m=>m[0]===view.permissionMode)?.[1]||view.permissionMode}`:label}</option>)}
           </select>
           <div className="composer-actions">

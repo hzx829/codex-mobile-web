@@ -28,13 +28,11 @@ const browserPreview=new BrowserPreview();
 const claudeCode=new ClaudeCodeBridge(ledger);
 const chatgpt=new ChatGPTBridge(config.dataDir,config.chatgptPort||3342);
 const services=new ServiceRouter([
-  {prefix:'chatgpt',handle:(action,payload)=>chatgpt.handle(action,payload),mutations:['chatgpt.send','chatgpt.stop'],prepareReload:()=>chatgpt.prepareReload(),close:()=>chatgpt.close()},
-  {prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']},
   {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond'],
     prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
+  {prefix:'chatgpt',handle:(action,payload)=>chatgpt.handle(action,payload),mutations:['chatgpt.send','chatgpt.stop'],prepareReload:()=>chatgpt.prepareReload(),close:()=>chatgpt.close()},
+  {prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']},
 ],request=>control.handle(request as any),()=>control.updating);
-// Codex is optional: without it the other apps on this computer must still reach the phone.
-await control.start().catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
 let proxyBackpressure:NodeJS.Timeout|undefined;
 const dirtyIds=new Set<string|null>();
@@ -84,4 +82,6 @@ control.on('change',(id:string|null)=>{
   dirty=setTimeout(()=>{dirty=undefined;try{for(const threadId of dirtyIds)send({type:'changed',threadId,generation:control.generation});}catch{}dirtyIds.clear();},200);
 });
 connect();
+// Keep the relay connection independent of Codex startup and recovery.
+void control.start().catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
 for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);void browserPreview.stop();services.close();socket?.close();control.close();process.exit(0);});

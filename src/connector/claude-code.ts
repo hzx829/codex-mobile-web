@@ -1,8 +1,9 @@
 import {readdir, stat} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {BridgeError, textRequired, type Json} from '../shared/types.js';
+import {BridgeError, MAX_FRAME, textRequired, type Json} from '../shared/types.js';
 import {downloadProjectFile, projectDirectory, readProjectFile} from './project.js';
 import {validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
@@ -47,7 +48,7 @@ function message(p: Json) {
   return {text, images};
 }
 /** Ledger payloads keep the request identity, not the image bytes. */
-const fingerprint = (images: string[]) => images.map(url => `${url.length}:${url.slice(-32)}`);
+const fingerprint = (images: string[]) => images.map(url => createHash('sha256').update(url).digest('hex'));
 
 export function claudeConfigDir(env = process.env) {return env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');}
 const title = (info: SessionInfo) => (info.customTitle || info.summary || '').trim() || '未命名会话';
@@ -56,6 +57,7 @@ export class ClaudeCodeBridge {
   private watchers = 0;
   private catalog?: {at: number; sessions: SessionInfo[]};
   private paths = new Map<string, string>();
+  private sending = new Set<string>();
   readonly runtime: ClaudeRuntime;
   constructor(private ledger?: Ledger, private root = claudeConfigDir(), private sessions: () => Promise<ClaudeSessions> = sdkSessions,
     private now = Date.now, runtime?: ClaudeRuntime) {
@@ -91,7 +93,8 @@ export class ClaudeCodeBridge {
     const path = await this.transcript(id).catch(error => {if (live) return '';throw error;});
     const info = path ? await stat(path, {bigint: true}).catch(() => {this.paths.delete(id);return null;}) : null;
     if (!info && !live) throw new BridgeError('missing', 'Claude Code 会话已移动或删除，请刷新列表');
-    return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${live ? live.version : '-'}`, modified: info ? Number(info.mtimeMs) : this.now(), exists: Boolean(info)};
+    const external = !live && info !== null && this.now() - Number(info.mtimeMs) < ACTIVE_MS;
+    return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${live ? live.version : external ? 'external' : '-'}`, external, exists: Boolean(info)};
   }
 
   private async info(id: string) {
@@ -118,15 +121,23 @@ export class ClaudeCodeBridge {
     const sessions = await this.sessions();
     const [info, messages] = current.exists ? await Promise.all([this.info(id), sessions.getSessionMessages(id, {includeSystemMessages: true})]) : [undefined, []];
     // A session this connector runs reports its real state; others are judged by recent transcript writes.
-    const external = !live && this.now() - current.modified < ACTIVE_MS;
+    const external = !live && current.external;
     const running = live ? live.running : external;
     const turns = claudeTurns(messages, running);
-    const model = [...messages].reverse().map(entry => (entry.message as {model?: unknown} | undefined)?.model).find(value => typeof value === 'string');
+    const model = (messages.findLast(entry => typeof (entry.message as Json | undefined)?.model === 'string')?.message as Json | undefined)?.model;
+    const recent = [];
+    let budget = MAX_FRAME - 1024 * 1024;
+    for (const turn of turns.slice(-MAX_TURNS).reverse()) {
+      budget -= Buffer.byteLength(JSON.stringify(turn)) + 1;
+      if (budget < 0) break;
+      recent.push(turn);
+    }
+    if (turns.length && !recent.length) throw new BridgeError('too_large', 'Claude Code 最新一轮过长，请在电脑上查看');
     return {
       id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', revision: current.revision, running,
       controlled: Boolean(live), external, permissionMode: live?.permissionMode || '', requests: live?.pending || [], error: live?.error || '',
       queued: Boolean(live && live.inbox.size),
-      turns: turns.slice(-MAX_TURNS), truncated: turns.length > MAX_TURNS,
+      turns: recent.reverse(), truncated: recent.length < turns.length,
       notice: external ? '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。' : '',
     };
   }
@@ -177,16 +188,20 @@ export class ClaudeCodeBridge {
     if (action === 'claude.send') {
       const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode), steer = p.mode === 'steer';
       return this.mutate(p, {action, id, text: input.text, images: fingerprint(input.images), model, mode, steer, confirmIdle: p.confirmIdle === true}, async () => {
-        let session = this.runtime.get(id);
-        if (!session) {
-          const current = await this.revision(id);
-          if (this.now() - current.modified < ACTIVE_MS && p.confirmIdle !== true)
-            throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
-          const {cwd = ''} = await this.info(id);
-          session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, model, permissionMode: mode});
-        } else await this.runtime.configure(session, model, mode);
-        this.runtime.send(session, input.text, input.images, steer);
-        return {submitted: true};
+        if (this.sending.has(id)) throw new BridgeError('busy', '这条会话已有一条消息正在提交，请稍后再试');
+        this.sending.add(id);
+        try {
+          let session = this.runtime.get(id);
+          if (!session) {
+            const {cwd = ''} = await this.info(id);
+            const directory = await projectDirectory(cwd);
+            if ((await this.revision(id)).external && p.confirmIdle !== true)
+              throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
+            session = await this.runtime.start({cwd: directory, resume: id, model, permissionMode: mode});
+          } else await this.runtime.configure(session, model, mode);
+          this.runtime.send(session, input.text, input.images, steer);
+          return {submitted: true};
+        } finally {this.sending.delete(id);}
       });
     }
     const session = this.runtime.get(id);

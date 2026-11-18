@@ -100,6 +100,7 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
     // Tool approval with "remember".
     assert.equal((await bridge.handle('claude.send', {conversationId: id, text: 'run npm test', opId: opId()})).state, 'accepted');
     view = await until(() => read(id), value => value.requests.length === 1);
+    const firstRequestId = view.requests[0].id;
     assert.equal(view.running, true);
     assert.deepEqual({kind: view.requests[0].kind, detail: view.requests[0].detail, canRemember: view.requests[0].canRemember}, {kind: 'permission', detail: 'npm test', canRemember: true});
     const watched = bridge.handle('claude.watch', {conversationId: id, revision: view.revision});
@@ -143,9 +144,24 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
     const now = new Date();await utimes(file, now, now);
     const blocked = await bridge.handle('claude.send', {conversationId: id, text: '继续', opId: opId()});
     assert.equal(blocked.state, 'failed');assert.equal(blocked.error.code, 'active');
-    assert.equal((await bridge.handle('claude.send', {conversationId: id, text: '继续', confirmIdle: true, opId: opId()})).state, 'accepted');
+    const beforeResume = fake.calls.filter(call => call.type === 'start').length;
+    const resumed = await Promise.all([
+      bridge.handle('claude.send', {conversationId: id, text: '继续', confirmIdle: true, opId: opId()}),
+      bridge.handle('claude.send', {conversationId: id, text: '另一台手机', confirmIdle: true, opId: opId()}),
+    ]);
+    assert.equal(resumed[0].state, 'accepted');
+    assert.equal(resumed[1].error?.code, 'busy');
+    assert.equal(fake.calls.filter(call => call.type === 'start').length, beforeResume + 1);
     assert.equal(fake.calls.filter(call => call.type === 'start').at(-1).options.resume, id);
     await until(() => read(id), value => !value.running && value.turns.at(-1).items.at(-1).text === '好的：继续');
+
+    await bridge.handle('claude.send', {conversationId: id, text: 'run git status', opId: opId()});
+    const approval = await until(() => read(id), value => value.requests.length === 1);
+    const stale = await bridge.handle('claude.respond', {conversationId: id, requestId: firstRequestId, decision: 'allow', opId: opId()});
+    assert.equal(stale.error?.code, 'expired');
+    assert.equal((await read(id)).requests[0].id, approval.requests[0].id);
+    await bridge.handle('claude.respond', {conversationId: id, requestId: approval.requests[0].id, decision: 'deny', opId: opId()});
+    await until(() => read(id), value => !value.running);
 
     await assert.rejects(bridge.handle('claude.create', {cwd: join(root, 'missing'), text: 'x', opId: opId()}));
     await assert.rejects(bridge.handle('claude.send', {conversationId: id, text: '', opId: opId()}), /请输入消息/);

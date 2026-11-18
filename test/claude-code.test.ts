@@ -45,7 +45,7 @@ test('Claude Code transcripts become Codex-style turns', () => {
     ['activity', 'fileChange'], ['assistant', 'agentMessage'],
   ]);
   assert.equal(first.items[3].text, '$ ls\na.ts\nb.ts');
-  assert.deepEqual(first.items[4].files, ['/work/a.ts']);
+  assert.deepEqual(first.items[4].files, [join('/work', 'a.ts')]);
   assert.equal(command.items[0].text, '/model opus');
   assert.deepEqual(command.items.slice(1).map(item => [item.role, item.text]), [['status', 'Set model to opus']]);
   assert.equal(last.items[0].text, '再跑一遍测试');
@@ -66,7 +66,8 @@ test('connector lists, reads and watches Claude Code sessions from the local tra
     await writeFile(file, transcript(cwd));
     const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
     process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
-    const bridge = new ClaudeCodeBridge(undefined, join(root, 'config'));
+    let clockOffset = 0;
+    const bridge = new ClaudeCodeBridge(undefined, join(root, 'config'), undefined, () => Date.now() + clockOffset);
 
     const list = await bridge.handle('claude.list', {});
     assert.deepEqual(list.data.map((item: any) => [item.id, item.title, item.cwd, item.running]), [[sid, '修复登录 bug', cwd, false]]);
@@ -90,6 +91,13 @@ test('connector lists, reads and watches Claude Code sessions from the local tra
     assert.equal(next.running, true);
     assert.equal(next.turns.at(-1).items[0].text, '还有一个问题');
     assert.equal(next.turns.at(-1).status, 'inProgress');
+
+    const waitingForIdle = bridge.handle('claude.watch', {conversationId: sid, revision: next.revision});
+    await new Promise(resolve => setTimeout(resolve, 100));
+    clockOffset = 30_000;
+    const idle = await waitingForIdle;
+    assert.equal(idle.external, false);
+    assert.equal(idle.running, false);
 
     await assert.rejects(bridge.handle('claude.read', {conversationId: '../x'}), /无效/);
     await assert.rejects(bridge.handle('claude.read', {conversationId: '99999999-2222-4333-8444-555555555555'}), /找不到/);
