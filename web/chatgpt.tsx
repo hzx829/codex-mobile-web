@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState,type ReactNode} from 'react';
-import {AntigravityMessages} from './antigravity-messages';
+import {AntigravityMessages,antigravityIssueText} from './antigravity-messages';
 import {AntigravityModelPicker} from './antigravity-model-picker';
+import {connectionLost,ConversationStatus} from './conversation';
 import {useStableEvent} from './use-event';
 import {Icon} from './icons';
 import {operationId} from './client';
@@ -48,9 +49,13 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
     }catch(e){failed(e);}finally{lock.current=false;if(alive.current)setBusy(false);}
   }
   useEffect(()=>{
-    alive.current=true;void refresh();
+    alive.current=true;
+    return()=>{alive.current=false;};
+  },[]);
+  useEffect(()=>{
+    void refresh(false,isAntigravity);
     const timer=conversationId&&!isAntigravity?setInterval(()=>{if(document.visibilityState==='visible')void refresh(false,true);},2500):undefined;
-    return()=>{alive.current=false;clearInterval(timer);};
+    return()=>clearInterval(timer);
   },[connected]);
   useEffect(()=>{
     if(!isAntigravity||!connected||!view?.revision)return;
@@ -72,7 +77,7 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
           });
           return;
         }
-      }catch(e:any){if(active)setWatchError(e?.message||'同步中断，正在重连');retry=2500;}
+      }catch{if(active)setWatchError('与电脑的对话同步中断，正在重连…');retry=2500;}
       finally{inflight=false;}
       if(active)timer=setTimeout(watch,retry);
     }
@@ -80,7 +85,6 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
     document.addEventListener('visibilitychange',watch);
     return()=>{active=false;clearTimeout(timer);document.removeEventListener('visibilitychange',watch);};
   },[isAntigravity,connected,conversationId,view?.revision]);
-  useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view]);
   async function check(){
     if(lock.current||!pending||!connected)return;lock.current=true;setBusy(true);
     try{
@@ -90,7 +94,7 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
       else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
       else setError('结果尚未确认。请刷新聊天并在电脑核实；系统不会自动重发。');
     }catch(e){failed(e);}finally{lock.current=false;if(alive.current)setBusy(false);}
-    void refresh();
+    void refresh(false,true);
   }
   async function mutate(action:'send'|'stop'){
     if(lock.current||pending||!connected)return;
@@ -105,13 +109,20 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
       else setError(result.error?.message||'结果待核实，请刷新聊天查看。');
     }catch(e:any){if(!e?.uncertain&&alive.current)remember('');failed(e);}
     finally{lock.current=false;if(alive.current)setBusy(false);}
-    void refresh();
+    void refresh(false,true);
   }
   const ready=connected&&(isAntigravity||bridge?.connected&&bridge?.pageReady);
+  const issue=isAntigravity&&view?.issue;
+  const antigravityStatus=isAntigravity&&conversationId&&(
+    !connected?connectionLost:watchError||
+    (pending&&busy?'正在等待电脑确认…':issue?antigravityIssueText(issue,view!.canSend):
+      view?.running?'Antigravity 正在运行…':view&&!view.canSend?'正在等待 Antigravity…':'')
+  );
+  useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,antigravityStatus]);
   return <main className="chatgpt-panel" inert={inert}>
     <header className="chatgpt-header"><button aria-label={conversationId?`返回 ${name} 列表`:'返回 Codex'} onClick={()=>conversationId?go(''):back()}><Icon name="back"/></button><div><strong>{conversationId?view?.title||name:name}</strong><small>{connected?(isAntigravity?'电脑上的 Antigravity 对话':'浏览器账号中的聊天'):'电脑未连接'}</small></div><button disabled={!connected||busy} onClick={()=>void refresh()} aria-label="刷新">刷新</button></header>
     {!conversationId&&switcher}
-    {(error||watchError||previewError)&&<p className="chatgpt-notice error" role="alert">{error||watchError||previewError}</p>}
+    {(error||previewError)&&<p className="chatgpt-notice error" role="alert">{error||previewError}</p>}
     {!isAntigravity&&connected&&bridge&&(!bridge.connected||!bridge.pageReady)&&<div className="chatgpt-setup"><h2>{bridge.connected?'等待 ChatGPT 页面':'连接 ChatGPT 浏览器'}</h2><p>{bridge.notice||'请在电脑打开已登录的 ChatGPT 页面，并在扩展中连接该标签页。'}</p><ol><li>在电脑扩展管理页加载准备好的 <code>.local/chatgpt-extension</code> 文件夹。</li><li>打开已登录目标账号的 ChatGPT 页面，点击扩展，选择“连接当前 ChatGPT 页面”。</li><li>保持页面打开，在这里刷新。</li></ol></div>}
     {!conversationId?<div className="chatgpt-list">
       <label>筛选已加载聊天<input value={query} onChange={event=>setQuery(event.target.value)} placeholder="聊天标题"/></label>
@@ -126,10 +137,11 @@ export function RemoteChatPanel({service,switcher,machine,connected,conversation
           :view?.messages.map((message:Json)=><article key={message.id} className={`chatgpt-message ${message.role}`}><small>{message.role==='tool'?'工具':message.role==='user'?'你':name}</small><div>{message.text}</div></article>)}
         {!view&&!error&&<p>{busy?'正在读取聊天…':isAntigravity?'连接电脑后读取对话。':'连接浏览器后读取聊天。'}</p>}
         {isAntigravity&&view&&!view.messages.length&&<p>桌面尚未记录可显示的消息。</p>}
-        {view?.running&&<p role="status">{name} 正在运行…</p>}
+        {antigravityStatus&&<ConversationStatus>{antigravityStatus}</ConversationStatus>}
+        {!isAntigravity&&view?.running&&<p role="status">{name} 正在运行…</p>}
       </div>
       <footer className={isAntigravity?'composer-area':'chatgpt-footer'}>
-        {pending&&<div className="chatgpt-pending"><span>发送或停止结果待核实</span><button disabled={!connected||busy} onClick={()=>void check()}>核实回执</button><button disabled={busy} onClick={()=>{if(window.confirm('请先在聊天和电脑页面确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
+        {pending&&!(isAntigravity&&busy)&&<div className="chatgpt-pending"><span>发送或停止结果待核实</span><button disabled={!connected||busy} onClick={()=>void check()}>核实回执</button><button disabled={busy} onClick={()=>{if(window.confirm('请先在聊天和电脑页面确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
         <form className={isAntigravity?'composer antigravity-composer':undefined} onSubmit={event=>{event.preventDefault();void mutate('send');}}><textarea aria-label={`发送给 ${name}`} placeholder={`继续这个 ${name} 对话…`} readOnly={Boolean(pending)} value={draft} maxLength={50_000} onChange={event=>edit(event.target.value)} rows={isAntigravity?2:3}/><div className={isAntigravity?'composer-toolbar':undefined}>
           {isAntigravity&&view&&connected&&<AntigravityModelPicker read={readModels} turn={view.turn} value={model} disabled={busy||Boolean(pending)} onChange={selectModel}/>}
           {view?.running?<button type="button" disabled={!ready||busy||Boolean(pending)} onClick={()=>void mutate('stop')}>{isAntigravity?'停止此会话当前任务':'停止生成'}</button>:<button className="primary" disabled={!ready||!view||isAntigravity&&!view.canSend||busy||Boolean(pending)||!draft.trim()}>发送</button>}</div></form>

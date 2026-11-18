@@ -4,7 +4,7 @@ import {isAbsolute, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {readProjectFile, downloadProjectFile} from './project.js';
 import {setTimeout as delay} from 'node:timers/promises';
-import {BridgeError, textRequired, type AntigravityMessage, type AntigravityModel, type Json} from '../shared/types.js';
+import {BridgeError, textRequired, type AntigravityIssue, type AntigravityMessage, type AntigravityModel, type Json} from '../shared/types.js';
 import type {Ledger} from './ledger.js';
 import {callHub} from './antigravity-hub.js';
 
@@ -17,12 +17,21 @@ const columns = 'conversation_id AS id, title, status, not_fully_idle AS notIdle
 const turnKey = (summary: Summary) => JSON.stringify([summary.userStep, summary.userTime]);
 const canSend = (summary: Summary) => summary.status === idle && !summary.notIdle;
 
-async function messages(path: string): Promise<AntigravityMessage[]> {
+function readIssue(step: Json): AntigravityIssue {
+  const error = typeof step.error === 'string' ? step.error : '';
+  const attempt = /^API error \(attempt (\d+)\):/i.exec(error);
+  if (attempt) return {kind: 'retry', attempt: Number(attempt[1]),
+    connection: /\b(?:eof|connection (?:reset|refused|closed|timed out)|wsarecv|proxyconnect)\b/i.test(error)};
+  if (/^The stream was interrupted\b/i.test(error)) return {kind: 'interrupted'};
+  return {kind: 'error'};
+}
+
+async function transcript(path: string): Promise<{messages: AntigravityMessage[]; issue: AntigravityIssue | null}> {
   const file = await open(path, 'r').catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') throw error;
     return null;
   });
-  if (!file) return [];
+  if (!file) return {messages: [], issue: null};
   try {
     const {size} = await file.stat();
     const start = Math.max(0, size - tailSize);
@@ -31,21 +40,26 @@ async function messages(path: string): Promise<AntigravityMessage[]> {
     const lines = data.toString('utf8', 0, bytesRead).split('\n');
     if (start) lines.shift(); // The first line may start in the middle of a UTF-8 character.
     const result = new Map<string, AntigravityMessage>();
+    let issue: AntigravityIssue | null = null;
     for (const line of lines) {
       let step;
       try { step = JSON.parse(line); } catch { continue; }
       if (!Number.isSafeInteger(step?.step_index)) continue;
       const id = String(step.step_index);
       if (step.type === 'USER_INPUT' && typeof step.content === 'string') {
+        issue = null;
         const text = /^\s*<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>(?:\s*<ADDITIONAL_METADATA>|\s*$)/.exec(step.content)?.[1] ?? step.content;
         result.set(id, {id, role: 'user', text: text.trim()});
       } else if (step.type === 'PLANNER_RESPONSE') {
+        issue = null;
         if (typeof step.content === 'string' && step.content.trim()) result.set(id, {id, role: 'assistant', text: step.content});
         const tools = Array.isArray(step.tool_calls) ? step.tool_calls.map((tool: Json) => tool?.name).filter((n: unknown) => typeof n === 'string') : [];
         if (tools.length) result.set(id + '-tools', {id: id + '-tools', role: 'tool', text: tools.join('、')});
+      } else if (step.type === 'ERROR_MESSAGE') {
+        issue = readIssue(step);
       }
     }
-    return [...result.values()].slice(-100);
+    return {messages: [...result.values()].slice(-100), issue};
   } finally { await file.close(); }
 }
 
@@ -117,7 +131,7 @@ export class AntigravityBridge {
       if (known === current.revision) return {unchanged: true};
     }
     const {path, ...view} = current;
-    const items = await messages(path);
+    const {messages: items, issue} = await transcript(path);
     this.recent.delete(id);
     this.recent.set(id, {revision: view.revision, messages: items});
     if (this.recent.size > 8) this.recent.delete(this.recent.keys().next().value!);
@@ -125,9 +139,9 @@ export class AntigravityBridge {
       let keep = 0;
       while (keep < items.length && items[keep].id === previous.messages[keep]?.id &&
              items[keep].text === previous.messages[keep].text && items[keep].role === previous.messages[keep].role) keep++;
-      return {...view, base: known, keep, messages: items.slice(keep)};
+      return {...view, issue, base: known, keep, messages: items.slice(keep)};
     }
-    return {...view, messages: items, notice: '显示桌面已记录的最近对话内容。'};
+    return {...view, issue, messages: items, notice: '显示桌面已记录的最近对话内容。'};
   }
 
   async handle(action: string, p: Json): Promise<Json> {

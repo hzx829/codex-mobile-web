@@ -1,8 +1,16 @@
 import {memo, useMemo} from 'react';
-import type {AntigravityMessage, MessageItem} from '../src/shared/types';
+import type {AntigravityIssue, AntigravityMessage, MessageItem} from '../src/shared/types';
 import {groupItems} from './activity';
 import {ActivityGroup} from './conversation';
 import {SafeMarkdown} from './content';
+
+export function antigravityIssueText(issue: AntigravityIssue, canSend: boolean) {
+  if (issue.kind === 'interrupted') return 'Antigravity 的回复中断了，可以发送消息继续。';
+  if (issue.kind === 'error') return 'Antigravity 处理消息时出错。';
+  const reason = issue.connection ? 'Antigravity 连接中断' : 'Antigravity 请求出错';
+  if (canSend) return `${reason}，本轮已结束。`;
+  return `${reason}，正在${issue.connection ? '重连' : '重试'}（第 ${issue.attempt} 次请求失败）…`;
+}
 
 export function groupAntigravityMessages(messages: AntigravityMessage[]) {
   const items = messages.flatMap<MessageItem>(message => {

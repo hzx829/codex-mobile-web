@@ -4,7 +4,7 @@ import { AppServer, resolveCodex } from './app-server.js';
 import { resolve } from 'node:path';
 import { Desktop } from './desktop.js';
 import { Ledger } from './ledger.js';
-import { desktopTurns, normalizeSession, turnPage } from './normalize.js';
+import { codexRetryText, desktopTurns, normalizeSession, turnPage } from './normalize.js';
 import { approvalResult } from './approvals.js';
 import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
 import { nativeProjects, indexedSessions } from './projects.js';
@@ -33,6 +33,7 @@ export class Control extends EventEmitter {
   private settings=new Map<string,Json>();
   private diffs=new Map<string,string>();
   private starting=new Map<string,string>();
+  private retries=new Map<string,{turnId:string;text:string}>();
   private contexts=new Map<string,ContextUsage|null>();
   private locks=new Map<string,Promise<unknown>>();
   private reloading=false;
@@ -44,6 +45,13 @@ export class Control extends EventEmitter {
   constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions) {
     super();
     runtime.on('event',(e:Json)=>{
+      const {threadId,turnId}=e.params||{};
+      if(e.method==='error'&&e.params.willRetry===true&&threadId&&turnId&&this.loaded.has(threadId)){
+        this.retries.set(threadId,{turnId,text:codexRetryText(e.params.error?.message,e.params.error?.codexErrorInfo)});
+      }
+      const retry=this.retries.get(threadId);
+      if(retry&&(e.method==='thread/closed'||e.method==='turn/started'||e.method==='turn/completed'||
+        retry.turnId===turnId&&(e.method==='item/started'||e.method==='item/agentMessage/delta'||e.method==='error'&&e.params.willRetry===false)))this.retries.delete(threadId);
       if(e.method==='turn/diff/updated')this.diffs.set(e.params.turnId,e.params.diff);
       if(e.method==='turn/completed')this.starting.delete(e.params.threadId);
       if(e.method==='thread/closed'){this.loaded.delete(e.params.threadId);this.starting.delete(e.params.threadId);}
@@ -53,7 +61,7 @@ export class Control extends EventEmitter {
       if(e.method==='turn/completed')this.scheduleRelease(e.params.threadId);
       this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
     });
-    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.settings.clear();this.contexts.clear();this.generation=randomUUID();this.emit('change',null);});
+    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.generation=randomUUID();this.emit('change',null);});
     desktop.on('change',(id:string)=>this.emit('change',id));
     desktop.on('resync',(id:string)=>{this.emit('change',id);});
     desktop.on('offline',()=>{this.generation=randomUUID();this.emit('change',null);});
@@ -157,6 +165,8 @@ export class Control extends EventEmitter {
       if(view.activeTurnId||view.turns.some(turn=>turn.id===starting&&turnFinished(turn.status)))this.starting.delete(id);
       else {view.activeTurnId=starting;view.running=true;view.canControl=false;view.notice='Codex 正在开始这一轮，稍后即可补充或停止';}
     }
+    const retry=this.retries.get(id);
+    if(!cursor&&view.source==='connector'&&retry&&retry.turnId===view.activeTurnId)view.retry=retry.text;
     view.queuedMessages=this.ledger.queued(id).map(message=>({id:message.id,text:message.payload.text,imageCount:message.payload.images?.length||0,fileNames:message.payload.files?.map((file:Json)=>file.name)||[],imageBytes:(message.payload.images||[]).reduce((sum:number,url:string)=>sum+imageBytes(url),0),state:message.state,error:message.error}));
     view.generation=this.generation;return view;
   }

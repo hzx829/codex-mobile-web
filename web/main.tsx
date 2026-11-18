@@ -5,7 +5,7 @@ import {RemoteChatPanel} from './chatgpt';
 import {ServiceSwitch, serviceOf, switchRoute, type Service} from './service-switch';
 import {Icon,type IconName} from './icons';
 import {IconButton} from './icon-button';
-import {ConversationTurn} from './conversation';
+import {connectionLost,ConversationStatus,ConversationTurn} from './conversation';
 import {RequestCard} from './content';
 import {createFirstTurn} from './new-chat';
 import {SessionListLoader} from './session-list-loader';
@@ -456,7 +456,7 @@ function App(){
      </PreviewPane>;
   if(service!=='codex'){
     const field=service==='chatgpt'?'chat':'antigravity';
-    return <div className="shell remote-shell"><RemoteChatPanel inert={Boolean(compactPreview&&preview)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error} key={JSON.stringify([machine,service,route[field],connected])} service={service} machine={machine} connected={connected}
+    return <div className="shell remote-shell"><RemoteChatPanel inert={Boolean(compactPreview&&preview)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error} key={JSON.stringify([machine,service,route[field],service==='chatgpt'&&connected])} service={service} machine={machine} connected={connected}
       conversationId={route[field]||''} call={call} go={id=>navigate({...home,[field]:id})} back={()=>selectService('codex')} switcher={switcher}/>{previewPane}</div>;
   }
   return <div className={`shell ${showThread?'has-session':''}`}>
@@ -476,17 +476,18 @@ function App(){
     <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
        <header className="thread-header"><IconButton icon="back" label="返回会话列表" className="round" disabled={busy} onClick={backToSessions}/><button className="thread-title" onClick={e=>newChat?setSheet('projects'):openStatus(e.currentTarget)}><strong>{visibleTitle}</strong><span><Icon name="folder" size={13}/><span>{projectName(newChat?newCwd:view?.cwd||project)||'项目'}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span></span></button><div className="header-actions"><button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button></div></header>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
-      {!connected&&<div className="banner">连接已断开，电脑上的任务会继续。</div>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
       <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!,up=el.scrollTop<lastScrollTop.current;lastScrollTop.current=el.scrollTop;sticky.current=!up&&el.scrollHeight-el.scrollTop-el.clientHeight<24;if(up&&el.scrollTop<160&&!historyError)void loadOlder();}}>
         <div className="timeline-content" ref={timelineContent}>
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={!connected||loadingOlder} onClick={()=>void loadOlder()}>{loadingOlder?'正在加载…':historyError?`${historyError} · 重试`:'加载更早内容'}</button>}
         {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:conversation}
+        {!newChat&&view?.retry&&<ConversationStatus>{view.retry}</ConversationStatus>}
+        {!connected&&<ConversationStatus>{connectionLost}</ConversationStatus>}
         </div>
       </div>
       <div className="composer-area"><div className="request-stack">{!newChat&&view?.requests.map(req=><RequestCard key={`${view.generation}:${req.id}`} request={req} disabled={!canOperate} respond={response=>void mutate('request.respond',{...target(),requestId:req.id,response})}/>)}</div>{feedback}
-        {view?.running&&!newChat&&<div className="running-status"><i className="dot online"/>Codex 正在处理</div>}
+        {connected&&view?.running&&!newChat&&!view.retry&&view.turns.at(-1)?.items.at(-1)?.type!=='retry'&&<div className="running-status"><i className="dot online"/>Codex 正在处理</div>}
         {!newChat&&Boolean(view?.queuedMessages?.length)&&<div className="queued-messages" aria-label="待发送消息">
           <div className="queue-heading">完成后发送 <span>{view?.queuedMessages?.length}</span></div>
           {view?.queuedMessages?.map((message,index)=>{

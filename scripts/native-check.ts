@@ -21,6 +21,7 @@ const nativeBin=resolveCodex(process.env.CODEX_BIN||localConfig.codexBin);
 const queuedText='Queued normal-speed response.';
 const fixtureKey=randomUUID();let receivedModel='',receivedEffort='',receivedServiceTier:string|null=null,queuedRequests=0,receivedAuth=false,hang=false,onRequest:(()=>void)|undefined;
 let receivedUserText='';
+let dropNext=false,afterDrop:Promise<void>|undefined;
 const api=createServer(async(req,res)=>{
   const chunks=[];for await(const chunk of req)chunks.push(chunk);let body:any={};try{body=JSON.parse(Buffer.concat(chunks).toString());}catch{}
   receivedModel=body.model||'';receivedAuth=req.headers.authorization===`Bearer ${fixtureKey}`;
@@ -33,6 +34,8 @@ const api=createServer(async(req,res)=>{
   res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});
   const emit=(event:Json)=>res.write(`data: ${JSON.stringify(event)}\n\n`);
   emit({type:'response.created',response:{id,status:'in_progress',output:[]}});
+  if(dropNext){dropNext=false;res.end();return;}
+  await afterDrop;
   if(hang){onRequest?.();return;}
   emit({type:'response.output_item.added',output_index:0,item:{...item,status:'in_progress',content:[]}});
   emit({type:'response.output_text.delta',item_id:item.id,output_index:0,content_index:0,delta:'FIXTURE_OK'});
@@ -70,10 +73,20 @@ try{
   const managedDone=event('turn/completed',p=>p.threadId===managed.threadId);
   const attachment=new File(['%PDF-1.7\nfixture'],'fixture.pdf');
   const files=await uploadAttachments(call,view.id,[{id:randomUUID(),name:attachment.name,size:attachment.size,file:attachment}]);
-  const submitted=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},'Return fixture response.',[],{model:'gpt-6-astra',effort:'high',approvalPolicy:''},'steer',files);assert.equal(submitted.state,'accepted');await managedDone;
+  let resumeResponse!:()=>void;
+  afterDrop=new Promise<void>(resolve=>{resumeResponse=resolve;});
+  dropNext=true;
+  const reconnecting=event('error',p=>p.threadId===view.id&&p.willRetry===true);
+  const submitted=await submitTurn(call,{threadId:view.id,source:view.source,generation:view.generation,expectedTurnId:null},'Return fixture response.',[],{model:'gpt-6-astra',effort:'high',approvalPolicy:''},'steer',files);
+  assert.equal(submitted.state,'accepted');
+  const nativeRetry=await reconnecting;
+  const retrySnapshot=await call('session.read',{threadId:view.id});
+  assert.match(retrySnapshot.retry,/Codex 正在重连 \d+\/\d+…/,nativeRetry.error.message);
+  resumeResponse();afterDrop=undefined;
+  await managedDone;
   assert.match(receivedUserText,/fixture\.pdf/);assert.match(receivedUserText,/\.codex-mobile-attachments/);
   assert.equal(receivedModel,'gpt-6-astra');assert.equal(receivedEffort,'high');
-  const final=await control.read(view.id);assert.equal(final.activeTurnId,null);assert.equal(final.canControl,true);
+  const final=await control.read(view.id);assert.equal(final.activeTurnId,null);assert.equal(final.canControl,true);assert.equal(final.retry,undefined);
   const original=final.turns.at(-1)!,message=original.items.find(item=>item.role==='user')!;
   assert.equal(original.canFork,true);
   const laterDone=event('turn/completed',p=>p.threadId===view.id);
