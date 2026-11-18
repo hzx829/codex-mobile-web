@@ -12,10 +12,10 @@ type Page={data:Thread[];hasMore:boolean;projects?:Project[];notice?:string};
 type Props={
   /** List action and wording of the app this sidebar shows; defaults to Antigravity. */
   listAction?:RequestAction;appName?:string;
-  selected:string;project:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;switcher:ReactNode;
+  selected:string;project:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;switcher:ReactNode;action?:ReactNode;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseProject:(id:string)=>void;chooseComputer:()=>void;more:()=>void;
 };
-export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',selected,project,machineName,connected,relayOnline,inert,revision,switcher,call,open,chooseProject,chooseComputer,more}:Props){
+export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',selected,project,machineName,connected,relayOnline,inert,revision,switcher,action,call,open,chooseProject,chooseComputer,more}:Props){
   const [search,setSearch]=useState(''),[query,setQuery]=useState(''),[projects,setProjects]=useState<Project[]>([]);
   const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean}|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
@@ -52,6 +52,7 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
       back={()=>{setSearch('');setQuery('');chooseProject('');}} chooseComputer={chooseComputer} more={more}/>
     {!project&&!query&&switcher}
     <div className="home-content">
+      {action}
       {!project&&!query&&projects.length>0&&<section className="project-section"><h2>项目</h2>{projects.map(item=>
         <button className="project-row" key={item.id} title={item.path} onClick={()=>chooseProject(item.id)}><Icon name="folder"/><span>{item.name||workspaceName(item.path)}</span></button>)}</section>}
       <section className="recent-section"><h2>{heading}</h2>

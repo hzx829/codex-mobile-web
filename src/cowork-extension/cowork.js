@@ -2,6 +2,9 @@ const coworkOrigin = 'https://claude.ai';
 const isCoworkTab = tab => tab?.url?.startsWith(coworkOrigin + '/');
 const coworkProject = /^\/(?:project|cowork\/projects?)\/(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|(?:claude_proj|proj)_[a-z0-9]+)$/i;
 const coworkThread = /^\/cowork\/(?:cse|session|local)_[a-z0-9-]{6,120}$/i;
+let coworkCache;
+
+function clearCoworkCache() { coworkCache = undefined; }
 
 async function selectedCoworkTab() {
   const {coworkTabId} = await chrome.storage.session.get('coworkTabId');
@@ -44,8 +47,27 @@ async function coworkPage(tab, kind, path) {
 
 async function executeCowork(action,payload) {
   const tab = await selectedCoworkTab();
-  const result = await readCowork(action,payload,tab);
-  if ((await selectedCoworkTab()).id !== tab.id) throw error('browser_offline','Cowork 页面已切换，请重新读取');
+  if (coworkCache?.tabId !== tab.id || coworkCache.url !== tab.url) {
+    coworkCache = {tabId:tab.id,url:tab.url,pages:new Map()};
+  }
+  const cache = coworkCache;
+  const key = JSON.stringify([action,action === 'cowork.read' ? payload.conversationId : payload.project || '']);
+  let entry = cache.pages.get(key);
+  if (!entry || (entry.expires && (entry.expires <= Date.now() || payload.refresh === true))) {
+    if (!entry && cache.pages.size >= 16) cache.pages.delete(cache.pages.keys().next().value);
+    entry = {promise:readCowork(action,payload,tab)};
+    cache.pages.set(key,entry);
+    const pending = entry;
+    void pending.promise.then(
+      () => { pending.expires = Date.now() + 20_000; },
+      () => { if (cache.pages.get(key) === pending) cache.pages.delete(key); },
+    );
+  }
+  const result = await entry.promise;
+  const selected = await selectedCoworkTab();
+  if (coworkCache !== cache || selected.id !== tab.id || selected.url !== tab.url) {
+    throw error('browser_offline','Cowork 页面已切换，请重新读取');
+  }
   return result;
 }
 

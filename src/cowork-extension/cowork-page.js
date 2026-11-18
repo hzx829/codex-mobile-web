@@ -8,6 +8,50 @@ function coworkSnapshot(kind, expectedPath = '') {
   const main = document.querySelector('main,[role="main"]');
   const shown = element => !element.closest('[hidden],[aria-hidden="true"],[inert]') && element.getClientRects().length > 0;
   const text = element => (element.innerText ?? element.textContent ?? '').trim();
+  const escape = value => value.replace(/\s+/g,' ').replace(/[\\\x60*_[\]<>#~!+|=-]/g,'\\$&');
+  const fence = (body, pattern, mark, size) => {
+    for (const run of body.matchAll(pattern)) size = Math.max(size,run[0].length+1);
+    return mark.repeat(size);
+  };
+  function markdown(node) {
+    if (node.nodeType === 3) return escape(node.nodeValue || '');
+    if (node.nodeType !== 1 || node.matches('[hidden],[aria-hidden="true"],[inert],button,svg,script,style')) return '';
+    const tag = node.tagName;
+    if (tag === 'BR') return '  \n';
+    if (tag === 'PRE' || tag === 'CODE') {
+      const code = (tag==='PRE'?node.querySelector('code')||node:node).textContent || '';
+      if (tag === 'PRE') {
+        const marker = fence(code,/~+/g,'~',3);
+        return '\n\n'+marker+'\n'+code+'\n'+marker+'\n\n';
+      }
+      const marker = fence(code,/\x60+/g,String.fromCharCode(96),1);
+      return marker+' '+code.replace(/\n/g,' ')+' '+marker;
+    }
+    const children = [...node.childNodes].map(markdown).join('');
+    const body = children.trim();
+    if (/^H[1-6]$/.test(tag) && body) return '\n\n'+'#'.repeat(Number(tag[1]))+' '+body+'\n\n';
+    if (tag === 'P' || tag === 'DIV' || tag === 'SECTION') return body?'\n\n'+body+'\n\n':'';
+    if (tag === 'STRONG' || tag === 'B') return body?'**'+body+'**':'';
+    if (tag === 'EM' || tag === 'I') return body?'*'+body+'*':'';
+    if (tag === 'BLOCKQUOTE') return '\n\n'+body.split('\n').map(line=>'> '+line).join('\n')+'\n\n';
+    if (tag === 'UL' || tag === 'OL') {
+      const items = [...node.children].filter(child=>child.tagName==='LI').map((child,index)=>{
+        const prefix = tag==='UL'?'- ':(index+1)+'. ';
+        return prefix+markdown(child).trim().replace(/\n/g,'\n'+' '.repeat(prefix.length));
+      });
+      return '\n\n'+items.join('\n')+'\n\n';
+    }
+    if (tag === 'TABLE') {
+      const rows = [...node.querySelectorAll('tr')].map(row=>[...row.children].map(cell=>
+        markdown(cell).trim().replace(/\s*\n\s*/g,' ')));
+      if (rows.length && rows[0].length && rows.every(row=>row.length===rows[0].length)) {
+        const table = [rows[0],rows[0].map(()=> '---'),...rows.slice(1)];
+        return '\n\n'+table.map(row=>'| '+row.join(' | ')+' |').join('\n')+'\n\n';
+      }
+      return '\n\n'+rows.map(row=>row.join(' · ')).join('  \n')+'\n\n';
+    }
+    return children;
+  }
   const links = (anchors, pattern) => {
     const result = new Map();
     for (const anchor of anchors) {
@@ -29,12 +73,18 @@ function coworkSnapshot(kind, expectedPath = '') {
     const messages = [];
     let budget = 300_000;
     for (const [index,element] of [...items.entries()].reverse()) {
-      const body = text(element.querySelector('.standard-markdown') || element);
-      if (!body) continue;
       const role = element.getAttribute('data-message-author-role') === 'user' || element.getAttribute('data-testid') === 'user-message' ? 'user' : 'assistant';
-      const excerpt = body.slice(-Math.min(budget,80_000));
-      messages.push({id:String(index),role,text:excerpt});
-      budget -= excerpt.length;
+      const blocks = [...element.querySelectorAll('.standard-markdown')].filter(block=>
+        shown(block)&&!element.contains(block.parentElement?.closest('.standard-markdown')));
+      const contents = role==='assistant'&&blocks.length?blocks:[element];
+      const limit = Math.min(budget,80_000);
+      const plain = contents.map(text).filter(Boolean).join('\n\n');
+      if (!plain) continue;
+      const formatted = role==='assistant'&&plain.length<=limit?contents.map(block=>markdown(block).trim()).filter(Boolean).join('\n\n'):'';
+      const rich = Boolean(formatted && formatted.length<=limit);
+      const body = rich?formatted:plain.slice(-limit);
+      messages.push({id:String(index),role,text:body,...(rich?{format:'markdown'}:{})});
+      budget -= body.length;
       if (budget <= 0 || messages.length >= 150) break;
     }
     if (!messages.length) return {failure:'loading'};

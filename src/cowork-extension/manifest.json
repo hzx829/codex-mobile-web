@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Cowork Bridge for Codex Mobile Web",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Read Claude Cowork projects and conversations from your Codex Mobile Web.",
   "minimum_chrome_version": "120",
   "permissions": [

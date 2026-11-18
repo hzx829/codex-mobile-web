@@ -34,7 +34,7 @@ async function connect(){
   finally{connecting=false;}
 }
 function disconnect(){
-  const ws=socket;socket=undefined;connected=false;notice='已断开';ws?.close();
+  clearCoworkCache();const ws=socket;socket=undefined;connected=false;notice='已断开';ws?.close();
 }
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id||sender.tab)return;
@@ -44,6 +44,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(message.type==='bridge.bind'){
       const tab=await chrome.tabs.get(message.tabId);
       if(!isCoworkTab(tab))throw error('invalid','请选择 Claude 页面');
+      clearCoworkCache();
       await chrome.storage.session.set({coworkTabId:tab.id});await connect();return {};
     }
     throw error('invalid','未知操作');
@@ -51,6 +52,9 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
 });
 chrome.alarms.create('bridge-reconnect',{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(()=>void connect());
+chrome.tabs.onUpdated.addListener((id,change)=>{
+  if(coworkCache?.tabId===id&&(change.url||change.status==='loading'))clearCoworkCache();
+});
 chrome.tabs.onRemoved.addListener(async id=>{
   const {coworkTabId}=await chrome.storage.session.get('coworkTabId');
   if(id!==coworkTabId)return;

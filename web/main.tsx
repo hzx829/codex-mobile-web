@@ -3,7 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
 import {AntigravityPanel} from './antigravity';
 import {AntigravitySidebar} from './antigravity-sidebar';
-import {CoworkPanel} from './cowork';
+import {CoworkOpenAction,CoworkPanel} from './cowork';
 import {ChatSearch,HomeHeader,SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,withConversation,type Service} from './services';
@@ -466,7 +466,7 @@ function App(){
     return <div className={`shell ${id?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
-        listAction={`${service}.list`} appName={serviceLabel(service)}
+        listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='cowork'?<CoworkOpenAction project={route.project}/>:undefined}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {id&&service==='cowork'?<CoworkPanel key={JSON.stringify([machine,id])} id={id} inert={inert} machineName={machineName} connected={connected} back={()=>open('')} call={call}/>:
         id?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}

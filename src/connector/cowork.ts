@@ -7,6 +7,10 @@ import {coworkProjectPath, coworkThreadPath} from '../shared/cowork.js';
 
 type PendingRequest={resolve:(value:Json)=>void;reject:(error:BridgeError)=>void;timer:NodeJS.Timeout};
 
+function titleText(value:string){
+  return value.replace(/[\s\p{Co}]+$/u,'').replace(/\s+/g,' ').trim();
+}
+
 export function coworkPairing(dataDir:string, port=3342){
   mkdirSync(dataDir,{recursive:true});
   const path=join(dataDir,'cowork-pairing.json');
@@ -89,9 +93,9 @@ export class CoworkBridge {
     if(action!=='cowork.list'&&action!=='cowork.read')throw new BridgeError('unsupported','不支持此 Cowork 操作');
     if(action==='cowork.read'){
       if(typeof payload.conversationId!=='string'||!coworkThreadPath.test(payload.conversationId))throw new BridgeError('invalid','Cowork 会话链接无效');
-      const view=await this.request(action,{conversationId:payload.conversationId});
+      const view=await this.request(action,{conversationId:payload.conversationId,...(payload.refresh===true?{refresh:true}:{})});
       if(typeof view.title!=='string'||!Array.isArray(view.messages))throw new BridgeError('protocol','Cowork 会话响应格式无效');
-      return {title:view.title,messages:view.messages.filter(item=>typeof item?.id==='string'&&['user','assistant'].includes(item.role)&&typeof item.text==='string')};
+      return {title:titleText(view.title),messages:view.messages.filter(item=>typeof item?.id==='string'&&['user','assistant'].includes(item.role)&&typeof item.text==='string')};
     }
     const {project='',search='',offset=0}=payload;
     if(typeof project!=='string'||(project!==''&&!coworkProjectPath.test(project)))throw new BridgeError('invalid','Cowork 项目链接无效');
@@ -99,9 +103,12 @@ export class CoworkBridge {
     const result=await this.request(action,{project});
     if(!Array.isArray(result.data)||!Array.isArray(result.projects))throw new BridgeError('protocol','Cowork 列表响应格式无效');
     const query=search.trim().toLowerCase();
-    const matches=result.data.filter(item=>typeof item?.id==='string'&&coworkThreadPath.test(item.id)&&typeof item.title==='string'&&item.title.toLowerCase().includes(query));
-    return {data:matches.slice(offset,offset+50).map(({id,title})=>({id,title,updatedAt:0,running:false})),hasMore:matches.length>offset+50,
-      ...(!project&&!offset?{projects:result.projects.filter(item=>typeof item?.id==='string'&&coworkProjectPath.test(item.id)&&typeof item.name==='string').map(({id,name})=>({id,name,path:name}))}:{}),
+    const matches=result.data.filter(item=>typeof item?.id==='string'&&coworkThreadPath.test(item.id)&&typeof item.title==='string')
+      .map(({id,title})=>({id,title:titleText(title),updatedAt:0,running:false}))
+      .filter(({title})=>title&&title.toLowerCase().includes(query));
+    return {data:matches.slice(offset,offset+50),hasMore:matches.length>offset+50,
+      ...(!project&&!offset?{projects:result.projects.filter(item=>typeof item?.id==='string'&&coworkProjectPath.test(item.id)&&typeof item.name==='string')
+        .map(({id,name})=>({id,name:titleText(name)})).filter(({name})=>name).map(item=>({...item,path:item.name}))}:{}),
       ...(typeof result.notice==='string'?{notice:result.notice}:{})};
   }
   close(){for(const ws of this.server.clients)ws.terminate();this.server.close();}
