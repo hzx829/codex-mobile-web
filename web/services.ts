@@ -1,11 +1,10 @@
 import {home, type Route} from './route-state';
-import {coworkThreadPath} from '../src/shared/cowork';
 
 /**
  * Every phone-side app lives in this table. Adding an app means adding one entry here,
  * a connector bridge with the same action prefix, and its panel in main.tsx.
  */
-type RemoteField = 'antigravity' | 'claude' | 'cowork';
+type RemoteField = 'antigravity' | 'claude';
 type ServiceSpec = {
   label: string;
   /** Route field that holds the open conversation; Codex uses thread/project/newChat instead. */
@@ -14,14 +13,12 @@ type ServiceSpec = {
   keepsProject?: boolean;
   /** Prefix used for preview/file owners so file reads go to the right connector bridge. */
   threadPrefix?: string;
-  conversationPattern?: RegExp;
 };
 
 export const SERVICES = {
   codex: {label: 'Codex'},
   antigravity: {label: 'Antigravity', field: 'antigravity', keepsProject: true, threadPrefix: 'antigravity:'},
   claude: {label: 'Claude Code', field: 'claude', keepsProject: true, threadPrefix: 'claude:'},
-  cowork: {label: 'Cowork', field: 'cowork', keepsProject: true, conversationPattern: coworkThreadPath},
 } as const satisfies Record<string, ServiceSpec>;
 
 export type Service = keyof typeof SERVICES;
@@ -30,9 +27,8 @@ const spec = (service: Service): ServiceSpec => SERVICES[service];
 
 const conversationId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
-export function isConversation(field: RemoteField, id: string) {
-  const service = SERVICE_IDS.find(service=>spec(service).field===field);
-  return ((service && spec(service).conversationPattern) || conversationId).test(id);
+export function isConversation(id: string) {
+  return conversationId.test(id);
 }
 
 export function remoteFields(): RemoteField[] {

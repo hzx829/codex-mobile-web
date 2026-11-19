@@ -6,7 +6,7 @@
 
 查看项目和会话、发送任务、补充要求、停止任务，以及回应 Codex 的审批和问题。任务仍在电脑上执行，沿用原有工作区、模型配置和工具。手机无需安装 App，也无需注册项目方账号。
 
-手机首页可在 **Codex / Antigravity / Cowork** 间切换。三个入口共用同一台电脑和自部署中继，切回来会恢复上次打开的会话。Antigravity 读取 Windows 桌面已有对话，支持文字续聊、模型选择、停止任务和文件预览。Cowork 通过本地浏览器扩展查看 Claude 中的项目、会话及文字历史。[Cowork 安装](COWORK.md) · [Antigravity 接入与验收](docs/antigravity/IMPLEMENTATION.md)
+手机首页可在 **Codex / Antigravity / Claude Code** 间切换。三个入口共用同一台电脑和自部署中继，切回来会恢复上次打开的会话。Antigravity 读取 Windows 桌面已有对话，支持文字续聊、模型选择、停止任务和文件预览。Claude Code 在电脑上运行会话，支持新建、续聊、停止和审批；项目就是文件夹，项目说明、MCP 和记忆用的是 Claude Code 自己的 `CLAUDE.md`、`.mcp.json` 和记忆目录，终端和桌面 App 里打开同一个文件夹也会用到。[Claude Code 接入记录](docs/claude-local/DESIGN.md) · [Antigravity 接入与验收](docs/antigravity/IMPLEMENTATION.md)
 
 ## 可以做什么
 

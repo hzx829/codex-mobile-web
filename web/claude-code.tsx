@@ -7,12 +7,11 @@ import {useStableEvent} from './use-event';
 import {operationId} from './client';
 import {clipboardImageFiles,readImageFiles,appendImages,pastedImage} from './attachments';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
-import {isClaudeProject} from './claude-projects';
 import type {Json,RequestAction,TurnView} from '../src/shared/types';
 
 type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;
-  /** Where a new session starts: a project id, a folder path or '' to choose; null while a saved session is open. */
+  /** Where a new session starts: a project folder or '' to choose; null while a saved session is open. */
   newCwd:string|null;created:(id:string)=>void;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;
   openFile:(path:string)=>void;openPreview:(url:string)=>void;showFiles:()=>void;showImage:(url:string,title:string)=>void;
@@ -21,7 +20,7 @@ type Props={
 type Request={id:string;kind:'permission'|'question'|'plan';tool:string;title:string;detail:string;canRemember:boolean;questions?:{question:string;header:string;multiSelect:boolean;options:{label:string;description:string}[]}[]};
 const noop=()=>{};
 const notEditable=()=>Promise.reject(new Error('Claude Code 会话暂不支持改写旧消息'));
-type Place={id:string;path:string;name?:string;kind?:string};
+type Place={id:string;path:string};
 const OTHER='__other';
 const MODES:[string,string][]=[['','默认审批'],['default','按规则审批'],['acceptEdits','自动接受编辑'],['plan','只做计划'],['bypassPermissions','全部允许（慎用）']];
 function load(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
@@ -105,8 +104,8 @@ export function ClaudeCodePanel(props:Props){
   useEffect(()=>{if(connected&&pending)void check();},[connected]);
 
   const running=Boolean(view?.running),external=Boolean(view?.external&&!view?.controlled);
-  // A folder from the list (or an unlisted one passed in) starts there; a project starts in its first folder.
-  const chosen=places.find(place=>place.id===target)||(target&&target!==OTHER&&!isClaudeProject(target)?{id:target,path:target}:undefined);
+  // A project from the list, or an unlisted folder passed in.
+  const chosen=places.find(place=>place.id===target)||(target&&target!==OTHER?{id:target,path:target}:undefined);
   const startPath=target===OTHER?cwd.trim():chosen?.path||'';
   const selectedMode=mode==='bypassPermissions'&&view?.controlled?'':mode;
   async function send(steer=false){
@@ -114,9 +113,9 @@ export function ClaudeCodePanel(props:Props){
     if(!text&&!images.length)return;
     const settings={...(model?{model}:{}),...(selectedMode?{permissionMode:selectedMode}:{})};
     if(creating){
-      if(!startPath){setError('请选择项目或文件夹');return;}
+      if(!startPath){setError('请选择项目');return;}
       stick.current=true;
-      await mutate('claude.create',{...(isClaudeProject(target)?{projectId:target}:{cwd:startPath}),text,images,...settings},result=>{edit('');setImages([]);props.created(result.conversationId);});
+      await mutate('claude.create',{cwd:startPath,text,images,...settings},result=>{edit('');setImages([]);props.created(result.conversationId);});
       return;
     }
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
@@ -153,7 +152,7 @@ export function ClaudeCodePanel(props:Props){
   const status=!connected?connectionLost:watchError||(pending&&busy?'正在等待电脑确认…':'');
   const canWrite=connected&&!busy&&!pending&&(creating||Boolean(view));
   const title=creating?'新的 Claude Code 会话':view?.title||'正在打开…';
-  const project=creating?(chosen?.name||(startPath?workspaceName(startPath):'选择项目')):view?.project?.name||(view?.cwd?workspaceName(view.cwd):'Claude Code');
+  const project=creating?(startPath?workspaceName(startPath):'选择项目'):view?.cwd?workspaceName(view.cwd):'Claude Code';
   const modelLabel=(models||[]).find(item=>item.id===model)?.label||model;
   return <main className="thread-panel" inert={inert}>
     <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}>
@@ -162,12 +161,11 @@ export function ClaudeCodePanel(props:Props){
     {view?.notice&&<div className="banner">{view.notice}</div>}
     <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={()=>{const el=scroll.current!;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;}}><div className="timeline-content">
       {creating?<div className="new-chat-welcome"><h1>交给 Claude Code</h1>
-        <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目或文件夹" value={target} onChange={e=>setTarget(e.target.value)}>
+        <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} onChange={e=>setTarget(e.target.value)}>
           {!target&&<option value="">正在读取项目…</option>}
-          {places.some(place=>place.kind==='project')&&<optgroup label="项目">{places.filter(place=>place.kind==='project').map(place=><option key={place.id} value={place.id}>{place.name||workspaceName(place.path)}</option>)}</optgroup>}
-          <optgroup label="文件夹">{places.filter(place=>place.kind!=='project').map(place=><option key={place.id} value={place.id}>{workspaceName(place.path)}</option>)}
-            {chosen&&!places.includes(chosen as Place)&&<option value={chosen.id}>{workspaceName(chosen.path)}</option>}
-            <option value={OTHER}>其他文件夹…</option></optgroup>
+          {places.map(place=><option key={place.id} value={place.id}>{workspaceName(place.path)}</option>)}
+          {chosen&&!places.includes(chosen as Place)&&<option value={chosen.id}>{workspaceName(chosen.path)}</option>}
+          <option value={OTHER}>其他文件夹…</option>
         </select></label>
         {target===OTHER&&<label className="claude-project"><input autoFocus aria-label="文件夹路径" placeholder="电脑上的完整路径" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>}
         {startPath&&<p className="muted">{startPath}</p>}</div>:<>

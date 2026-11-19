@@ -3,9 +3,8 @@ import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
 import {AntigravityPanel} from './antigravity';
 import {AntigravitySidebar} from './antigravity-sidebar';
-import {CoworkOpenAction,CoworkPanel} from './cowork';
 import {ClaudeCodePanel} from './claude-code';
-import {ClaudeProjectEditor,isClaudeProject} from './claude-projects';
+import {ClaudeProjectEditor} from './claude-projects';
 import {ChatSearch,HomeHeader,SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,withConversation,type Service} from './services';
@@ -63,7 +62,7 @@ function App(){
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const [remoteListRevision,refreshRemoteList]=useState(0);
-  const [claudeNewCwd,setClaudeNewCwd]=useState<string|null>(null),[claudeEditing,setClaudeEditing]=useState('');
+  const [claudeNewCwd,setClaudeNewCwd]=useState<string|null>(null);
   const service=serviceOf(route),codexActive=service==='codex';
   useEffect(()=>setClaudeNewCwd(null),[machine,service]);
   const lastCodex=useRef({machine,route:home});
@@ -539,15 +538,15 @@ function App(){
      </PreviewPane>;
   const computerOptions=<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{m.name}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>;
   const fileOptions=<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>;
-  if(service==='antigravity'||service==='claude'||service==='cowork'){
+  if(service==='antigravity'||service==='claude'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
     const open=(next:string)=>{setClaudeNewCwd(null);if(next!==id){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
     const creatingClaude=service==='claude'&&!id&&claudeNewCwd!==null;
     return <div className={`shell ${id||creatingClaude?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
-        listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='cowork'?<CoworkOpenAction project={route.project}/>:service==='claude'&&(!route.project||isClaudeProject(route.project))?
-          <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>{setClaudeEditing(route.project);setSheet('claude-project');}}>{route.project?'编辑项目':'新建项目'}</button></div>:undefined}
+        listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='claude'&&route.project?
+          <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
         onNew={service==='claude'?project=>setClaudeNewCwd(project):undefined}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
@@ -555,7 +554,6 @@ function App(){
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
-        id&&service==='cowork'?<CoworkPanel key={JSON.stringify([machine,id])} id={id} inert={inert} machineName={machineName} connected={connected} back={()=>open('')} call={call}/>:
         id?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
@@ -567,9 +565,8 @@ function App(){
       </SheetPanel>}
       {sheet==='computer'&&<SheetPanel title="电脑" close={()=>setSheet(null)}>{computerOptions}</SheetPanel>}
       {sheet==='file'&&<SheetPanel title="查看项目文件" close={()=>setSheet(null)}>{fileOptions}</SheetPanel>}
-      {sheet==='claude-project'&&<SheetPanel title={claudeEditing?'编辑项目':'新建项目'} close={()=>setSheet(null)}>
-        <ClaudeProjectEditor projectId={claudeEditing} connected={connected} call={call}
-          done={next=>{setSheet(null);refreshRemoteList(value=>value+1);navigate(serviceHome('claude',next));}}/></SheetPanel>}
+      {sheet==='claude-project'&&route.project&&<SheetPanel title="项目设置" close={()=>setSheet(null)}>
+        <ClaudeProjectEditor key={route.project} folder={route.project} connected={connected} call={call} done={()=>setSheet(null)}/></SheetPanel>}
       {previewPane}
     </div>;
   }

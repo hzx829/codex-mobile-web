@@ -146,8 +146,6 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .conversation-skeleton > div:first-child { width: 62%; height: 44px; margin-left: auto; border-radius: 20px; }
 .turn { margin-bottom: 26px; }
 .message { font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; margin: 0 0 14px; color: var(--fg); }
-.cowork-message { white-space: pre-wrap; }
-.cowork-open { display: inline-block; margin-bottom: 12px; padding: 6px 2px; font-size: 13px; }
 .message.conversation-status { font-size: 13px; color: var(--fg-3); }
 .message.user { margin-left: auto; width: fit-content; max-width: 80%; background: var(--bubble); border-radius: 20px; padding: 9px 16px; }
 .user-entry { margin-bottom: 18px; }
@@ -492,10 +490,11 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .claude-project-form details summary{cursor:pointer;margin-bottom:8px}
 .claude-project-form details textarea{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}
 .claude-project-form .muted{margin:-10px 0 18px;font-size:12px}
-.claude-project-form .danger-link{display:block;width:100%;margin-top:10px;padding:10px;color:var(--danger);font-size:14px}
 .claude-project-actions{display:flex;gap:14px;margin-bottom:12px}
 .claude-project-actions button{padding:6px 2px;font-size:13px;color:var(--fg-2)}
 .claude-project-actions button:hover{color:var(--fg)}
 .claude-project select{flex:1;min-width:0;border:0;background:transparent;font-size:15px;padding:0;outline:none;box-shadow:none}
 .claude-project + .claude-project{margin-top:8px}
 .new-chat-welcome > .muted{max-width:420px;margin:8px auto 0;overflow-wrap:anywhere;font-size:12px}
+.claude-project-form .claude-project-path{margin:0 0 16px;word-break:break-all}
+.claude-memory{max-height:240px;overflow:auto;margin:0 0 12px;padding:10px 12px;border-radius:12px;background:var(--panel);font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-word}

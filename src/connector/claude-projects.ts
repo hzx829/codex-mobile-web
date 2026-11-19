@@ -1,37 +1,56 @@
-import {randomBytes} from 'node:crypto';
-import {readFile, rename, writeFile} from 'node:fs/promises';
-import {isAbsolute, join, win32} from 'node:path';
+import {createHash} from 'node:crypto';
+import {mkdir, readdir, readFile, rename, stat, writeFile} from 'node:fs/promises';
+import {dirname, join} from 'node:path';
 import {BridgeError, type Json} from '../shared/types.js';
 
-/** A Cowork-style project: folders, standing instructions, memory and MCP servers for Claude Code sessions. */
-export type ClaudeProject = {
-  id: string; name: string; folders: string[]; instructions: string; memoryDir: string;
-  mcpServers: Record<string, Json>; sessionIds: string[]; coworkSpaceId?: string;
+/**
+ * A Claude Code project is a folder. Its settings are Claude Code's own files, so the terminal,
+ * the desktop app and phone sessions all see the same thing:
+ * - instructions: CLAUDE.md (or .claude/CLAUDE.md) in the folder
+ * - MCP servers: .mcp.json in the folder, approved in .claude/settings.local.json
+ * - memory: Claude Code's auto memory, ~/.claude/projects/<folder key>/memory/MEMORY.md (read only here)
+ */
+export type ProjectSettings = {
+  folder: string; claudeMd: string; instructions: string | null; mcpFile: string; mcpServers: string;
+  memoryDir: string; memoryIndex: string; memoryFiles: string[]; revision: string;
 };
-/** What a session started in a project gets from it. */
-export type ProjectLaunch = {cwd: string; additionalDirectories: string[]; append: string; mcpServers: Record<string, Json>};
 
-export const PROJECT_ID = /^p_[0-9a-f]{16}$/;
-const MAX_PROJECTS = 200, MAX_FOLDERS = 16, MAX_SESSIONS = 5000;
-const MAX_INSTRUCTIONS = 20_000, MAX_MEMORY_INDEX = 20_000, MAX_MCP_JSON = 32_000;
+const MAX_INSTRUCTIONS = 200_000, MAX_MCP_JSON = 64_000, MAX_MEMORY_INDEX = 20_000, MAX_MEMORY_FILES = 200;
 
-const absolute = (path: string) => isAbsolute(path) || win32.isAbsolute(path);
-function text(value: unknown, label: string, max: number, required = false) {
-  if (value === undefined || value === null) value = '';
-  if (typeof value !== 'string' || value.includes('\0')) throw new BridgeError('invalid', `${label}无效`);
-  const trimmed = value.trim();
-  if (required && !trimmed) throw new BridgeError('invalid', `请填写${label}`);
-  if (trimmed.length > max) throw new BridgeError('invalid', `${label}过长`);
-  return trimmed;
+/** The folder key Claude Code uses under ~/.claude/projects; long paths are shortened there, so only short ones are guessed. */
+export function projectKey(folder: string) {
+  const key = folder.replace(/[^a-zA-Z0-9]/g, '-');
+  return key.length <= 200 ? key : '';
 }
-function folder(value: unknown, label: string) {
-  const path = text(value, label, 4096, true);
-  if (!absolute(path) || /^[\\/]{2}/.test(path)) throw new BridgeError('invalid', `${label}需要是本机的完整路径`);
-  return path;
+
+const missing = (error: unknown) => ['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException)?.code || '');
+async function optional(path: string) {
+  try {return await readFile(path, 'utf8');} catch (error) {if (missing(error)) return null;throw readError(error);}
 }
-function mcpServers(value: unknown): Record<string, Json> {
-  if (value === undefined || value === null || value === '') return {};
+function readError(error: unknown) {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === 'EACCES' || code === 'EPERM' ? new BridgeError('forbidden', '连接器没有权限读取这个项目的设置文件') : error;
+}
+async function exists(path: string) {return stat(path).then(info => info.isFile(), () => false);}
+async function atomicWrite(path: string, content: string) {
+  await mkdir(dirname(path), {recursive: true});
+  const temp = `${path}.${process.pid}.tmp`;
+  await writeFile(temp, content, 'utf8');
+  await rename(temp, path);
+}
+const hash = (...parts: (string | null)[]) => createHash('sha256').update(parts.map(part => part ?? '\0missing').join('\0\0')).digest('hex').slice(0, 32);
+
+/** CLAUDE.md in the folder, or .claude/CLAUDE.md when only that one exists. */
+async function claudeMdPath(folder: string) {
+  const root = join(folder, 'CLAUDE.md'), nested = join(folder, '.claude', 'CLAUDE.md');
+  return !(await exists(root)) && await exists(nested) ? nested : root;
+}
+
+/** Checks the phone's MCP text: an object keyed by server name, each with a command or url. */
+export function mcpServersInput(value: unknown): Record<string, Json> {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) return {};
   if (typeof value === 'string') {
+    if (value.length > MAX_MCP_JSON) throw new BridgeError('invalid', 'MCP 配置过长');
     try {value = JSON.parse(value);} catch {throw new BridgeError('invalid', 'MCP 配置不是有效的 JSON');}
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BridgeError('invalid', 'MCP 配置需要是以服务器名为键的对象');
@@ -45,126 +64,78 @@ function mcpServers(value: unknown): Record<string, Json> {
   return value as Record<string, Json>;
 }
 
-/** Checks phone input for a project; ids and session lists are kept by the store, not the phone. */
-export function projectInput(p: Json) {
-  const folders = Array.isArray(p.folders) ? p.folders : typeof p.folders === 'string' ? p.folders.split(/\r?\n/) : [];
-  const list = [...new Set(folders.filter((item: unknown) => typeof item !== 'string' || item.trim()).map((item: unknown, i: number) => folder(item, `文件夹 ${i + 1}`)))];
-  if (!list.length) throw new BridgeError('invalid', '项目至少需要一个文件夹');
-  if (list.length > MAX_FOLDERS) throw new BridgeError('invalid', `项目最多 ${MAX_FOLDERS} 个文件夹`);
-  const memoryDir = text(p.memoryDir, '记忆目录', 4096);
-  if (memoryDir) folder(memoryDir, '记忆目录');
+function parseJson(text: string | null, label: string): Json {
+  if (text === null || !text.trim()) return {};
+  try {
+    const value = JSON.parse(text);
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  } catch {}
+  throw new BridgeError('invalid', `${label} 不是有效的 JSON，请在电脑上修正后再改`);
+}
+
+/** Reads a folder's Claude Code settings. `memoryRoot` is the folder's directory under ~/.claude/projects, if known. */
+export async function readProjectSettings(folder: string, memoryRoot: string): Promise<ProjectSettings> {
+  const claudeMd = await claudeMdPath(folder), mcpFile = join(folder, '.mcp.json');
+  const [instructions, mcp] = await Promise.all([optional(claudeMd), optional(mcpFile)]);
+  let mcpServers = '';
+  if (mcp !== null && mcp.trim()) {
+    try {
+      const servers = JSON.parse(mcp)?.mcpServers;
+      mcpServers = servers && typeof servers === 'object' && Object.keys(servers).length ? JSON.stringify(servers, null, 2) : '';
+    } catch {mcpServers = mcp;} // Shown as is, so the phone can see and fix it.
+  }
+  const memoryDir = memoryRoot ? join(memoryRoot, 'memory') : '';
+  let memoryIndex = '', memoryFiles: string[] = [];
+  if (memoryDir) {
+    memoryIndex = (await optional(join(memoryDir, 'MEMORY.md')).catch(() => null)) || '';
+    if (memoryIndex.length > MAX_MEMORY_INDEX) memoryIndex = memoryIndex.slice(0, MAX_MEMORY_INDEX) + '\n…';
+    memoryFiles = (await readdir(memoryDir).catch(() => [] as string[])).filter(name => name.endsWith('.md') && name !== 'MEMORY.md').sort().slice(0, MAX_MEMORY_FILES);
+  }
   return {
-    name: text(p.name, '项目名称', 200, true), folders: list, instructions: text(p.instructions, '项目说明', MAX_INSTRUCTIONS),
-    memoryDir, mcpServers: mcpServers(p.mcpServers),
+    folder, claudeMd, instructions: instructions !== null && instructions.length > MAX_INSTRUCTIONS ? null : instructions || '',
+    mcpFile, mcpServers, memoryDir, memoryIndex, memoryFiles, revision: hash(instructions, mcp),
   };
 }
 
-/** Normalizes one stored project, dropping it when it is unusable rather than failing the whole file. */
-function stored(value: unknown): ClaudeProject | null {
-  if (!value || typeof value !== 'object') return null;
-  const v = value as Json;
-  if (typeof v.id !== 'string' || !PROJECT_ID.test(v.id)) return null;
-  try {
-    const input = projectInput(v);
-    const sessionIds = Array.isArray(v.sessionIds) ? [...new Set(v.sessionIds.filter((id: unknown): id is string => typeof id === 'string' && id.length <= 64))].slice(-MAX_SESSIONS) : [];
-    return {id: v.id, ...input, sessionIds, ...(typeof v.coworkSpaceId === 'string' && v.coworkSpaceId ? {coworkSpaceId: v.coworkSpaceId} : {})};
-  } catch {return null;}
-}
-
 /**
- * Projects live in the connector's data directory as claude-projects.json.
- * Writes go through a temporary file so a crash never leaves half a file.
+ * Writes CLAUDE.md and .mcp.json when they differ, refusing if either changed on the computer since `revision`.
+ * `instructions: null` leaves CLAUDE.md alone (it is too long to edit on a phone); `mcpServers: null` leaves .mcp.json alone.
+ * New .mcp.json servers are approved in .claude/settings.local.json, as approving them in the terminal would.
  */
-export class ProjectStore {
-  private cache?: ClaudeProject[];
-  private queue: Promise<unknown> = Promise.resolve();
-  constructor(readonly file: string) {}
-
-  async list(): Promise<ClaudeProject[]> {
-    if (this.cache) return this.cache;
-    let raw: Json = {};
-    try {raw = JSON.parse(await readFile(this.file, 'utf8'));} catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw new BridgeError('unavailable', '项目文件 claude-projects.json 无法读取，请在电脑检查');
+export async function saveProjectSettings(folder: string, input: {instructions: string | null; mcpServers: Record<string, Json> | null; revision: string}) {
+  const claudeMd = await claudeMdPath(folder), mcpFile = join(folder, '.mcp.json');
+  const [instructions, mcp] = await Promise.all([optional(claudeMd), optional(mcpFile)]);
+  if (hash(instructions, mcp) !== input.revision) throw new BridgeError('changed', '项目设置在电脑上被改过，请重新打开后再改');
+  if (input.instructions !== null) {
+    // Keep the file's line endings so an untouched CLAUDE.md is not rewritten.
+    const eol = instructions?.includes('\r\n') ? '\r\n' : '\n';
+    const text = input.instructions.replace(/\n/g, eol);
+    if (text !== (instructions ?? '') && (instructions !== null || text.trim())) await atomicWrite(claudeMd, text && !text.endsWith(eol) ? text + eol : text);
+  }
+  if (!input.mcpServers) return {saved: true};
+  let current: Json = {};
+  try {current = parseJson(mcp, '.mcp.json');} catch {current = {};} // An unreadable file was shown to the phone as text and is replaced.
+  const before = current.mcpServers && typeof current.mcpServers === 'object' ? current.mcpServers : {};
+  if (JSON.stringify(before) !== JSON.stringify(input.mcpServers) && (mcp !== null || Object.keys(input.mcpServers).length)) {
+    await atomicWrite(mcpFile, JSON.stringify({...current, mcpServers: input.mcpServers}, null, 2) + '\n');
+    const added = Object.keys(input.mcpServers).filter(name => !(name in before));
+    if (added.length) {
+      const localFile = join(folder, '.claude', 'settings.local.json');
+      const local = parseJson(await optional(localFile), '.claude/settings.local.json');
+      const enabled: string[] = Array.isArray(local.enabledMcpjsonServers) ? local.enabledMcpjsonServers.filter((name: unknown) => typeof name === 'string') : [];
+      const disabled = new Set(Array.isArray(local.disabledMcpjsonServers) ? local.disabledMcpjsonServers : []);
+      const next = [...new Set([...enabled, ...added.filter(name => !disabled.has(name))])];
+      if (next.length !== enabled.length) await atomicWrite(localFile, JSON.stringify({...local, enabledMcpjsonServers: next}, null, 2) + '\n');
     }
-    const seen = new Set<string>();
-    this.cache = (Array.isArray(raw.projects) ? raw.projects : []).map(stored)
-      .filter((p: ClaudeProject | null): p is ClaudeProject => Boolean(p) && !seen.has(p!.id) && Boolean(seen.add(p!.id)));
-    return this.cache!;
   }
-  async get(id: string) {
-    const project = (await this.list()).find(p => p.id === id);
-    if (!project) throw new BridgeError('missing', '项目不存在或已删除');
-    return project;
-  }
-  async ofSession(sessionId: string) {return (await this.list()).find(p => p.sessionIds.includes(sessionId));}
-
-  /** Serializes read-modify-write so concurrent requests never lose each other's changes. */
-  private change<T>(edit: (projects: ClaudeProject[]) => T | Promise<T>): Promise<T> {
-    const run = this.queue.then(async () => {
-      const projects = [...await this.list()].map(p => ({...p, sessionIds: [...p.sessionIds]}));
-      const result = await edit(projects);
-      const temp = `${this.file}.${process.pid}.tmp`;
-      await writeFile(temp, JSON.stringify({projects}, null, 2) + '\n', 'utf8');
-      await rename(temp, this.file);
-      this.cache = projects;
-      return result;
-    });
-    this.queue = run.catch(() => {});
-    return run;
-  }
-
-  create(input: ReturnType<typeof projectInput> & {coworkSpaceId?: string}) {
-    return this.change(projects => {
-      if (projects.length >= MAX_PROJECTS) throw new BridgeError('invalid', `最多 ${MAX_PROJECTS} 个项目`);
-      const project: ClaudeProject = {id: 'p_' + randomBytes(8).toString('hex'), ...input, sessionIds: []};
-      projects.push(project);
-      return project;
-    });
-  }
-  update(id: string, input: ReturnType<typeof projectInput>) {
-    return this.change(projects => {
-      const project = projects.find(p => p.id === id);
-      if (!project) throw new BridgeError('missing', '项目不存在或已删除');
-      Object.assign(project, input);
-      return project;
-    });
-  }
-  remove(id: string) {
-    return this.change(projects => {
-      const index = projects.findIndex(p => p.id === id);
-      if (index < 0) throw new BridgeError('missing', '项目不存在或已删除');
-      projects.splice(index, 1);
-      return true;
-    });
-  }
-  /** Registers a session with exactly one project. */
-  addSession(id: string, sessionId: string) {
-    return this.change(projects => {
-      for (const p of projects) p.sessionIds = p.sessionIds.filter(s => s !== sessionId);
-      const project = projects.find(p => p.id === id);
-      if (!project) throw new BridgeError('missing', '项目不存在或已删除');
-      project.sessionIds = [...project.sessionIds, sessionId].slice(-MAX_SESSIONS);
-      return project;
-    });
-  }
+  return {saved: true};
 }
 
-/** Reads the memory index (MEMORY.md) so new sessions know which memories exist. */
-export async function memoryIndex(dir: string) {
-  if (!dir) return '';
-  const content = await readFile(join(dir, 'MEMORY.md'), 'utf8').catch(() => '');
-  return content.length > MAX_MEMORY_INDEX ? content.slice(0, MAX_MEMORY_INDEX) + '\n…' : content;
-}
-
-/** Builds the session options a project contributes: folders, appended prompt and MCP servers. */
-export async function projectLaunch(project: ClaudeProject, readMemory = memoryIndex): Promise<ProjectLaunch> {
-  const parts = [`# 项目：${project.name}`];
-  if (project.folders.length > 1) parts.push(`项目文件夹：\n${project.folders.map(f => `- ${f}`).join('\n')}`);
-  if (project.instructions) parts.push(`## 项目说明\n${project.instructions}`);
-  if (project.memoryDir) {
-    const index = (await readMemory(project.memoryDir)).trim();
-    parts.push(`## 项目记忆\n记忆目录：${project.memoryDir}。需要时读取其中的文件；有值得长期记住的内容时写入该目录，并更新 MEMORY.md 索引。` +
-      (index ? `\n\n当前索引（MEMORY.md）：\n${index}` : ''));
-  }
-  return {cwd: project.folders[0], additionalDirectories: project.folders.slice(1), append: parts.join('\n\n'), mcpServers: project.mcpServers};
+/** Instructions from the phone: plain text, '' clears, null keeps the file as it is. */
+export function instructionsInput(value: unknown): string | null {
+  if (value === null) return null;
+  if (value === undefined) return '';
+  if (typeof value !== 'string' || value.includes('\0')) throw new BridgeError('invalid', '项目说明无效');
+  if (value.length > MAX_INSTRUCTIONS) throw new BridgeError('invalid', '项目说明过长，请在电脑上编辑');
+  return value.replace(/\r\n/g, '\n');
 }

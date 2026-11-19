@@ -9,12 +9,10 @@ import { MAX_FRAME, BridgeError, type Json } from '../shared/types.js';
 import { Ledger } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
-import { CoworkBridge } from './cowork.js';
 import { AntigravityBridge } from './antigravity.js';
 import { ServiceRouter } from './services.js';
 import { ClaudeCodeBridge, sdkQuery } from './claude-code.js';
 import { ClaudeRuntime } from './claude-runtime.js';
-import { ProjectStore } from './claude-projects.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -28,12 +26,10 @@ const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
 // claudeEntrypoint: optional CLAUDE_CODE_ENTRYPOINT for Claude Code; unset keeps the SDK's 'sdk-ts'. See docs/claude-local/M1-RESULTS.md.
-const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:false),new ProjectStore(join(config.dataDir,'claude-projects.json')));
-const cowork=new CoworkBridge(config.dataDir,config.coworkPort||config.chatgptPort||3342);
+const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:false));
 const services=new ServiceRouter([
-  {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save','claude.project.delete'],
+  {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save'],
     prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
-  {prefix:'cowork',handle:(action,payload)=>cowork.handle(action,payload),prepareReload:()=>cowork.prepareReload(),close:()=>cowork.close()},
   {prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']},
 ],request=>control.handle(request as any),()=>control.updating);
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;

@@ -24,18 +24,18 @@ test('app switches restore each machine and app independently, and retired apps 
   }});
   try {
     const id = randomUUID(), codex = {...home, thread:'native-thread', project:'D:/work'};
-    const ag = {...home, project:'file:///D:/work', antigravity:id}, cowork = {...home, cowork:'/cowork/cse_'+id};
+    const ag = {...home, project:'file:///D:/work', antigravity:id}, other = {...home, project:'D:/work', claude:id};
     assert.deepEqual(switchRoute('pc', codex, 'antigravity'), {...home, antigravity:''});
-    assert.deepEqual(switchRoute('pc', ag, 'cowork'), {...home, cowork:''});
-    assert.deepEqual(switchRoute('pc', cowork, 'antigravity'), ag);
+    assert.deepEqual(switchRoute('pc', ag, 'claude'), {...home, claude:''});
+    assert.deepEqual(switchRoute('pc', other, 'antigravity'), ag);
     assert.deepEqual(switchRoute('pc', ag, 'codex'), codex);
     assert.deepEqual(switchRoute('other', home, 'antigravity'), {...home, antigravity:''});
-    for (const route of [ag, cowork, codex]) assert.deepEqual(parseLocation({cmwRoute:route,cmwMachine:'pc'})?.route,route);
-    assert.equal(serviceOf(cowork),'cowork');
+    for (const route of [ag, other, codex]) assert.deepEqual(parseLocation({cmwRoute:route,cmwMachine:'pc'})?.route,route);
+    assert.equal(serviceOf(other),'claude');
     assert.deepEqual(parseLocation({cmwRoute:{...home,chat:id},cmwMachine:'pc'}),{route:home,machine:'pc'});
     const claude = {...home, claude:id, project:'D:/work'};
     assert.deepEqual(parseLocation({cmwRoute:claude,cmwMachine:'pc'}),{route:claude,machine:'pc'}, 'Claude Code is back and keeps its project');
-    assert.equal(parseLocation({cmwRoute:{...cowork,antigravity:id},cmwMachine:'pc'}),null);
+    assert.equal(parseLocation({cmwRoute:{...other,antigravity:id},cmwMachine:'pc'}),null);
     assert.equal(parseLocation({cmwRoute:{...home,antigravity:'../bad'},cmwMachine:'pc'}),null);
   } finally {
     if (original) Object.defineProperty(globalThis,'sessionStorage',original);

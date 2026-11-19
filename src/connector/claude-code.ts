@@ -1,7 +1,7 @@
 import {readdir, stat} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {homedir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {BridgeError, MAX_FRAME, textRequired, type Json} from '../shared/types.js';
 import {downloadProjectFile, projectDirectory, readProjectFile} from './project.js';
@@ -9,7 +9,7 @@ import {validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
 import {ClaudeRuntime, PERMISSION_MODES, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
 import {claudeTurns, type ClaudeMessage} from './claude-transcript.js';
-import {PROJECT_ID, projectInput, projectLaunch, type ProjectStore} from './claude-projects.js';
+import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
 
 const sessionId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const PAGE = 50;
@@ -61,7 +61,7 @@ export class ClaudeCodeBridge {
   private sending = new Set<string>();
   readonly runtime: ClaudeRuntime;
   constructor(private ledger?: Ledger, private root = claudeConfigDir(), private sessions: () => Promise<ClaudeSessions> = sdkSessions,
-    private now = Date.now, runtime?: ClaudeRuntime, private projects?: ProjectStore) {
+    private now = Date.now, runtime?: ClaudeRuntime) {
     this.runtime = runtime || new ClaudeRuntime(sdkQuery);
     this.runtime.on('change', () => {this.catalog = undefined;});
   }
@@ -135,9 +135,8 @@ export class ClaudeCodeBridge {
       recent.push(turn);
     }
     if (turns.length && !recent.length) throw new BridgeError('too_large', 'Claude Code 最新一轮过长，请在电脑上查看');
-    const project = await this.projects?.ofSession(id).catch(() => undefined);
     return {
-      id, title: info ? title(info) : '新会话', project: project ? {id: project.id, name: project.name} : null, cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', revision: current.revision, running,
+      id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', revision: current.revision, running,
       controlled: Boolean(live), external, permissionMode: live?.permissionMode || '', requests: live?.pending || [], error: live?.error || '',
       queued: Boolean(live && live.inbox.size),
       turns: recent.reverse(), truncated: recent.length < turns.length,
@@ -145,14 +144,14 @@ export class ClaudeCodeBridge {
     };
   }
 
-  private store() {
-    if (!this.projects) throw new BridgeError('unavailable', '这个连接器没有启用项目');
-    return this.projects;
-  }
-  /** Project options for a session: the project it belongs to, if any. */
-  private async launchFor(sessionIdValue: string) {
-    const project = await this.projects?.ofSession(sessionIdValue);
-    return project ? projectLaunch(project) : undefined;
+  /** The folder's directory under ~/.claude/projects (its memory lives there): where its sessions are, or Claude Code's key for it. */
+  private async projectRoot(folder: string, requested: string) {
+    const same = (a = '', b = '') => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+    const match = (await this.all().catch(() => [] as SessionInfo[])).find(info => same(info.cwd, requested) || same(info.cwd, folder));
+    const path = match ? await this.transcript(match.sessionId).catch(() => '') : '';
+    if (path) return dirname(path);
+    const key = projectKey(folder);
+    return key ? join(this.root, 'projects', key) : '';
   }
 
   private mutate(p: Json, payload: Json, run: () => Promise<Json>) {
@@ -163,23 +162,14 @@ export class ClaudeCodeBridge {
   async handle(action: string, p: Json): Promise<Json> {
     if (action === 'claude.list') {
       const offset = Number.isSafeInteger(p.offset) && p.offset >= 0 ? p.offset : 0;
+      // Projects are folders, as in Claude Code itself: sessions are grouped by their working directory.
       const project = p.project ? textRequired(p.project, '项目', 4096) : '';
       const search = p.search ? textRequired(p.search, '搜索内容', 200).toLowerCase() : '';
       const all = await this.all(p.refresh === true && !offset);
-      const configured = this.projects ? await this.projects.list() : [];
-      const assigned = new Set(configured.flatMap(item => item.sessionIds));
-      // A configured project lists its registered sessions; other sessions are grouped by folder.
-      const chosen = PROJECT_ID.test(project) ? configured.find(item => item.id === project) : undefined;
-      if (PROJECT_ID.test(project) && !chosen) throw new BridgeError('missing', '项目不存在或已删除');
-      const members = chosen ? new Set(chosen.sessionIds) : undefined;
-      const matches = all.filter(info => (!project || (members ? members.has(info.sessionId) : info.cwd === project && !assigned.has(info.sessionId)))
-        && (!search || title(info).toLowerCase().includes(search)));
+      const matches = all.filter(info => (!project || info.cwd === project) && (!search || title(info).toLowerCase().includes(search)));
       const page = matches.slice(offset, offset + PAGE);
-      const folders = [...new Set(all.filter(info => !assigned.has(info.sessionId)).map(info => info.cwd).filter((cwd): cwd is string => Boolean(cwd)))];
-      const projects = !offset && !search ? [
-        ...configured.map(item => ({id: item.id, path: item.folders[0], name: item.name, kind: 'project'})),
-        ...folders.map(path => ({id: path, path, kind: 'folder'})),
-      ] : undefined;
+      const projects = !offset && !search
+        ? [...new Set(all.map(info => info.cwd).filter((cwd): cwd is string => Boolean(cwd)))].map(path => ({id: path, path})) : undefined;
       const now = this.now();
       return {data: page.map(info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,
         running: this.runtime.get(info.sessionId)?.running ?? now - info.lastModified < ACTIVE_MS})), hasMore: matches.length > offset + PAGE, projects};
@@ -190,33 +180,24 @@ export class ClaudeCodeBridge {
     }
     if (action === 'claude.models') return {models: await this.runtime.supportedModels(p.cwd ? await projectDirectory(textRequired(p.cwd, '目录', 4096)) : homedir())};
     if (action === 'claude.project.get') {
-      const project = await this.store().get(textRequired(p.projectId, '项目', 64));
-      return {project: {id: project.id, name: project.name, folders: project.folders, instructions: project.instructions,
-        memoryDir: project.memoryDir, mcpServers: project.mcpServers, sessions: project.sessionIds.length, coworkSpaceId: project.coworkSpaceId || ''}};
+      const requested = textRequired(p.folder, '项目文件夹', 4096), folder = await projectDirectory(requested);
+      return {project: await readProjectSettings(folder, await this.projectRoot(folder, requested))};
     }
     if (action === 'claude.project.save') {
-      const store = this.store(), input = projectInput(p);
-      const id = p.projectId ? textRequired(p.projectId, '项目', 64) : '';
-      if (id && !PROJECT_ID.test(id)) throw new BridgeError('invalid', '项目 ID 无效');
-      return this.mutate(p, {action, id, input}, async () => ({projectId: (id ? await store.update(id, input) : await store.create(input)).id}));
-    }
-    if (action === 'claude.project.delete') {
-      const store = this.store(), id = textRequired(p.projectId, '项目', 64);
-      // Deleting a project keeps its sessions; they fall back to their folder groups.
-      return this.mutate(p, {action, id}, async () => ({deleted: await store.remove(id)}));
+      const folder = await projectDirectory(textRequired(p.folder, '项目文件夹', 4096));
+      const instructions = instructionsInput(p.instructions), revision = textRequired(p.revision, '设置版本', 64);
+      const mcpServers = p.mcpServers === null || p.mcpServers === undefined ? null : mcpServersInput(p.mcpServers);
+      const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value) ?? '').digest('hex');
+      return this.mutate(p, {action, folder, revision, instructions: digest(instructions), mcpServers: digest(mcpServers)},
+        () => saveProjectSettings(folder, {instructions, mcpServers, revision}));
     }
     if (action === 'claude.create') {
-      const projectId = p.projectId ? textRequired(p.projectId, '项目', 64) : '';
-      const project = projectId ? await this.store().get(projectId) : undefined;
-      const launch = project ? await projectLaunch(project) : undefined;
-      const cwd = await projectDirectory(launch ? launch.cwd : textRequired(p.cwd, '项目目录', 4096));
+      const cwd = await projectDirectory(textRequired(p.cwd, '项目目录', 4096));
       const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode);
-      return this.mutate(p, {action, cwd, projectId, text: input.text, images: fingerprint(input.images), model, mode}, async () => {
-        const session = await this.runtime.start({cwd, model, permissionMode: mode, project: launch});
+      return this.mutate(p, {action, cwd, text: input.text, images: fingerprint(input.images), model, mode}, async () => {
+        const session = await this.runtime.start({cwd, model, permissionMode: mode});
         this.runtime.send(session, input.text, input.images);
-        const conversationId = await this.runtime.waitForId(session);
-        if (project) await this.store().addSession(project.id, conversationId);
-        return {conversationId};
+        return {conversationId: await this.runtime.waitForId(session)};
       });
     }
     const id = textRequired(p.conversationId, '会话', 36);
@@ -242,7 +223,7 @@ export class ClaudeCodeBridge {
             const directory = await projectDirectory(cwd);
             if ((await this.revision(id)).external && p.confirmIdle !== true)
               throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
-            session = await this.runtime.start({cwd: directory, resume: id, model, permissionMode: mode, project: await this.launchFor(id)});
+            session = await this.runtime.start({cwd: directory, resume: id, model, permissionMode: mode});
           } else await this.runtime.configure(session, model, mode);
           this.runtime.send(session, input.text, input.images, steer);
           return {submitted: true};

@@ -17,31 +17,31 @@ const id='12345678-1234-1234-1234-123456789abc';
 test('connector routes app actions by prefix and keeps Codex as the fallback', async () => {
   const seen:string[]=[];let updating=false,prepared=0;
   const router=new ServiceRouter([
-    {prefix:'cowork',handle:async action=>{seen.push(action);return {ok:action};},prepareReload:()=>{prepared++;}},
+    {prefix:'claude',handle:async action=>{seen.push(action);return {ok:action};},prepareReload:()=>{prepared++;}},
     {prefix:'antigravity',mutations:['antigravity.send'],handle:async (action,payload)=>{seen.push(`${action}:${JSON.stringify(payload)}`);return {};}},
   ],async request=>{seen.push(`codex:${request.action}`);return {};},()=>updating);
-  await router.handle({id:'1',action:'cowork.read',payload:{}});
+  await router.handle({id:'1',action:'claude.read',payload:{}});
   await router.handle({id:'2',action:'antigravity.list',payload:undefined as any});
   await router.handle({id:'3',action:'session.read',payload:{}});
   await router.handle({id:'4',action:'runtime.reload',payload:{}});
-  assert.deepEqual(seen,['cowork.read','antigravity.list:{}','codex:session.read','codex:runtime.reload']);
+  assert.deepEqual(seen,['claude.read','antigravity.list:{}','codex:session.read','codex:runtime.reload']);
   assert.equal(prepared,1);
   updating=true;
   await assert.rejects(router.handle({id:'5',action:'antigravity.send',payload:{}}),(error:BridgeError)=>error.code==='maintenance');
-  await router.handle({id:'6',action:'cowork.read',payload:{}});
+  await router.handle({id:'6',action:'claude.read',payload:{}});
   assert.throws(()=>new ServiceRouter([{prefix:'a',handle:async()=>({})},{prefix:'a',handle:async()=>({})}],async()=>({})));
 });
 
 test('phone app routes come from one registry', () => {
-  assert.deepEqual(SERVICE_IDS,['codex','antigravity','claude','cowork']);
+  assert.deepEqual(SERVICE_IDS,['codex','antigravity','claude']);
   // Changing computers keeps the current app instead of falling back to Codex.
-  assert.deepEqual(serviceHome('cowork'),{...home,cowork:''});
+  assert.deepEqual(serviceHome('claude'),{...home,claude:''});
   assert.deepEqual(serviceHome('antigravity','file:///c%3A/work'),{...home,project:'file:///c%3A/work',antigravity:''});
-  assert.deepEqual(serviceHome('cowork','/project/'+id),{...home,project:'/project/'+id,cowork:''});
+  assert.deepEqual(serviceHome('claude','D:/work'),{...home,project:'D:/work',claude:''});
   const ag=withConversation(serviceHome('antigravity'),id);
   assert.equal(serviceOf(ag),'antigravity');assert.equal(routeConversation(ag),id);
   assert.equal(previewOwner(ag,'codex-thread'),'antigravity:'+id);
-  assert.equal(previewOwner(serviceHome('cowork'),'codex-thread'),'');
+  assert.equal(previewOwner(serviceHome('claude'),'codex-thread'),'');
   assert.equal(previewOwner(home,'codex-thread'),'codex-thread');
   assert.deepEqual(fileOwner('antigravity:'+id),{service:'antigravity',id});
   assert.deepEqual(fileOwner('codex-thread'),{service:'codex',id:'codex-thread'});

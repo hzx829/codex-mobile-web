@@ -1,84 +1,98 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, readFile, writeFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, realpath, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {PROJECT_ID, ProjectStore, projectInput, projectLaunch, memoryIndex} from '../src/connector/claude-projects.js';
+import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from '../src/connector/claude-projects.js';
 import {ClaudeCodeBridge, type ClaudeSessions} from '../src/connector/claude-code.js';
 import {ClaudeRuntime, type QueryFn} from '../src/connector/claude-runtime.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 
 const opId = () => `${Date.now()}:${randomUUID()}`;
+const json = async (path: string) => JSON.parse(await readFile(path, 'utf8'));
 
-test('project input is validated and normalized', () => {
-  const input = projectInput({name: ' 网站 ', folders: 'C:\\work\\site\n\nD:\\shared\nC:\\work\\site', instructions: ' 用中文回答 ',
-    mcpServers: '{"files":{"command":"npx","args":["-y","files"]}}'});
-  assert.deepEqual(input, {name: '网站', folders: ['C:\\work\\site', 'D:\\shared'], instructions: '用中文回答', memoryDir: '',
-    mcpServers: {files: {command: 'npx', args: ['-y', 'files']}}});
-  assert.throws(() => projectInput({name: 'x', folders: []}), /至少需要一个文件夹/);
-  assert.throws(() => projectInput({name: 'x', folders: ['relative/dir']}), /完整路径/);
-  assert.throws(() => projectInput({name: 'x', folders: ['\\\\server\\share']}), /完整路径/);
-  assert.throws(() => projectInput({name: '', folders: ['C:\\a']}), /项目名称/);
-  assert.throws(() => projectInput({name: 'x', folders: ['C:\\a'], mcpServers: '{bad'}), /JSON/);
-  assert.throws(() => projectInput({name: 'x', folders: ['C:\\a'], mcpServers: {s: {args: []}}}), /command 或 url/);
-  assert.throws(() => projectInput({name: 'x', folders: ['C:\\a'], memoryDir: 'mem'}), /记忆目录/);
+test('phone input for project settings is validated', () => {
+  assert.deepEqual(mcpServersInput('{"files":{"command":"npx","args":["-y","files"]}}'), {files: {command: 'npx', args: ['-y', 'files']}});
+  assert.deepEqual(mcpServersInput('  '), {});
+  assert.throws(() => mcpServersInput('{bad'), /JSON/);
+  assert.throws(() => mcpServersInput('[]'), /对象/);
+  assert.throws(() => mcpServersInput({s: {args: []}}), /command 或 url/);
+  assert.throws(() => mcpServersInput({'bad name': {command: 'x'}}), /名称无效/);
+  assert.equal(instructionsInput('a\r\nb'), 'a\nb');
+  assert.equal(instructionsInput(null), null);
+  assert.throws(() => instructionsInput('a\0'), /无效/);
+  assert.equal(projectKey('C:\\Users\\me\\Documents\\delegate\\codex-mobile-web'), 'C--Users-me-Documents-delegate-codex-mobile-web');
+  assert.equal(projectKey('/home/me/' + 'x'.repeat(300)), '', 'long folders are not guessed');
 });
 
-test('project store keeps projects in claude-projects.json and survives bad entries', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-projects-'));
+test('project settings are the folder\'s CLAUDE.md, .mcp.json and Claude Code memory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-settings-'));
   try {
-    const file = join(root, 'claude-projects.json');
-    const store = new ProjectStore(file);
-    assert.deepEqual(await store.list(), [], 'a missing file means no projects');
-    const a = await store.create(projectInput({name: 'A', folders: [join(root, 'a')]}));
-    assert.match(a.id, PROJECT_ID);
-    const b = await store.create(projectInput({name: 'B', folders: [join(root, 'b')]}));
-    await Promise.all([store.addSession(a.id, 's1'), store.addSession(a.id, 's2'), store.addSession(b.id, 's3')]);
-    await store.addSession(b.id, 's1');
-    const saved = JSON.parse(await readFile(file, 'utf8'));
-    assert.deepEqual(saved.projects.map((p: any) => [p.name, p.sessionIds]), [['A', ['s2']], ['B', ['s3', 's1']]], 'a session belongs to one project');
-    await store.update(a.id, projectInput({name: 'A2', folders: [join(root, 'a')], instructions: 'hi'}));
-    assert.equal((await new ProjectStore(file).get(a.id)).name, 'A2');
-    assert.deepEqual((await new ProjectStore(file).get(a.id)).sessionIds, ['s2'], 'editing keeps the sessions');
-    assert.equal((await store.ofSession('s3'))?.id, b.id);
-    await store.remove(b.id);
-    assert.deepEqual((await new ProjectStore(file).list()).map(p => p.name), ['A2']);
-    await assert.rejects(store.get(b.id), /不存在/);
+    const folder = join(root, 'site'), memory = join(root, 'config', 'projects', 'site');
+    await mkdir(folder);await mkdir(join(memory, 'memory'), {recursive: true});
+    await writeFile(join(memory, 'memory', 'MEMORY.md'), '- [部署](deploy.md) — 生产环境步骤\n');
+    await writeFile(join(memory, 'memory', 'deploy.md'), '---\nname: deploy\n---\n');
 
-    // A hand-edited file with one broken entry still loads the good ones.
-    await writeFile(file, JSON.stringify({projects: [{id: 'bad'}, {id: a.id, name: 'X', folders: [join(root, 'x')]}, {id: a.id, name: 'dup', folders: [join(root, 'y')]}]}));
-    assert.deepEqual((await new ProjectStore(file).list()).map(p => p.name), ['X']);
-    await writeFile(file, '{not json');
-    await assert.rejects(new ProjectStore(file).list(), /无法读取/);
+    const empty = await readProjectSettings(folder, memory);
+    assert.equal(empty.instructions, '');assert.equal(empty.mcpServers, '');
+    assert.equal(empty.claudeMd, join(folder, 'CLAUDE.md'));
+    assert.equal(empty.memoryIndex, '- [部署](deploy.md) — 生产环境步骤\n');
+    assert.deepEqual(empty.memoryFiles, ['deploy.md']);
+
+    // Saving nothing creates no files.
+    await saveProjectSettings(folder, {instructions: '', mcpServers: {}, revision: empty.revision});
+    await assert.rejects(readFile(join(folder, 'CLAUDE.md')), /ENOENT/);
+    await assert.rejects(readFile(join(folder, '.mcp.json')), /ENOENT/);
+
+    await saveProjectSettings(folder, {instructions: '先跑测试', mcpServers: {files: {command: 'npx'}}, revision: empty.revision});
+    assert.equal(await readFile(join(folder, 'CLAUDE.md'), 'utf8'), '先跑测试\n');
+    assert.deepEqual(await json(join(folder, '.mcp.json')), {mcpServers: {files: {command: 'npx'}}});
+    assert.deepEqual(await json(join(folder, '.claude', 'settings.local.json')), {enabledMcpjsonServers: ['files']}, 'new servers are approved');
+
+    const saved = await readProjectSettings(folder, memory);
+    assert.equal(saved.instructions, '先跑测试\n');
+    assert.deepEqual(JSON.parse(saved.mcpServers), {files: {command: 'npx'}});
+    await assert.rejects(saveProjectSettings(folder, {instructions: 'x', mcpServers: null, revision: empty.revision}), /被改过/);
+
+    // Other keys in the files survive; disabled servers stay disabled; CRLF files keep their line endings.
+    await writeFile(join(folder, 'CLAUDE.md'), 'a\r\nb\r\n');
+    await writeFile(join(folder, '.mcp.json'), JSON.stringify({mcpServers: {files: {command: 'npx'}}, other: 1}));
+    await writeFile(join(folder, '.claude', 'settings.local.json'), JSON.stringify({permissions: {allow: ['Bash(ls)']}, enabledMcpjsonServers: ['files'], disabledMcpjsonServers: ['web']}));
+    const edited = await readProjectSettings(folder, memory);
+    assert.equal(edited.instructions, 'a\r\nb\r\n');
+    await saveProjectSettings(folder, {instructions: 'a\nb\nc', mcpServers: {files: {command: 'npx'}, web: {url: 'https://example.test/mcp'}, db: {command: 'db'}}, revision: edited.revision});
+    assert.equal(await readFile(join(folder, 'CLAUDE.md'), 'utf8'), 'a\r\nb\r\nc\r\n');
+    assert.equal((await json(join(folder, '.mcp.json'))).other, 1);
+    assert.deepEqual(await json(join(folder, '.claude', 'settings.local.json')),
+      {permissions: {allow: ['Bash(ls)']}, enabledMcpjsonServers: ['files', 'db'], disabledMcpjsonServers: ['web']});
+
+    // A broken .mcp.json is shown as text and does not block editing CLAUDE.md.
+    await writeFile(join(folder, '.mcp.json'), '{broken');
+    const broken = await readProjectSettings(folder, memory);
+    assert.equal(broken.mcpServers, '{broken');
+    await saveProjectSettings(folder, {instructions: 'new', mcpServers: null, revision: broken.revision});
+    assert.equal(await readFile(join(folder, '.mcp.json'), 'utf8'), '{broken');
+
+    // .claude/CLAUDE.md is used when it is the only one.
+    const nested = join(root, 'nested');
+    await mkdir(join(nested, '.claude'), {recursive: true});
+    await writeFile(join(nested, '.claude', 'CLAUDE.md'), 'nested');
+    const settings = await readProjectSettings(nested, '');
+    assert.equal(settings.claudeMd, join(nested, '.claude', 'CLAUDE.md'));
+    assert.equal(settings.instructions, 'nested');assert.equal(settings.memoryDir, '');
   } finally {await removeTestTemp(root);}
 });
 
-test('project launch adds folders, instructions, memory index and MCP servers', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-memory-'));
-  try {
-    await writeFile(join(root, 'MEMORY.md'), '- [部署](deploy.md) — 生产环境步骤\n');
-    assert.equal(await memoryIndex(join(root, 'missing')), '');
-    const launch = await projectLaunch({id: 'p_0000000000000000', name: '网站', folders: ['C:\\site', 'D:\\assets'], instructions: '用中文回答',
-      memoryDir: root, mcpServers: {files: {command: 'npx'}}, sessionIds: []});
-    assert.equal(launch.cwd, 'C:\\site');
-    assert.deepEqual(launch.additionalDirectories, ['D:\\assets']);
-    assert.deepEqual(launch.mcpServers, {files: {command: 'npx'}});
-    for (const part of ['# 项目：网站', '- D:\\assets', '## 项目说明\n用中文回答', `记忆目录：${root}`, '- [部署](deploy.md) — 生产环境步骤'])
-      assert.ok(launch.append.includes(part), part);
-    const plain = await projectLaunch({id: 'p_0000000000000000', name: 'P', folders: ['C:\\p'], instructions: '', memoryDir: '', mcpServers: {}, sessionIds: []});
-    assert.equal(plain.append, '# 项目：P');assert.deepEqual(plain.additionalDirectories, []);
-  } finally {await removeTestTemp(root);}
-});
-
-test('Claude sessions start in projects, register with them and list by project or folder', async () => {
+test('Claude Code projects are folders: list, settings and new sessions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cmw-claude-project-run-'));
   const ledger = new Ledger(':memory:');
   let bridge: ClaudeCodeBridge | undefined;
   try {
-    const site = join(root, 'site'), assets = join(root, 'assets'), loose = join(root, 'loose');
-    for (const dir of [site, assets, loose]) await mkdir(dir);
+    await mkdir(join(root, 'site'));
+    const site = await realpath(join(root, 'site')); // The connector resolves folders the same way.
+    const loose = join(root, 'loose');await mkdir(loose);
     const starts: any[] = [];
     const query: QueryFn = ({prompt, options}) => {
       const id = options?.resume || randomUUID();
@@ -94,64 +108,44 @@ test('Claude sessions start in projects, register with them and list by project 
       generator.close = () => {};generator.interrupt = async () => {};
       return generator;
     };
+    const old = '22222222-2222-4222-8222-222222222222';
     const catalog: {sessionId: string; summary: string; lastModified: number; cwd: string}[] = [
       {sessionId: '11111111-1111-4111-8111-111111111111', summary: '散装会话', lastModified: 3, cwd: loose},
-      {sessionId: '22222222-2222-4222-8222-222222222222', summary: '站点旧会话', lastModified: 2, cwd: site},
+      {sessionId: old, summary: '站点旧会话', lastModified: 2, cwd: site},
     ];
     const sessions: ClaudeSessions = {
       listSessions: async () => catalog,
       getSessionInfo: async id => catalog.find(s => s.sessionId === id),
       getSessionMessages: async () => [],
     };
-    const store = new ProjectStore(join(root, 'claude-projects.json'));
-    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), async () => sessions, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000), store);
+    // The site's sessions live in a folder whose name the connector does not have to guess.
+    const transcripts = join(root, 'config', 'projects', 'odd-name');
+    await mkdir(join(transcripts, 'memory'), {recursive: true});
+    await writeFile(join(transcripts, old + '.jsonl'), '{}\n');
+    await writeFile(join(transcripts, 'memory', 'MEMORY.md'), '- 记住这个\n');
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), async () => sessions, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000));
 
-    const saved = await bridge.handle('claude.project.save', {name: '网站', folders: [site, assets], instructions: '先跑测试', opId: opId()});
+    const home = await bridge.handle('claude.list', {refresh: true});
+    assert.deepEqual(home.projects, [{id: loose, path: loose}, {id: site, path: site}]);
+    assert.deepEqual((await bridge.handle('claude.list', {project: site})).data.map((s: any) => s.title), ['站点旧会话']);
+
+    const {project} = await bridge.handle('claude.project.get', {folder: site});
+    assert.equal(project.memoryDir, join(transcripts, 'memory'));
+    assert.equal(project.memoryIndex, '- 记住这个\n');
+    const saved = await bridge.handle('claude.project.save', {folder: site, instructions: '先跑测试', mcpServers: '', revision: project.revision, opId: opId()});
     assert.equal(saved.state, 'accepted');
-    const projectId = saved.projectId;
-    assert.deepEqual((await bridge.handle('claude.project.get', {projectId})).project.folders, [site, assets]);
+    assert.equal(await readFile(join(site, 'CLAUDE.md'), 'utf8'), '先跑测试\n');
+    await assert.rejects(bridge.handle('claude.project.get', {folder: join(root, 'missing')}));
+    await assert.rejects(bridge.handle('claude.project.save', {folder: site, instructions: 'x', revision: project.revision}), /操作标识/);
 
-    const created = await bridge.handle('claude.create', {projectId, text: '你好', opId: opId()});
+    // Sessions start in the folder; Claude Code reads CLAUDE.md and .mcp.json there itself.
+    const created = await bridge.handle('claude.create', {cwd: site, text: '你好', opId: opId()});
     assert.equal(created.state, 'accepted');
     const start = starts.at(-1).options;
     assert.equal(start.cwd, site);
-    assert.deepEqual(start.additionalDirectories, [assets]);
-    assert.ok(start.systemPrompt.append.includes('先跑测试'));
-    assert.equal(start.mcpServers, undefined, 'no MCP servers unless the project has some');
-    assert.deepEqual((await store.get(projectId)).sessionIds, [created.conversationId]);
-    // The transcript can appear before the SDK knows the session; a live session still reads.
-    await mkdir(join(root, 'config', 'projects', 'x'), {recursive: true});
-    await writeFile(join(root, 'config', 'projects', 'x', created.conversationId + '.jsonl'), '{}\n');
-    const early = await bridge.handle('claude.read', {conversationId: created.conversationId});
-    assert.equal(early.controlled, true);assert.deepEqual(early.turns, []);
-    catalog.unshift({sessionId: created.conversationId, summary: '项目里的新会话', lastModified: 4, cwd: site});
-
-    const home = await bridge.handle('claude.list', {refresh: true});
-    assert.deepEqual(home.projects, [{id: projectId, path: site, name: '网站', kind: 'project'},
-      {id: loose, path: loose, kind: 'folder'}, {id: site, path: site, kind: 'folder'}]);
-    assert.deepEqual((await bridge.handle('claude.list', {project: projectId})).data.map((s: any) => s.title), ['项目里的新会话']);
-    assert.deepEqual((await bridge.handle('claude.list', {project: site})).data.map((s: any) => s.title), ['站点旧会话'], 'folder groups leave out project sessions');
-    await assert.rejects(bridge.handle('claude.list', {project: 'p_ffffffffffffffff'}), /不存在/);
-
-    // A project session resumed later keeps the project's settings; others do not get them.
-    bridge.runtime.close();
-    await mkdir(join(root, 'config', 'projects', 'x'), {recursive: true});
-    for (const id of [created.conversationId, '11111111-1111-4111-8111-111111111111'])
-      await writeFile(join(root, 'config', 'projects', 'x', id + '.jsonl'), '{}\n');
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await bridge.handle('claude.project.save', {projectId, name: '网站', folders: [site], instructions: '新的说明', mcpServers: {files: {command: 'npx'}}, opId: opId()});
-    assert.equal((await bridge.handle('claude.send', {conversationId: created.conversationId, text: '继续', opId: opId(), confirmIdle: true})).state, 'accepted');
-    const resumed = starts.at(-1).options;
-    assert.equal(resumed.resume, created.conversationId);
-    assert.ok(resumed.systemPrompt.append.includes('新的说明'));
-    assert.deepEqual(resumed.mcpServers, {files: {command: 'npx'}});
-    assert.equal((await bridge.handle('claude.send', {conversationId: '11111111-1111-4111-8111-111111111111', text: '继续', opId: opId(), confirmIdle: true})).state, 'accepted');
-    assert.equal(starts.at(-1).options.systemPrompt.append, undefined);
-
-    assert.equal((await bridge.handle('claude.read', {conversationId: created.conversationId})).project.name, '网站');
-    assert.equal((await bridge.handle('claude.project.delete', {projectId, opId: opId()})).state, 'accepted');
-    assert.deepEqual((await bridge.handle('claude.list', {project: site, refresh: true})).data.map((s: any) => s.title), ['项目里的新会话', '站点旧会话'],
-      'sessions of a deleted project go back to their folder');
+    assert.deepEqual(start.systemPrompt, {type: 'preset', preset: 'claude_code'});
+    assert.equal(start.additionalDirectories, undefined);assert.equal(start.mcpServers, undefined);assert.equal(start.settingSources, undefined);
+    await assert.rejects(bridge.handle('claude.create', {projectId: 'p_0000000000000000', text: '你好', opId: opId()}), /项目目录/);
   } finally {
     bridge?.close();ledger.close();
     await removeTestTemp(root);

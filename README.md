@@ -6,7 +6,7 @@ Continue using Codex on your computer from your phone, through a relay you host.
 
 Browse projects and conversations, send instructions, steer or stop a running task, and respond to Codex approvals from a mobile browser. Execution stays on your computer, with its existing workspace, model configuration, and tools. No mobile app or project-operated account service is required.
 
-Switch between **Codex / Antigravity / Cowork** on the same computer and self-hosted relay. Returning to an app restores its conversation. Antigravity opens existing Windows desktop conversations and supports text replies, model selection, stopping a task, and file previews. Cowork uses a local browser extension to show projects, conversations, and text history from Claude. [Cowork setup](COWORK.md) · [Antigravity implementation](docs/antigravity/IMPLEMENTATION.md)
+Switch between **Codex / Antigravity / Claude Code** on the same computer and self-hosted relay. Returning to an app restores its conversation. Antigravity opens existing Windows desktop conversations and supports text replies, model selection, stopping a task, and file previews. Claude Code runs sessions on the computer with new chats, replies, stopping and approvals. A project is a folder: its instructions, MCP servers and memory are Claude Code's own `CLAUDE.md`, `.mcp.json` and memory folder, so the terminal and the desktop app use them too. [Claude Code notes](docs/claude-local/DESIGN.md) · [Antigravity implementation](docs/antigravity/IMPLEMENTATION.md)
 
 ## Features
 
