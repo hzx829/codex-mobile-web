@@ -117,7 +117,9 @@ guestPaths?: {root, codexHome, claudeConfig, workspace}   // 都是绝对路径
 2. 复用 `start.ps1 -Mode connector` 的启动逻辑（进程记录、日志）。
 3. 状态窗口显示：连接状态、电脑名、可用的应用。失败时显示日志位置。
 
-`guest.ps1 -Action Stop` 复用 `stop.ps1`。`guest.ps1 -Action Clear` 先确认，再停止连接器，删除 `guest\` 和 `.local\operations.sqlite*`，保留 `config.json`，以便下次还能直接启动。
+连接器连上中继后，对每个可用的应用做一次真实的测试消息（设计 2c），结果显示在状态窗口。
+
+`guest.ps1 -Action Stop` 复用 `stop.ps1`，停止后运行 `connector.mjs --return-login` 把刷新过的登录写回 B（设计第 2 节）。`guest.ps1 -Action Clear` 先确认，再停止连接器，删除 `guest\` 和 `.local\operations.sqlite*`，保留 `config.json`，以便下次还能直接启动。
 
 ### 测试
 

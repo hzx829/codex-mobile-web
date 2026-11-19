@@ -12,7 +12,7 @@ Uploaded documents remain in the current project's `.codex-mobile-attachments/` 
 
 The Antigravity panel uses the same shared Token. It forwards desktop conversation titles, displayed messages, tool names and requested actions through the relay. The Windows connector reads the local Antigravity index and transcript files. The Hub CSRF token stays on the computer.
 
-A guest token can register only its assigned connector. The guest package stores projects, session history and local copies of login files in its `guest` directory on the borrowed computer.
+A guest token can register only its assigned connector. The guest package stores projects, session history and local copies of login files in its `guest` directory on the borrowed computer. It also copies the owner's connection settings (proxy, API endpoint, model provider) into that directory, writes the login refreshed during the loan back to the owner's own app files when it stops, and sends one short test message to each available app on every start.
 
 ### Who you trust
 
@@ -88,7 +88,7 @@ Do not post Tokens, QR codes, private keys, raw `.local` directories or unreview
 
 Antigravity 面板沿用共享 Token。中继可读取转发的桌面对话标题、已展示的消息、工具名和操作。Windows 连接器在本机读取索引与对话记录，连接桌面 Hub 的 CSRF Token 仅在电脑使用。
 
-访客 Token 只能注册绑定的连接器。访客包将项目、会话和登录副本保存在借用电脑上的 `guest` 目录。
+访客 Token 只能注册绑定的连接器。访客包将项目、会话和登录副本保存在借用电脑上的 `guest` 目录。它还会把电脑主人的连接设置（代理、接口地址、模型服务商）复制到该目录；停止时把借用期间刷新过的登录写回主人自己的应用；每次启动给每个可用的应用发一条很短的测试消息。
 
 上传的普通文件保存在当前项目的 `.codex-mobile-attachments/` 目录，供后续对话继续读取，不会自动删除；不再需要时可手动清理。未发送的选择保留在浏览器内存，未完成的上传也保留在磁盘以便续传。队列只保存文件引用；连接器数据库会保留上传标识、文件名、大小、项目路径和会话 ID。
 

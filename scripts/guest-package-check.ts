@@ -46,7 +46,7 @@ try {
   await writeFile(configPath, JSON.stringify(config));
 
   const env: NodeJS.ProcessEnv = {...process.env, USERPROFILE: owner, HOME: owner, CODEX_HOME: ownerCodex,
-    CLAUDE_CONFIG_DIR: ownerClaude, CODEX_BIN: process.execPath, CLAUDE_CODE_BIN: process.execPath};
+    CLAUDE_CONFIG_DIR: ownerClaude, CODEX_BIN: process.execPath, CLAUDE_CODE_BIN: process.execPath, BRIDGE_GUEST_CHECK: '0'};
   for (const key of ['BRIDGE_CONFIG', 'BRIDGE_TOKEN', 'BRIDGE_DATA', 'RELAY_URL']) delete env[key];
   const claudeLogin = JSON.stringify({claudeAiOauth: {accessToken: 'fixture'}});
   await writeFile(join(ownerCodex, 'auth.json'), JSON.stringify({tokens: {access_token: 'fixture'}}));
@@ -55,8 +55,8 @@ try {
     cwd: home, env: {...env, CODEX_BIN: join(owner, 'missing-codex.exe'), CLAUDE_CODE_BIN: join(owner, 'missing-claude.exe')}, windowsHide: true,
   }), {code: 1});
   const preflight = await run(join(home, 'runtime', 'node.exe'), ['build/connector.mjs', '--preflight'], {cwd: home, env, windowsHide: true});
-  assert.match(preflight.stdout, /Codex：可用/);
-  assert.match(preflight.stdout, /Claude Code：可用/);
+  assert.match(preflight.stdout, /Codex：已找到登录和设置/);
+  assert.match(preflight.stdout, /Claude Code：已找到登录和设置/);
   await assert.rejects(stat(join(local, 'operations.sqlite')), {code: 'ENOENT'});
 
   // No model process is started: Codex is unavailable and Claude is only asked for session metadata.
@@ -115,9 +115,13 @@ try {
   assert.equal((await request('claude.read', {conversationId: guestSession})).result.turns[0].items[0].text, 'fixture');
   assert.equal((await request('preview.start', {threadId: 'fixture', filePath: join(owner, 'outside.html')})).error.code, 'forbidden');
 
+  // The guest's Claude Code refreshes the copied login; stopping gives the refreshed copy back to the owner.
+  const refreshed = JSON.stringify({claudeAiOauth: {accessToken: 'fixture-refreshed', refreshToken: 'fixture-refresh-2'}});
+  await writeFile(join(claudeConfig, '.credentials.json'), refreshed);
   const disconnected = frame(m => m.type === 'machines' && m.data.length === 0);
   await Promise.all([launcher('Stop'), disconnected]);
   await assert.rejects(stat(pidFile), {code: 'ENOENT'});
+  assert.equal(await readFile(join(ownerClaude, '.credentials.json'), 'utf8'), refreshed);
   const reconnected = connected();
   await Promise.all([launcher('Start'), reconnected]);
   assert.deepEqual((await request('claude.list')).result.projects.map((item: any) => item.path), [project.path]);
@@ -126,8 +130,8 @@ try {
   await assert.rejects(stat(join(home, 'guest')), {code: 'ENOENT'});
   await assert.rejects(stat(join(local, 'operations.sqlite')), {code: 'ENOENT'});
   await stat(configPath);
-  assert.equal(await readFile(join(ownerClaude, '.credentials.json'), 'utf8'), claudeLogin);
-  console.log('Guest package verified: ZIP, scoped relay auth, preflight, project creation, preview guard, duplicate start, restart and clear.');
+  assert.equal(await readFile(join(ownerClaude, '.credentials.json'), 'utf8'), refreshed);
+  console.log('Guest package verified: ZIP, scoped relay auth, preflight, project creation, preview guard, duplicate start, login return, restart and clear.');
 } finally {
   socket?.terminate();
   if (launcher) await launcher('Stop').catch(() => {});

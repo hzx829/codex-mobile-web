@@ -13,7 +13,8 @@ import { AntigravityBridge } from './antigravity.js';
 import { ServiceRouter, type ServiceBridge } from './services.js';
 import { ClaudeCodeBridge, sdkQuery } from './claude-code.js';
 import { ClaudeRuntime } from './claude-runtime.js';
-import { NoDesktop, preflight, useGuestHomes } from './guest.js';
+import { NoDesktop, preflight, returnLogins, useGuestHomes } from './guest.js';
+import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './guest-checks.js';
 import { setWorkspace } from './project.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
@@ -24,6 +25,12 @@ if(config.claudeBin)process.env.CLAUDE_CODE_BIN=config.claudeBin;
 const guest=config.guestPaths;
 if(guest&&(typeof config.machineId!=='string'||!config.machineId.startsWith('guest-')))
   throw new Error('访客配置缺少有效的电脑 ID');
+if(process.argv.includes('--return-login')){
+  // Run by the guest launcher after stopping the connector: the owner gets back the login the guest refreshed.
+  const result=guest?await returnLogins(guest):{messages:[],failed:false};
+  for(const message of result.messages)console.log(message);
+  process.exit(result.failed?1:0);
+}
 const checks=guest?await preflight(guest):undefined;
 const available=checks?.services??bridgeServices;
 if(checks){
@@ -131,5 +138,17 @@ control.on('change',(id:string|null)=>{
 });
 connect();
 // Keep the relay connection independent of Codex startup and recovery.
-if(useCodex)void control.start().catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
+const codexStarted=useCodex?control.start():undefined;
+codexStarted?.catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
+if(guest&&process.env.BRIDGE_GUEST_CHECK!=='0'){
+  const report=(label:string,result:CheckResult)=>console.log(result.ok?`${label}：测试通过，可以使用${result.message?`（${result.message}）`:''}`:`${label}：${result.message}`);
+  if(codexStarted){
+    console.log('Codex：正在发送一条测试消息…');
+    void codexStarted.then(()=>checkCodex(control.runtime,guest.workspace),()=>({ok:false,message:'Codex 没能启动，请查看下方错误'})).then(result=>report('Codex',result));
+  }
+  if(available.includes('claude')){
+    console.log('Claude Code：正在发送一条测试消息…');
+    void checkClaude(sdkQuery as unknown as ClaudeLoader,guest.workspace).then(result=>report('Claude Code',result));
+  }
+}
 for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();services.close();socket?.close();control.close();process.exit(0);});

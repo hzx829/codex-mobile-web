@@ -56,15 +56,65 @@ for (const [file, action] of [['启动.cmd', 'Start'], ['停止.cmd', 'Stop'], [
 await writeFile(join(target, '.local', 'config.json'), json({
   mode: 'connector', guest: true, relayUrl: relay.origin, token: binding.token, machineId, machineName,
 }));
-await writeText(join(target, '说明.txt'), `电脑名称 ${machineName}
-中继地址 ${relay.origin}
+await writeText(join(target, '说明.txt'), `借用说明
 
-1. 安装并登录 Codex 或 Claude Code，然后双击「启动.cmd」。窗口里可查看连接状态。
-2. 停止借用时双击「停止.cmd」。下次启动可以接着用。
-3. 如需删除访客会话、项目和登录副本，双击「清除访客数据.cmd」后确认。
+这个程序让朋友在手机上使用这台电脑上的 Codex 和 Claude Code。
+用的是你在这台电脑上登录的账号和额度，也会走你平时上网用的代理。
 
-项目在 guest\\workspace，连接日志在 .local。模型请求使用这台电脑上已登录的账号和额度。
-若启动窗口提示 Token 不匹配，请联系提供此压缩包的人核对中继设置。
+电脑名称：${machineName}
+中继地址：${relay.origin}
+
+
+一、开始之前
+
+1. 先确认这台电脑上的 Codex 或 Claude Code 能正常用：自己打开发一句话试试。两个能用一个就行。
+2. 如果平时要开代理才能用，借用期间也要一直开着代理。
+3. 把这个文件夹放到固定位置（例如 D:\\借用），不要在压缩包里直接运行。
+
+
+二、开始借用
+
+双击「启动.cmd」。窗口里会依次出现：
+
+  已找到登录和设置       找到了你的登录
+  电脑已连接中继         朋友的手机已经能看到这台电脑
+  测试通过，可以使用     已经实际发过一条测试消息，确认能用
+
+看到「测试通过」后可以关掉这个窗口，程序会在后台继续运行。
+测试大约需要十几秒，最多一分半钟。
+
+如果窗口里出现下面的提示：
+
+  还没有登录                 打开对应的应用登录一次，再双击「启动.cmd」
+  登录已失效                 在对应的应用里重新登录，再双击「启动.cmd」
+  连不上服务 / 没有回应      检查网络；平时要开代理的话先打开代理，再双击「启动.cmd」
+  Token 不匹配               请联系给你这个压缩包的人
+
+只有一个应用测试通过也可以借用，朋友只能用通过的那个。
+
+
+三、借用期间
+
+- 请保持电脑开机、联网，不要让它进入睡眠。
+- 请尽量不要自己使用 Codex 或 Claude Code，否则你们之中可能有一方需要重新登录。
+- 朋友的项目和会话都放在本文件夹的 guest 目录里，不会出现在你自己的 Codex 和 Claude Code 里。
+- 朋友让 Codex 或 Claude Code 执行的操作，会以你的 Windows 账号在这台电脑上运行。
+
+
+四、结束借用
+
+双击「停止.cmd」。它会断开连接，并把借用期间更新过的登录还给你的 Codex 和 Claude Code，之后你可以照常使用。
+下次再借，双击「启动.cmd」就行，朋友之前的会话都还在。
+
+- 提示「登录写回失败」：先关闭 Codex 和 Claude Code，再双击一次「停止.cmd」。
+- 没停止就关机了：在你自己使用 Codex 或 Claude Code 之前，先双击一次「停止.cmd」。
+
+
+五、删除借用数据
+
+双击「清除访客数据.cmd」，输入 YES 确认。会删除朋友的项目、会话和登录副本，不影响你自己的数据。
+
+运行日志在本文件夹的 .local 目录里。
 `);
 
 const revision = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {encoding: 'utf8'}).trim();

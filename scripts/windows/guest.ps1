@@ -1,5 +1,6 @@
 param([Parameter(Mandatory=$true)][ValidateSet('Start','Stop','Clear')][string]$Action,[switch]$NoStatus)
 $ErrorActionPreference='Stop'
+$returnFailed=$false
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $root=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $local=Join-Path $root '.local'
@@ -20,9 +21,20 @@ function Remove-GuestItem($item){
   Remove-Item -LiteralPath $item.FullName -Force
 }
 
+# The guest's apps may refresh the owner's login while it is lent; give the refreshed copy back.
+function Invoke-ReturnLogin{
+  $node=Join-Path $root 'runtime\node.exe'
+  if(-not(Test-Path -LiteralPath $node)){$node=(Get-Command node -ErrorAction Stop).Source}
+  Push-Location -LiteralPath $root
+  try{
+    & $node --disable-warning=ExperimentalWarning (Join-Path $root 'build\connector.mjs') --return-login | ForEach-Object {Write-Host $_}
+    return ($LASTEXITCODE -eq 0)
+  }finally{Pop-Location}
+}
+
 function Show-ConnectorLogs{
   $lines=@()
-  if(Test-Path -LiteralPath $outputLog){$lines+=Get-Content -LiteralPath $outputLog -Encoding UTF8 -Tail 8}
+  if(Test-Path -LiteralPath $outputLog){$lines+=Get-Content -LiteralPath $outputLog -Encoding UTF8 -Tail 14}
   if(Test-Path -LiteralPath $errorLog){$lines+=Get-Content -LiteralPath $errorLog -Encoding UTF8 -Tail 4}
   return $lines -join [Environment]::NewLine
 }
@@ -51,6 +63,10 @@ try{
       & (Join-Path $PSScriptRoot 'start.ps1') -Mode connector -NoOpen
     }else{
       & (Join-Path $PSScriptRoot 'stop.ps1') -Mode connector -Guest
+      if(-not (Invoke-ReturnLogin)){
+        if($Action -eq 'Clear'){throw '登录没能写回这台电脑，访客数据没有清除。请关闭 Codex 和 Claude Code 后再试一次。'}
+        $returnFailed=$true
+      }
       if($Action -eq 'Clear'){
         $entry=Get-Item -LiteralPath $guest -Force -ErrorAction SilentlyContinue
         if($entry){
@@ -71,6 +87,8 @@ try{
     $mutex.Dispose()
   }
 
+  if($returnFailed){exit 1}
+  if($Action -eq 'Stop'){Write-Host '访客连接器已停止。'}
   if($Action -eq 'Start' -and -not $NoStatus){
     Write-Host "电脑名称 $($config.machineName)"
     Write-Host '关闭此窗口后连接器仍会运行。双击「停止.cmd」可以断开。'
