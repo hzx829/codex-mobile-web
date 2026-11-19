@@ -7,7 +7,7 @@ export const workspaceName=(path:string)=>path.split(/[\\/]/).filter(Boolean).at
 export function HomeHeader({project,machineName,connected,relayOnline,back,backDisabled,chooseComputer,more}:{project:string;machineName:string;connected:boolean;relayOnline:boolean;back:()=>void;backDisabled?:boolean;chooseComputer:()=>void;more:()=>void}){
   return <header className="home-header">
     {project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={backDisabled} onClick={back}/><h1>{project}</h1></>:
-      <button className="home-identity" aria-label="选择电脑" onClick={chooseComputer}><span className="home-computer"><Icon name="computer" size={22}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{relayOnline?'离线':'连接中…'}</small>}</span></button>}
+      <button className="home-identity" aria-label="选择电脑" onClick={chooseComputer}><span className="home-computer"><Icon name="computer" size={19}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{relayOnline?'离线':'连接中…'}</small>}</span></button>}
     <IconButton icon="more" label="更多选项" className="round" onClick={more}/>
   </header>;
 }
@@ -44,5 +44,5 @@ export function submitOnDesktop(event:KeyboardEvent<HTMLTextAreaElement>,submit:
 }
 
 export function SendMessageButton({sending,disabled,label}:{sending:boolean;disabled:boolean;label:string}){
-  return <button className={`black round send${sending?' sending':''}`} aria-label={sending?'正在发送':label} aria-busy={sending} disabled={disabled} onPointerDown={event=>event.preventDefault()}><Icon name={sending?'more':'send'} size={21}/></button>;
+  return <button className={`black round send${sending?' sending':''}`} aria-label={sending?'正在发送':label} aria-busy={sending} disabled={disabled} onPointerDown={event=>event.preventDefault()}><Icon name={sending?'more':'send'} size={18}/></button>;
 }

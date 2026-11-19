@@ -617,7 +617,7 @@ function App(){
           <textarea ref={composer} aria-label="任务输入" placeholder={queueNext?'当前任务完成后发送…':newChat||!view?.turns.length?'接下来我们该写什么代码？':`在 ${machineName} 上继续…`} value={draft} readOnly={busy} onChange={e=>editDraft(e.target.value)} onPaste={paste} rows={1} onKeyDown={e=>submitOnDesktop(e,()=>void submit())}/>
           <div className="composer-toolbar">
             <IconButton icon="plus" label="添加与选项" className="composer-add" disabled={busy||imageLoading} onClick={()=>setSheet('add')}/>
-            <IconButton icon="shield" label={`许可：${activeApproval==='never'?'不提示':activeApproval==='on-request'?'按需审批':'电脑配置'}`} className={`composer-permission${activeApproval==='never'?' unrestricted':''}`} disabled={busy} onClick={()=>setSheet('approval')}/>
+            <button type="button" className={`composer-permission${activeApproval==='never'?' unrestricted':''}`} aria-label={`许可：${activeApproval==='never'?'不提示':activeApproval==='on-request'?'按需审批':'电脑配置'}`} title={`许可：${activeApproval==='never'?'不提示':activeApproval==='on-request'?'按需审批':'电脑配置'}`} disabled={busy} onClick={()=>setSheet('approval')}><Icon name="shield" size={17}/><span>{activeApproval==='never'?'完全访问':activeApproval==='on-request'?'按需审批':'默认权限'}</span></button>
             <button className="composer-model" ref={modelButton} type="button" aria-haspopup="dialog" aria-expanded={Boolean(modelPoint)} onClick={e=>{const rect=e.currentTarget.getBoundingClientRect();setModelPoint({x:rect.right,y:rect.top,align:'end'});}} disabled={busy} title={`${modelLabel}${effortLabel?' · '+effortLabel:''}${isFast?' · 极速':''}`}><span>{modelLabel}</span>{effortLabel&&<small>{effortLabel}</small>}{isFast&&<small>极速</small>}<Icon name="chevron" size={13}/></button>
             <div className="composer-actions">
               {view?.activeTurnId&&!newChat&&Boolean(draft.trim()||attachmentCount||busy)&&<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('turn.stop',target())}/>}
@@ -648,7 +648,7 @@ function App(){
      {previewPane}
   </div>;
 }
-function MenuItem({icon,children,onClick,disabled=false}:{icon:IconName;children:ReactNode;onClick:()=>void;disabled?:boolean}){return <button className="menu-item" onClick={onClick} disabled={disabled}><Icon name={icon} size={21}/><span className="menu-copy">{children}</span></button>;}
+function MenuItem({icon,children,onClick,disabled=false}:{icon:IconName;children:ReactNode;onClick:()=>void;disabled?:boolean}){return <button className="menu-item" onClick={onClick} disabled={disabled}><Icon name={icon} size={20}/><span className="menu-copy">{children}</span></button>;}
 function SheetPanel({title,close,children,className=''}:{title:string;close:()=>void;children:ReactNode;className?:string}){
   const panel=useRef<HTMLElement>(null);
   useEffect(()=>{const previous=document.activeElement as HTMLElement;if(!panel.current?.contains(document.activeElement))panel.current?.focus();const key=(e:KeyboardEvent)=>{

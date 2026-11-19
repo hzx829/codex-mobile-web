@@ -35,7 +35,7 @@ const MarkdownBlock=memo(function MarkdownBlock({text,openFile,openPreview,allow
     if(!href)return <span>{children}</span>;
     const previewUrl=localPreviewLink(href);
     if(previewUrl)return <button className="inline-link" type="button" onClick={()=>openPreview(previewUrl)}>{children} · 打开预览</button>;
-    if(/^https?:\/\//i.test(href))return <a href={href} target="_blank" rel="noreferrer noopener">{children} ↗</a>;
+    if(/^https?:\/\//i.test(href))return <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>;
     if(/^[a-z]+:/i.test(href)&&!windowsFilePath.test(href))return <span>{children}</span>;
     return <button className="inline-link" onClick={()=>openFile(href)}>{children}</button>;
   }}}>{text}</Markdown>;

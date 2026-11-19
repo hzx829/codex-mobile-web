@@ -5,6 +5,7 @@ import {groupItems} from './activity';
 import {Icon} from './icons';
 import {IconButton} from './icon-button';
 import type {OptimisticMessage} from './optimistic';
+import {diffSummary} from './diff-summary';
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const statusLabel:Record<string,string>={inProgress:'进行中',completed:'已完成',interrupted:'已停止',failed:'失败'};
 const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划',fileRead:'读取文件',codeSearch:'搜索代码',subagent:'子任务',toolCall:'使用工具'};
@@ -39,18 +40,22 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
       const body=<><SafeMarkdown text={item.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}</>;
       return item.role==='user'?<UserMessage key={item.id} text={item.text} editReason={editReason} disabled={disabled} blocked={onBlocked} copy={()=>onCopy(item.text)} resend={text=>onEdit(turn.id,item.id,text)}>{body}</UserMessage>:<article className={`message ${item.role}`} key={item.id}>{body}</article>;
     }))}
-    <div className="turn-status">{turn.status!=='completed'&&(statusLabel[turn.status]||turn.status)}{turn.diff&&<button onClick={()=>onDiff(turn)}><Icon name="file" size={14}/>查看修改</button>}</div>{turn.error&&<p className="error">{turn.error}</p>}
+    {turn.status!=='completed'&&<div className="turn-status">{statusLabel[turn.status]||turn.status}</div>}{turn.diff&&<DiffCard diff={turn.diff} open={()=>onDiff(turn)}/>}{turn.error&&<p className="error">{turn.error}</p>}
     {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/>{!hideFork&&<IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/>}</div>}
   </section>;
 });
 export function ActivityGroup({items,running,openFile}:{items:MessageItem[];running:boolean;openFile:(path:string)=>void}){
   const [open,setOpen]=useState(false);
-  return <details className="activity-group" onToggle={e=>setOpen(e.currentTarget.open)}><summary>{running?'正在处理':'运行记录'} · {items.length} 项<span className="activity-excerpt">{activityLabel[items.at(-1)!.type]||'任务活动'}</span></summary>{open&&<div className="activity-list">{items.map(item=><ActivityItem key={item.id} item={item} openFile={openFile}/>)}</div>}</details>;
+  return <details className="activity-group" onToggle={e=>setOpen(e.currentTarget.open)}><summary><span className={running?'activity-label shimmer':'activity-label'}>{running?'正在处理':'运行记录'} · {items.length} 项</span><span className="activity-excerpt">{activityLabel[items.at(-1)!.type]||'任务活动'}</span><Icon name="chevron" size={14}/></summary>{open&&<div className="activity-list">{items.map(item=><ActivityItem key={item.id} item={item} openFile={openFile}/>)}</div>}</details>;
 }
 const ActivityItem=memo(function ActivityItem({item,openFile}:{item:MessageItem;openFile:(path:string)=>void}){
   const [open,setOpen]=useState(false);
-  return <details className="activity" onToggle={e=>setOpen(e.currentTarget.open)}><summary><span>{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.slice(0,90).split('\n')[0]}</span></summary>{open&&<><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</>}</details>;
+  return <details className="activity" onToggle={e=>setOpen(e.currentTarget.open)}><summary><span className="activity-label">{activityLabel[item.type]||'任务活动'}</span><span className="activity-excerpt">{item.text.slice(0,90).split('\n')[0]}</span><Icon name="chevron" size={13}/></summary>{open&&<><pre>{item.text}</pre>{item.files?.map(path=><button className="file-link" key={path} onClick={()=>openFile(path)}><Icon name="file" size={15}/>{name(path)}</button>)}</>}</details>;
 });
+function DiffCard({diff,open}:{diff:string;open:()=>void}){
+  const {files,added,removed}=useMemo(()=>diffSummary(diff),[diff]);
+  return <button type="button" className="diff-card" onClick={open} aria-label="查看本轮修改"><Icon name="diff" size={18}/><span className="diff-card-title">{files?`${files} 个文件已更改`:'查看修改'}</span>{files>0&&<span className="diff-card-counts"><span className="diff-add">+{added}</span><span className="diff-del">−{removed}</span></span>}<span className="diff-card-open">查看<Icon name="chevron" size={14}/></span></button>;
+}
 function UserMessage({text,editReason,disabled,blocked,copy,resend,children}:{text:string;editReason:string;disabled:boolean;blocked:(reason:string)=>void;copy:()=>void;resend:(text:string)=>Promise<void>;children:ReactNode}){
   const [editing,setEditing]=useState(false),[draft,setDraft]=useState(text);
   const submitting=useRef(false);
