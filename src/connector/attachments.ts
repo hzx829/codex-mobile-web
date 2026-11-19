@@ -2,7 +2,7 @@ import {mkdir,realpath,open} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {BridgeError} from '../shared/types.js';
 import {fileAttachment,UPLOAD_CHUNK_BYTES,type FileAttachment} from '../shared/attachments.js';
-import {projectDirectory} from './project.js';
+import {assertInsideWorkspace, checkProjectPath, projectDirectory} from './project.js';
 import type {Ledger,UploadRecord} from './ledger.js';
 
 const location=(file:UploadRecord)=>join(file.cwd,'.codex-mobile-attachments',file.id,file.name);
@@ -12,7 +12,9 @@ function record(ledger:Ledger,threadId:string,id:string):UploadRecord {
   return file;
 }
 async function checkedPath(path:string) {
-  if(await realpath(path)!==resolve(path))throw new BridgeError('invalid','附件路径已变化，请重新上传');
+  const canonical=await realpath(path);
+  assertInsideWorkspace(canonical);
+  if(canonical!==resolve(path))throw new BridgeError('invalid','附件路径已变化，请重新上传');
   return path;
 }
 async function uploadFile(file:UploadRecord,mode:'r'|'r+') {
@@ -33,7 +35,7 @@ export async function startUpload(ledger:Ledger,threadId:string,cwd:string,value
   if(old&&(old.threadId!==threadId||old.cwd!==project||old.name!==file.name||old.size!==file.size))throw new BridgeError('conflict','上传内容或会话已变化，请重新选择文件');
   const stored:UploadRecord={...file,threadId,cwd:project};
   if(!old){
-    const root=join(project,'.codex-mobile-attachments');await mkdir(root,{recursive:true});await checkedPath(root);
+    const root=join(project,'.codex-mobile-attachments');await checkProjectPath(root);await mkdir(root,{recursive:true});await checkedPath(root);
     const dir=join(root,file.id);await mkdir(dir);await checkedPath(dir);
     // Record before creating the file so a restart can resume the same upload ID.
     ledger.addUpload(stored);

@@ -13,9 +13,11 @@ export function switchRoute(machine: string, current: Route, next: Service): Rou
   return serviceHome(next);
 }
 
-export function ServiceSwitch({active, disabled, select}: {active: Service; disabled: boolean; select: (service: Service) => void}) {
+export function ServiceSwitch({active, available = SERVICE_IDS, disabled, select}: {
+  active: Service; available?: readonly Service[]; disabled: boolean; select: (service: Service) => void;
+}) {
   return <nav className="service-switch" aria-label="切换应用">
-    {SERVICE_IDS.map(service => <button type="button" key={service}
+    {available.map(service => <button type="button" key={service}
       aria-pressed={service === active} disabled={disabled} onClick={() => {if (service !== active) select(service);}}>
       {serviceLabel(service)}
     </button>)}

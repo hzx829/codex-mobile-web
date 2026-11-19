@@ -5,12 +5,13 @@ import {IconButton} from './icon-button';
 import {Icon} from './icons';
 import {useStableEvent} from './use-event';
 import {operationId} from './client';
+import {GuestProjectForm} from './claude-projects';
 import {clipboardImageFiles,readImageFiles,appendImages,pastedImage} from './attachments';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import type {Json,RequestAction,TurnView} from '../src/shared/types';
 
 type Props={
-  machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;
+  machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;guest?:boolean;
   /** Where a new session starts: a project folder or '' to choose; null while a saved session is open. */
   newCwd:string|null;created:(id:string)=>void;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;
@@ -28,7 +29,7 @@ function store(key:string,value:string){try{if(value)localStorage.setItem(key,va
 
 /** Claude Code sessions on the connected computer: live view, composer, approvals and questions. */
 export function ClaudeCodePanel(props:Props){
-  const {machine,machineName,connected,conversationId,newCwd,inert,previewError,call,go,openFile,openPreview,showFiles,showImage,copyText,clearPreviewError}=props;
+  const {machine,machineName,connected,conversationId,newCwd,inert,previewError,guest,call,go,openFile,openPreview,showFiles,showImage,copyText,clearPreviewError}=props;
   const creating=!conversationId;
   const scope=`claude:${machine}:${conversationId||'new'}`;
   const [view,setView]=useState<Json|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
@@ -52,8 +53,8 @@ export function ClaudeCodePanel(props:Props){
   useEffect(()=>{void refresh();},[connected,conversationId,refresh]);
   useEffect(()=>{
     if(!creating||!connected)return;
-    request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setTarget(old=>old||list[0]?.id||OTHER);}).catch(failed);
-  },[creating,connected]);
+    request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setTarget(old=>old||list[0]?.id||(guest?'':OTHER));}).catch(failed);
+  },[creating,connected,guest]);
   useEffect(()=>{
     if(!connected||!view?.revision)return;
     let active=true,inflight=false,timer:ReturnType<typeof setTimeout>;
@@ -150,7 +151,7 @@ export function ClaudeCodePanel(props:Props){
   const turns:TurnView[]=view?.turns||[];
   const requests:Request[]=view?.requests||[];
   const status=!connected?connectionLost:watchError||(pending&&busy?'正在等待电脑确认…':'');
-  const canWrite=connected&&!busy&&!pending&&(creating||Boolean(view));
+  const canWrite=connected&&!busy&&!pending&&(creating?(!guest||Boolean(startPath)):Boolean(view));
   const title=creating?'新的 Claude Code 会话':view?.title||'正在打开…';
   const project=creating?(startPath?workspaceName(startPath):'选择项目'):view?.cwd?workspaceName(view.cwd):'Claude Code';
   const modelLabel=(models||[]).find(item=>item.id===model)?.label||model;
@@ -162,12 +163,14 @@ export function ClaudeCodePanel(props:Props){
     <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={()=>{const el=scroll.current!;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;}}><div className="timeline-content">
       {creating?<div className="new-chat-welcome"><h1>交给 Claude Code</h1>
         <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} onChange={e=>setTarget(e.target.value)}>
-          {!target&&<option value="">正在读取项目…</option>}
+          {!target&&<option value="">{guest?'选择或新建项目':'正在读取项目…'}</option>}
           {places.map(place=><option key={place.id} value={place.id}>{workspaceName(place.path)}</option>)}
           {chosen&&!places.includes(chosen as Place)&&<option value={chosen.id}>{workspaceName(chosen.path)}</option>}
-          <option value={OTHER}>其他文件夹…</option>
+          {!guest&&<option value={OTHER}>其他文件夹…</option>}
         </select></label>
-        {target===OTHER&&<label className="claude-project"><input autoFocus aria-label="文件夹路径" placeholder="电脑上的完整路径" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>}
+        {guest?<details className="other-project" open={!startPath||undefined}><summary>新建项目</summary>
+          <GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setPlaces(old=>old.some(item=>item.id===path)?old:[...old,{id:path,path}]);setTarget(path);}}/>
+        </details>:target===OTHER&&<label className="claude-project"><input autoFocus aria-label="文件夹路径" placeholder="电脑上的完整路径" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>}
         {startPath&&<p className="muted">{startPath}</p>}</div>:<>
         {view?.truncated&&<p className="muted">仅显示近期记录，完整会话可在电脑查看。</p>}
         {!view&&busy&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}

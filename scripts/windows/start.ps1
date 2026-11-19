@@ -12,17 +12,22 @@ if(-not(Test-Path -LiteralPath '.local\config.json')){
 $settings=Get-Content -LiteralPath '.local\config.json' -Raw -Encoding UTF8 | ConvertFrom-Json
 if($Mode -eq 'auto'){$Mode=if($settings.mode){$settings.mode}else{'all'}}
 if($Mode -notin @('all','connector','relay')){throw '启动方式无效，请重新配置'}
-& $nodePath 'build\setup.mjs' --refresh-page
-if($LASTEXITCODE -ne 0){throw '连接页面生成失败，请检查配置'}
+if($settings.guest){
+  if($Mode -ne 'connector' -or -not $NoOpen){throw 'Use the guest launcher for this package'}
+}else{
+  & $nodePath 'build\setup.mjs' --refresh-page
+  if($LASTEXITCODE -ne 0){throw '连接页面生成失败，请检查配置'}
+}
 New-Item -ItemType Directory -Force -Path '.local' | Out-Null
 $entries=if($Mode -eq 'all'){@('relay','connector')}else{@($Mode)}
+$processError=if($settings.guest){'Stop'}else{'SilentlyContinue'}
 foreach($entry in $entries){
   $modulePath=Join-Path $projectRoot "build\$entry.mjs"
   $pidFile=Join-Path $projectRoot ".local\$entry.pid"
   if(Test-Path -LiteralPath $pidFile){
     $existingId=Get-Content -LiteralPath $pidFile
     if($existingId -notmatch '^\d+$'){throw 'Invalid process record'}
-    $existing=Get-CimInstance Win32_Process -Filter "ProcessId=$existingId" -ErrorAction SilentlyContinue
+    $existing=Get-CimInstance Win32_Process -Filter "ProcessId=$existingId" -ErrorAction $processError
     if($existing -and $existing.CommandLine -and $existing.CommandLine.Contains($modulePath)){Write-Output "$entry is already running";continue}
   }
   $proc=Start-Process -FilePath $nodePath -ArgumentList @('--disable-warning=ExperimentalWarning',('"'+$modulePath+'"')) -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput ".local\$entry.log" -RedirectStandardError ".local\$entry.error.log" -PassThru

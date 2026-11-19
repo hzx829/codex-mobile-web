@@ -4,7 +4,10 @@ export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | '
 export type AntigravityModel = {id:string; label:string};
 export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; text:string};
 export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'};
-export type RequestAction = AntigravityAction | ClaudeAction | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
+export const bridgeServices = ['codex', 'antigravity', 'claude'] as const;
+export type BridgeService = typeof bridgeServices[number];
+export type Machine = {id: string; name: string; guest?: boolean; services?: BridgeService[]};
+export type RequestAction = AntigravityAction | ClaudeAction | 'project.create' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
 export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string }

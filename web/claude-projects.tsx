@@ -5,6 +5,32 @@ import type {Json,RequestAction} from '../src/shared/types';
 type Props={folder:string;connected:boolean;call:(action:RequestAction,payload?:Json)=>Promise<any>;done:()=>void};
 type Settings={claudeMd:string;instructions:string|null;mcpFile:string;mcpServers:string;memoryDir:string;memoryIndex:string;memoryFiles:string[];revision:string};
 
+export function GuestProjectForm({connected, call, select}: {
+  connected: boolean;
+  call: Props['call'];
+  select: (path: string) => void;
+}) {
+  const [name,setName]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+  const alive=useRef(true),pending=useRef(false);
+  useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
+  async function create(){
+    if(pending.current||!connected||!name.trim())return;
+    pending.current=true;setBusy(true);setError('');
+    try {
+      const result=await call('project.create',{name,opId:operationId()});
+      if(!alive.current)return;
+      if(result.state!=='accepted'||typeof result.path!=='string')throw Error(result.error?.message||'结果待核实，请刷新项目列表。');
+      setName('');select(result.path);
+    }catch(failure){if(alive.current)setError((failure as Error).message||'无法新建项目');}
+    finally{pending.current=false;if(alive.current)setBusy(false);}
+  }
+  return <form onSubmit={event=>{event.preventDefault();void create();}}>
+    <label>项目名称<input value={name} onChange={event=>setName(event.target.value)} maxLength={80} required disabled={busy}/></label>
+    {error&&<p className="error" role="alert">{error}</p>}
+    <button className="primary" disabled={!connected||busy||!name.trim()}>{busy?'正在创建…':'新建项目'}</button>
+  </form>;
+}
+
 /**
  * A Claude Code project is a folder; its settings are Claude Code's own files there,
  * so the terminal and the desktop app use the same instructions and MCP servers.

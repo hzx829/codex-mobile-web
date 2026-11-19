@@ -22,6 +22,31 @@ function waitFrame(ws:WebSocket,predicate:(v:any)=>boolean):Promise<any>{return 
   const listen=(b:any)=>{const value=JSON.parse(b.toString());if(predicate(value)){clearTimeout(timer);ws.off('message',listen);resolve(value);}};ws.on('message',listen);
 });}
 
+test('a guest token registers only its bound connector', async () => {
+  const token = 'main-fixture-token-for-guest-tests', restricted = 'guest-fixture-token-for-guest-tests';
+  const relay = createRelay(token, undefined, 0, [{machineId: 'guest-pc', token: restricted}]);
+  relay.server.listen(0, '127.0.0.1');await once(relay.server, 'listening');
+  const url = `ws://127.0.0.1:${(relay.server.address() as any).port}/ws`;
+  async function hello(fields: object, accept: boolean) {
+    const socket = new WebSocket(url);
+    await once(socket, 'open');
+    const result = accept ? waitFrame(socket, frame => frame.type === 'ready') : once(socket, 'close');
+    socket.send(JSON.stringify({type: 'hello', name: 'fixture', ...fields}));
+    return result;
+  }
+  try {
+    await hello({role: 'connector', token, machineId: 'personal'}, true);
+    assert.equal((await hello({role: 'phone', token: restricted, machineId: 'guest-pc'}, false))[0], 4401);
+    assert.equal((await hello({role: 'connector', token: restricted, machineId: 'personal'}, false))[0], 4401);
+    await hello({role: 'connector', token: restricted, machineId: 'guest-pc', guest: true, services: ['claude', 'claude', 'unknown']}, true);
+    const phone = await hello({role: 'phone', token}, true);
+    assert.deepEqual(phone.machines, [
+      {id: 'personal', name: 'fixture'},
+      {id: 'guest-pc', name: 'fixture', guest: true, services: ['claude']},
+    ]);
+  } finally {await relay.close();}
+});
+
 async function httpRequest(url:string,options:{method?:string;headers?:Record<string,string>;body?:string;redirect?:string}={}){
   // These are protocol tests. Node HTTP accepts Windows' low ephemeral ports.
   return new Promise<{status:number;headers:Headers;bytes:Buffer;text:()=>Promise<string>;json:()=>Promise<any>}>((resolve,reject)=>{
