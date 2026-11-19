@@ -23,7 +23,7 @@ const run = promisify(execFile);
 let launcher: ((action: string) => Promise<unknown>) | undefined;
 try {
   await mkdir(output);await mkdir(ownerCodex, {recursive: true});await mkdir(ownerClaude);
-  execFileSync('tar.exe', ['-xf', archive, '-C', output], {windowsHide: true});
+  execFileSync(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-xf', archive, '-C', output], {windowsHide: true});
   const roots = await readdir(output);
   assert.equal(roots.length, 1);
   const home = join(output, roots[0]), local = join(home, '.local'), configPath = join(local, 'config.json');

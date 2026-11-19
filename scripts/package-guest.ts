@@ -121,7 +121,8 @@ const revision = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {encoding
 const dirty = execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}).trim();
 await writeFile(join(target, 'VERSION.txt'), `Codex Mobile Web guest\nSource ${revision}${dirty?' (uncommitted changes)':''}\nNode ${process.version}\nWindows ${process.arch}\n`);
 // Windows Compress-Archive can omit hidden entries. BSD tar retains .local/config.json.
-execFileSync('tar.exe', ['-a', '-cf', archive, '-C', dirname(target), basename(target)], {windowsHide: true, stdio: 'pipe', timeout: 180000});
+// The system tar (bsdtar): from Git Bash a bare `tar.exe` is GNU tar, which reads `C:` as a remote host.
+execFileSync(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-a', '-cf', archive, '-C', dirname(target), basename(target)], {windowsHide: true, stdio: 'pipe', timeout: 180000});
 const hash = createHash('sha256').update(await readFile(archive)).digest('hex');
 await writeFile(archive + '.sha256', `${hash}  ${basename(archive)}\n`);
 if (tokenOut) await writeFile(tokenOut, json({connectorTokens: [binding]}), {flag: 'wx', mode: 0o600});
