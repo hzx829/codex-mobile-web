@@ -50,7 +50,7 @@ function connect() {
   ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname()}));
   ws.on('message',async data=>{
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
-    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;console.log('电脑已连接中继');return;}
+    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');console.log('电脑已连接中继');return;}
     if(!ready)return;
     if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
     if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
@@ -72,11 +72,25 @@ function connect() {
     retry=setTimeout(connect,backoff+Math.random()*500);backoff=Math.min(15_000,backoff*2);
   });
 }
+// Structural changes ask phones to read again; bursts within this window share one notice.
+const CHANGE_DELAY=60;
+// Running-turn content is pushed; frames within this window are merged into one.
+const LIVE_DELAY=40;
+const liveIds=new Set<string>();let liveTimer:NodeJS.Timeout|undefined;
+function scheduleLive(id:string){
+  liveIds.add(id);if(liveTimer)return;
+  liveTimer=setTimeout(()=>{
+    liveTimer=undefined;const ids=[...liveIds];liveIds.clear();
+    for(const threadId of ids){try{const frame=control.liveFrame(threadId);if(frame)send({type:'live',...frame});}catch{}}
+  },LIVE_DELAY);
+}
+control.on('stream',(id:string)=>scheduleLive(id));
 control.on('change',(id:string|null)=>{
+  if(id)scheduleLive(id);
   dirtyIds.add(id);if(dirty)return;
-  dirty=setTimeout(()=>{dirty=undefined;try{for(const threadId of dirtyIds)send({type:'changed',threadId,generation:control.generation});}catch{}dirtyIds.clear();},200);
+  dirty=setTimeout(()=>{dirty=undefined;try{for(const threadId of dirtyIds)send({type:'changed',threadId,generation:control.generation});}catch{}dirtyIds.clear();},CHANGE_DELAY);
 });
 connect();
 // Keep the relay connection independent of Codex startup and recovery.
 void control.start().catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);void browserPreview.stop();services.close();socket?.close();control.close();process.exit(0);});
+for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();services.close();socket?.close();control.close();process.exit(0);});

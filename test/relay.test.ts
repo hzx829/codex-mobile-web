@@ -236,3 +236,29 @@ test('a disconnected pending preview only cleans up its own session, leaving the
     assert.equal(entry.status,302);
   }finally{await relay.close();}
 });
+
+test('live frames reach only the phone watching that thread, and phone frames are compressed',async()=>{
+  const token='test-token-not-a-real-secret-123456789';const relay=createRelay(token);relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');
+  const url=`ws://127.0.0.1:${(relay.server.address() as any).port}/ws`;
+  async function peer(role:string){const ws=new WebSocket(url);await once(ws,'open');const ready=waitFrame(ws,m=>m.type==='ready');ws.send(JSON.stringify({type:'hello',role,token,machineId:'pc',name:'PC'}));assert.deepEqual((await ready).features,['live']);return ws;}
+  try{
+    const connector=await peer('connector');
+    connector.on('message',raw=>{const m=JSON.parse(raw.toString());if(m.type==='request')connector.send(JSON.stringify({type:'response',id:m.id,result:{id:m.payload.threadId,text:'x'.repeat(50_000)}}));});
+    const watching=await peer('phone'),other=await peer('phone');
+    assert.ok(Object.keys((watching as any)._extensions||{}).includes('permessage-deflate'),'Phones negotiate compression.');
+    const read=waitFrame(watching,m=>m.type==='response'&&m.id==='read');
+    watching.send(JSON.stringify({type:'request',id:'read',machineId:'pc',action:'session.read',payload:{threadId:'a',watch:true}}));
+    assert.equal((await read).result.text.length,50_000);
+    other.send(JSON.stringify({type:'watch',machineId:'pc',threadId:'b'}));await new Promise(r=>setTimeout(r,20));
+    const seen:string[]=[];other.on('message',raw=>{const m=JSON.parse(raw.toString());if(m.type==='live')seen.push(m.threadId);});
+    const frame=waitFrame(watching,m=>m.type==='live');
+    connector.send(JSON.stringify({type:'live',threadId:'a',generation:'g',turnId:'u',ops:[{i:'1',o:0,t:'hi'}]}));
+    assert.deepEqual(await frame,{type:'live',threadId:'a',generation:'g',turnId:'u',ops:[{i:'1',o:0,t:'hi'}],machineId:'pc'});
+    const second=waitFrame(other,m=>m.type==='live');
+    connector.send(JSON.stringify({type:'live',threadId:'b',generation:'g',turnId:'u',ops:[]}));
+    await second;assert.deepEqual(seen,['b']);
+    other.send(JSON.stringify({type:'watch',machineId:null,threadId:null}));await new Promise(r=>setTimeout(r,20));
+    connector.send(JSON.stringify({type:'live',threadId:'b',generation:'g',turnId:'u',ops:[]}));await new Promise(r=>setTimeout(r,50));
+    assert.deepEqual(seen,['b'],'Leaving the thread stops its frames.');
+  }finally{await relay.close();}
+});

@@ -7,12 +7,23 @@ import { BridgeError, type Json } from '../shared/types.js';
 
 // Protocol versions verified against Codex Desktop 26.901.6511.0. See SOURCES.md.
 const versions: Record<string, number> = { 'thread-stream-state-changed': 11, 'thread-follower-start-turn': 2, 'thread-follower-interrupt-turn': 4, 'thread-follower-edit-last-user-turn': 2, 'thread-follower-update-thread-settings': 2 };
+/**
+ * Applies JSON patches without touching `state`. Only containers on a patched path
+ * are copied, so untouched turns keep their identity and a token-sized text patch
+ * does not clone the whole conversation.
+ */
 export function applyPatches(state: Json, patches: Json[]) {
-  const next = structuredClone(state);
+  const copied = new Set<object>();
+  const copy = (value: any) => { const next = Array.isArray(value) ? [...value] : { ...value }; copied.add(next); return next; };
+  const next = copy(state);
   for (const p of patches) {
     if (!Array.isArray(p.path) || !p.path.length || p.path.some((k: unknown) => ['__proto__','constructor','prototype'].includes(String(k)))) throw new Error('invalid_patch');
     let parent: any = next;
-    for (const key of p.path.slice(0,-1)) { parent = parent?.[key]; if (!parent || typeof parent !== 'object') throw new Error('missing_patch_baseline'); }
+    for (const key of p.path.slice(0,-1)) {
+      const child = parent?.[key];
+      if (!child || typeof child !== 'object') throw new Error('missing_patch_baseline');
+      parent = copied.has(child) ? child : (parent[key] = copy(child));
+    }
     const key = p.path.at(-1);
     if (Array.isArray(parent)) {
       if (!Number.isInteger(key) || key < 0 || key > parent.length) throw new Error('invalid_patch_index');
@@ -112,15 +123,17 @@ export class Desktop extends EventEmitter {
     if(e.method==='thread-stream-state-changed') {
       const {conversationId:id,hostId,change:c}=e.params||{}, previous=this.states.get(id);
       if(!id||!c) return;
+      let patches:Json[]|null=null;
       if(c.type==='snapshot') {
         if(previous && previous.owner===e.sourceClientId && c.revision<previous.revision) return;
         this.states.set(id,{state:c.conversationState,revision:c.revision,owner:e.sourceClientId,hostId});
       } else if(c.type==='patches') {
         if(!previous || previous.owner!==e.sourceClientId || previous.revision!==c.baseRevision) {this.states.delete(id);this.emit('resync',id);return;}
-        try {this.states.set(id,{...previous,state:applyPatches(previous.state,c.patches),revision:c.revision});}
+        try {this.states.set(id,{...previous,state:applyPatches(previous.state,c.patches),revision:c.revision});patches=Array.isArray(c.patches)?c.patches:null;}
         catch {this.states.delete(id);this.emit('resync',id);return;}
       }
-      this.emit('change',id);
+      // Listeners that only need the thread ID ignore the detail.
+      this.emit('change',id,{patches,previous:patches?previous!.state:null});
     }
     this.emit('envelope',e);
   }

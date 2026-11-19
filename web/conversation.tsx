@@ -4,10 +4,18 @@ import {SafeMarkdown} from './content';
 import {groupItems} from './activity';
 import {Icon} from './icons';
 import {IconButton} from './icon-button';
+import type {OptimisticMessage} from './optimistic';
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const statusLabel:Record<string,string>={inProgress:'进行中',completed:'已完成',interrupted:'已停止',failed:'失败'};
 const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划',fileRead:'读取文件',codeSearch:'搜索代码',subagent:'子任务',toolCall:'使用工具'};
 
+/** A sent message, shown until the conversation contains it. */
+export function PendingMessage({message,openFile,openPreview,onFollowup}:{message:OptimisticMessage;openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(text:string)=>void}){
+  return <section className="turn pending-turn"><div className="user-entry">
+    <article className="message user">{message.text&&<SafeMarkdown text={message.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>}{message.images.map((url,i)=><img className="attachment" key={i} src={url} alt="附图" decoding="async"/>)}{message.fileNames.length>0&&<p className="pending-files"><Icon name="file" size={14}/>{message.fileNames.join('、')}</p>}</article>
+    <div className="pending-status" role="status">{message.state==='uncertain'?'结果待核实':'正在发送…'}</div>
+  </div></section>;
+}
 export const connectionLost='与电脑的连接中断，正在重连…';
 export function ConversationStatus({children}:{children:ReactNode}) {
   return <p className="message conversation-status" role="status">{children}</p>;

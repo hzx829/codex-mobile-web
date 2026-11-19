@@ -9,12 +9,15 @@ import {ServiceSwitch, switchRoute} from './service-switch';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,withConversation,type Service} from './services';
 import {Icon,type IconName} from './icons';
 import {IconButton} from './icon-button';
-import {connectionLost,ConversationStatus,ConversationTurn} from './conversation';
+import {connectionLost,ConversationStatus,ConversationTurn,PendingMessage} from './conversation';
 import {RequestCard} from './content';
 import {createFirstTurn} from './new-chat';
 import {SessionListLoader} from './session-list-loader';
 import {HISTORY_PAGE_SIZE,refreshHistory,prependHistory} from './thread-history';
 import {knownSnapshot,restoreSnapshot} from './session-snapshot';
+import {applyLiveFrames,keepLiveText,type LiveFrame} from './live';
+import {OPTIMISTIC_ACCEPTED_MS,optimisticDelivered,optimisticMessage,type OptimisticMessage} from './optimistic';
+import {cachedList,cachedProjects,cachedView,clearCache,flushCache,loadCache,rememberList,rememberProjects,rememberView,type CachedView} from './session-cache';
 import {BrowserPreviewPanel,WebViewer,type PreviewSession} from './browser-preview';
 import {belongsToThread,defaultPreviewUrl,openThreadPreview,previewUrlKey} from './thread-preview';
 import {PreviewPane,useCompactPreview} from './preview-pane';
@@ -49,6 +52,7 @@ const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:'网页预览';
 function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('token');if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
 const savedLocation=initialLocation();
+const listKey=(machine:string,project:string,archived:boolean)=>`${machine}:${project}:${archived?'archived':'recent'}`;
 type PreviewTab={id:number;target:PreviewTarget};
 type Sheet='home'|'computer'|'projects'|'approval'|'add'|'file'|'browser'|'voice'|null;
 
@@ -71,6 +75,8 @@ function App(){
   const viewRef=useRef(view);useLayoutEffect(()=>{viewRef.current=view;},[view]);
   const [draft,setDraft]=useState(''),[images,setImages]=useState<string[]>([]),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[approval,setApproval]=useState(''),[newCwd,setNewCwd]=useState('');
   const [files,setFiles]=useState<DraftFileAttachment[]>([]),filesRef=useRef(files);filesRef.current=files;
+  const [optimistic,setOptimistic]=useState<OptimisticMessage|null>(null),optimisticRef=useRef(optimistic);optimisticRef.current=optimistic;
+  const everOnline=useRef(false);if(status==='online')everOnline.current=true;
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   const documentInput=useRef<HTMLInputElement>(null);
   const draftSave=useRef(new DraftSave(save));
@@ -93,6 +99,7 @@ function App(){
   const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived,service}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),timelineContent=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),fileInput=useRef<HTMLInputElement>(null),submitting=useRef(false);
   const scrollAnchor=useRef<{element:HTMLElement;top:number}|null>(null),lastScrollTop=useRef(0),olderRequest=useRef<object|null>(null);
+  const liveFrames=useRef<LiveFrame[]>([]),liveFrame=useRef(0);
   current.current={machine,selected,project,newChat,searchQuery,archived,service};
   const connected=status==='online'&&machines.some(m=>m.id===machine),machineName=machines.find(m=>m.id===machine)?.name||'电脑';
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
@@ -129,7 +136,7 @@ function App(){
     if(refreshing.current){again.current=true;return;}
     const c={...current.current};if(c.service!=='codex'||!c.machine||!c.selected||!client.current?.ready)return;
     const seq=sequence.current,previous=viewRef.current;refreshing.current=true;
-    try{const snapshot=await call('session.read',{threadId:c.selected,limit:HISTORY_PAGE_SIZE,known:previous?.id===c.selected?knownSnapshot(previous):undefined},c.machine);if(seq===sequence.current&&c.machine===current.current.machine&&c.selected===current.current.selected){const next=restoreSnapshot(previous,snapshot);startTransition(()=>{setView(old=>refreshHistory(old,next));setLoading(false);});}}
+    try{const snapshot=await call('session.read',{threadId:c.selected,limit:HISTORY_PAGE_SIZE,known:previous?.id===c.selected?knownSnapshot(previous):undefined,watch:true},c.machine);if(seq===sequence.current&&c.machine===current.current.machine&&c.selected===current.current.selected){const next=restoreSnapshot(previous,snapshot);startTransition(()=>{setView(old=>refreshHistory(old,keepLiveText(old,next)));setLoading(false);});}}
     catch(e){if(seq===sequence.current){fail(e);setLoading(false);}}
     finally{refreshing.current=false;if(again.current){again.current=false;void refreshSession();}}
   }
@@ -147,7 +154,17 @@ function App(){
     }catch(e:any){if(here())setHistoryError(e?.message||'加载失败，请重试');}
     finally{if(olderRequest.current===request){olderRequest.current=null;setLoadingOlder(false);}}
   }
-  function scheduleRefresh(){if(refreshTimer.current||document.visibilityState!=='visible')return;refreshTimer.current=setTimeout(()=>{refreshTimer.current=undefined;void refreshSession();},250);}
+  // Change notices arrive already batched by the connector; only merge ones that land together.
+  function scheduleRefresh(){if(refreshTimer.current||document.visibilityState!=='visible')return;refreshTimer.current=setTimeout(()=>{refreshTimer.current=undefined;void refreshSession();},16);}
+  function receiveLive(frame:LiveFrame){
+    // Hidden pages do not paint; the foreground refresh brings them up to date.
+    if(document.visibilityState!=='visible'){liveFrames.current=[];return;}
+    liveFrames.current.push(frame);if(liveFrame.current)return;
+    liveFrame.current=requestAnimationFrame(()=>{
+      liveFrame.current=0;const frames=liveFrames.current;liveFrames.current=[];
+      setView(old=>{const result=applyLiveFrames(old,frames);if(result.resync)scheduleRefresh();return result.view;});
+    });
+  }
   async function list(append=false,refresh=false){
     const c={...current.current};
     const key=(value:typeof c)=>JSON.stringify([value.service,value.machine,value.project,value.searchQuery,value.archived]);
@@ -157,6 +174,7 @@ function App(){
       result:r=>{
         if(!here())return;
         setSessions(old=>append?[...old,...r.data.filter((n:Json)=>!old.some(s=>s.id===n.id))]:r.data);setCursor(r.nextCursor);
+        if(!append&&!c.searchQuery)rememberList(listKey(c.machine,c.project,c.archived),r.data);
         setPreferences(old=>{if(old.machine!==c.machine)return old;const values=rememberThreads(old.values,r.data,c.archived);if(values===old.values)return old;save(`thread-preferences:${c.machine}`,values);return {...old,values};});
         setProjects(old=>[...new Set<string>([...old,...r.data.map((s:Json)=>s.cwd).filter(Boolean)])]);
       },
@@ -178,19 +196,24 @@ function App(){
   }
   useEffect(refreshInfo,[connected,machine,effectiveCwd,codexActive]);
   useEffect(()=>{const timer=setTimeout(()=>setSearchQuery(search.trim()),250);return()=>clearTimeout(timer);},[search]);
+  useEffect(()=>{if(searchQuery)return;const cached=cachedList(listKey(machine,project,archived));if(cached)setSessions(cached);},[machine,project,searchQuery,archived]);
   useEffect(()=>{if(connected&&codexActive)void list();},[connected,machine,project,searchQuery,archived,codexActive]);
+  useEffect(()=>{if(machine)setProjects(old=>old.length?old:cachedProjects(machine));},[machine]);
+  useEffect(()=>{if(projects.length)rememberProjects(machine,projects);},[projects]);
   useEffect(()=>{
     if(!token)return;
     const c=new Client(token,m=>{
       if(m.type==='ready'||m.type==='machines')setMachines(m.machines||m.data||[]);
       if(m.type==='changed'&&m.machineId===current.current.machine&&(!m.threadId||m.threadId===current.current.selected))scheduleRefresh();
+      if(m.type==='live'&&current.current.service==='codex'&&m.machineId===current.current.machine&&m.threadId===current.current.selected)receiveLive(m as LiveFrame);
     },setStatus);client.current=c;
-    return()=>{c.close();clearTimeout(refreshTimer.current);};
+    return()=>{c.close();clearTimeout(refreshTimer.current);cancelAnimationFrame(liveFrame.current);liveFrame.current=0;liveFrames.current=[];};
   },[token]);
   useEffect(()=>client.current?.onPreview(message=>{
     if(message.type==='preview.disconnected'||message.type==='preview.ended'&&message.sessionId===browserState?.sessionId){setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});}
   }),[token,browserState?.sessionId]);
   useEffect(()=>{if(!machine&&machines[0])setMachine(machines[0].id);},[machines,machine]);
+  useEffect(()=>{client.current?.watch(codexActive&&machine&&selected?{machineId:machine,threadId:selected}:null);},[token,machine,selected,codexActive]);
   useEffect(()=>{setPreferences({machine,values:load(`thread-preferences:${machine}`,{})});setThreadMenu(null);},[machine]);
   useEffect(()=>{
     draftSave.current.flush();
@@ -198,21 +221,41 @@ function App(){
     imageSequence.current++;imageLoad.current=null;setImageLoading(false);
     setFiles([]);setUploadProgress(null);
     setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
-    sequence.current++;setView(null);setLoading(Boolean(selected));olderRequest.current=null;setLoadingOlder(false);setHistoryError('');setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;lastScrollTop.current=0;
+    // Show the last known content at once; it stays marked as cached until the read below lands.
+    const cached=selected?cachedView(`${machine}:${selected}`):null;
+    sequence.current++;setView(cached);setLoading(Boolean(selected)&&!cached);olderRequest.current=null;setLoadingOlder(false);setHistoryError('');setImages([]);setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;lastScrollTop.current=0;
     setServiceTier(undefined);
-    setDraft(load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
+    // A message that is still being sent keeps its place when a new chat turns into its thread.
+    const sending=optimisticRef.current?.key===scope;setOptimistic(old=>old?.key===scope?old:null);
+    setDraft(sending?'':load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
   },[machine,selected,newChat]);
+  useEffect(()=>{if(view&&view.id===selected&&!(view as CachedView).cached)rememberView(`${machine}:${selected}`,view);},[view]);
   useEffect(()=>{
-    const flush=()=>draftSave.current.flush(),hidden=()=>{if(document.visibilityState==='hidden')flush();};
+    if(!optimistic?.acceptedAt)return;
+    if(optimistic.key===scope&&optimisticDelivered(optimistic,view)){setOptimistic(null);return;}
+    const timer=setTimeout(()=>setOptimistic(old=>old===optimistic?null:old),Math.max(0,optimistic.acceptedAt+OPTIMISTIC_ACCEPTED_MS-Date.now()));
+    return()=>clearTimeout(timer);
+  },[optimistic,view,scope]);
+  useEffect(()=>{
+    const flush=()=>{draftSave.current.flush();void flushCache();},hidden=()=>{if(document.visibilityState==='hidden')flush();};
     window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',hidden);
     return()=>{flush();window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',hidden);};
   },[]);
   useEffect(()=>{void refreshSession();},[connected,codexActive]);
   useEffect(()=>{
     const viewport=window.visualViewport;if(!viewport)return;
-    const resize=()=>{if(viewport.scale!==1)return;document.documentElement.style.setProperty('--viewport-height',`${viewport.height}px`);document.documentElement.style.setProperty('--viewport-top',`${viewport.offsetTop}px`);};
-    resize();viewport.addEventListener('resize',resize);viewport.addEventListener('scroll',resize);
-    return()=>{viewport.removeEventListener('resize',resize);viewport.removeEventListener('scroll',resize);};
+    // Keyboard animations fire these events continuously. Write once per frame, and only
+    // when a value changed, so the whole page is not laid out again for nothing.
+    let frame=0,height='',top='';
+    const apply=()=>{
+      frame=0;if(viewport.scale!==1)return;
+      const nextHeight=`${viewport.height}px`,nextTop=`${viewport.offsetTop}px`,style=document.documentElement.style;
+      if(nextHeight!==height){height=nextHeight;style.setProperty('--viewport-height',nextHeight);}
+      if(nextTop!==top){top=nextTop;style.setProperty('--viewport-top',nextTop);}
+    };
+    const resize=()=>{if(!frame)frame=requestAnimationFrame(apply);};
+    apply();viewport.addEventListener('resize',resize);viewport.addEventListener('scroll',resize);
+    return()=>{cancelAnimationFrame(frame);viewport.removeEventListener('resize',resize);viewport.removeEventListener('scroll',resize);};
   },[]);
   useLayoutEffect(()=>{const el=timeline.current;if(!el)return;const anchor=scrollAnchor.current;scrollAnchor.current=null;if(anchor?.element.isConnected)el.scrollTop+=anchor.element.getBoundingClientRect().top-anchor.top;else if(sticky.current)el.scrollTop=el.scrollHeight;lastScrollTop.current=el.scrollTop;},[view?.turns,loadingOlder]);
   useEffect(()=>{
@@ -226,8 +269,10 @@ function App(){
   useEffect(()=>{setPreviewState(old=>{let changed=false;const tabs=old.tabs.flatMap(tab=>{if(tab.target.kind!=='image')return [tab];const index=images.indexOf(tab.target.url);if(index<0){changed=true;return [];}const title=`待发送图片 ${index+1}/${images.length}`;if(title!==tab.target.title){changed=true;return [{...tab,target:{...tab.target,title}}];}return [tab];});if(!changed)return old;return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});},[images]);
   useEffect(()=>{
     if(!connected||!codexActive)return;
+    // A safety net for missed notices: the open thread also renews its live watch here.
+    let ticks=0;
     const foreground=()=>{if(document.visibilityState!=='visible')return;if(current.current.selected)void refreshSession();else void list();};
-    const timer=setInterval(foreground,5000);document.addEventListener('visibilitychange',foreground);
+    const timer=setInterval(()=>{if(current.current.selected&&++ticks%2)return;foreground();},5000);document.addEventListener('visibilitychange',foreground);
     return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',foreground);};
   },[connected,project,searchQuery,archived,codexActive]);
   useEffect(()=>{if(codexActive&&connected&&pending&&!busy)void checkPending();},[connected,pending?.opId,busy,codexActive]);
@@ -250,6 +295,7 @@ function App(){
       setOperation(null);if(stillHere()){setDraft('');navigate({...route,thread:result.threadId,newChat:false},true);setNotice(record.imageCount||record.fileCount?'会话已建立，文字已保留；附件请重新选择后发送。':'会话已建立，输入已保留，请点击发送。');}return;
     }
     if(record.action==='turn.send'&&load(draftKey,'')===record.submittedText){save(draftKey,'');if(stillHere()){setDraft('');setImages([]);setFiles([]);}}
+    if(record.action==='turn.send')setOptimistic(old=>old?.key===scope?{...old,state:'sending',acceptedAt:old.acceptedAt||Date.now()}:old);
     if(result.kind==='queue_withdrawn'&&result.message){
       const message=result.message,text=[load(draftKey,''),message.text].filter(Boolean).join('\n\n');
       save(draftKey,text);
@@ -266,23 +312,35 @@ function App(){
   }
   async function checkPending(){
     const record=load(pendingKey,null);if(!record||!connected)return;
-    try{const r=await call('operation.read',{opId:record.opId});if(r.state==='accepted')accepted(record,r);else if(r.state==='failed'){setOperation(null);if(stillHere())setError(r.error?.message||'请求未执行');}else if(stillHere())setNotice('结果待核实，系统不会自动重发。');}catch{}
+    try{const r=await call('operation.read',{opId:record.opId});if(r.state==='accepted')accepted(record,r);else if(r.state==='failed'){setOperation(null);if(stillHere()){setError(r.error?.message||'请求未执行');if(record.action==='turn.send')restoreOptimistic();}}else if(stillHere())setNotice('结果待核实，系统不会自动重发。');}catch{}
   }
-  async function mutate(action:RequestAction,payload:Json){
+  async function mutate(action:RequestAction,payload:Json):Promise<'accepted'|'failed'|'uncertain'|undefined>{
     if(busy||pending)return;
     draftSave.current.flush();
     const record={opId:operationId(),action,submittedText:action==='turn.send'||action==='turn.edit'?payload.text:undefined};
     setBusy(true);setError('');setNotice(action==='turn.send'?'':'正在提交…');setOperation(record);
     try{
       const result=await call(action,{...payload,opId:record.opId});
-      if(result.state==='accepted')accepted(record,result);
-      else if(result.state==='failed'){setOperation(null);if(stillHere()){setNotice('');setError(result.error?.message||'请求未执行');}}
+      if(result.state==='accepted'){accepted(record,result);return 'accepted';}
+      else if(result.state==='failed'){setOperation(null);if(stillHere()){setNotice('');setError(result.error?.message||'请求未执行');}return 'failed';}
       else if(stillHere())setNotice('结果待核实，请查看最新任务状态。');
-    }catch(e:any){if(e.uncertain){if(stillHere())setNotice('恢复连接后会查询这次操作的结果。');}else{setOperation(null);if(stillHere()){setNotice('');fail(e);}}}
+      return 'uncertain';
+    }catch(e:any){if(e.uncertain){if(stillHere())setNotice('恢复连接后会查询这次操作的结果。');return 'uncertain';}else{setOperation(null);if(stillHere()){setNotice('');fail(e);}return 'failed';}}
     finally{setBusy(false);}
   }
   const target=()=>({threadId:view!.id,source:view!.source,generation:view!.generation,expectedTurnId:view!.activeTurnId});
   function startNew(){if(!connected||busy)return;setNewCwd(project||view?.cwd||info?.roots?.[0]||'');navigate({...route,thread:'',newChat:true});}
+  function restoreOptimistic(){
+    setOptimistic(old=>old?.key===scope?null:old);
+    // The stored draft keeps the text until the send is accepted.
+    setDraft(old=>old.trim()?old:load(draftKey,''));
+  }
+  function settleOptimistic(message:OptimisticMessage,outcome:'accepted'|'failed'|'uncertain'|undefined){
+    if(outcome==='accepted')setOptimistic(old=>old?.at===message.at?{...old,state:'sending',acceptedAt:old.acceptedAt||Date.now()}:old);
+    else if(outcome==='uncertain')setOptimistic(old=>old?.at===message.at?{...old,state:'uncertain'}:old);
+    else if(optimisticRef.current?.at===message.at&&stillHere())restoreOptimistic();
+    else setOptimistic(old=>old?.at===message.at?null:old);
+  }
   async function submit(){
     if(submitting.current||!connected||busy||pending||imageLoading||voiceBusy||!draft.trim()&&!images.length&&!files.length)return;
     if(images.length&&!canImage){setError('当前模型未确认图片能力，请更换模型或移除图片');return;}
@@ -295,33 +353,46 @@ function App(){
     draftSave.current.flush();
     if(!newChat){
       if(!canWrite)return;
+      // Queued messages appear in the queue; everything else appears in the conversation now.
+      const message=queueNext?null:optimisticMessage(scope,view,draft,images,files.map(file=>file.name));
+      if(message){setOptimistic(message);setDraft('');}
       setBusy(true);setError('');
+      let outcome:'accepted'|'failed'|'uncertain'|undefined;
       try{
         const uploaded=await uploadAttachments(call,selected,files,value=>{if(stillHere())setUploadProgress(value);});
-        if(stillHere())await submitTurn(mutate,target(),draft,images,{model,effort,approvalPolicy:approval,serviceTier},queueNext?'queue':'steer',uploaded);
-      }catch(error){if(stillHere())fail(error);}
+        if(stillHere())outcome=await submitTurn(mutate,target(),draft,images,{model,effort,approvalPolicy:approval,serviceTier},queueNext?'queue':'steer',uploaded);
+      }catch(error){if(stillHere())fail(error);outcome='failed';}
       finally{setBusy(false);setUploadProgress(null);}
+      if(message)settleOptimistic(message,outcome);
       return;
     }
     const createId=operationId(),sendId=operationId(),text=draft,creating={opId:createId,action:'session.create',submittedText:text,imageCount:images.length,fileCount:files.length};
     let createdThread='';
+    const message=optimisticMessage(scope,null,text,images,files.map(file=>file.name));
+    setOptimistic(message);setDraft('');
     setBusy(true);setError('');setNotice('');setOperation(creating);
     const result=await createFirstTurn((action,payload)=>call(action,payload),{cwd:newCwd,text,images,files,model,effort,approvalPolicy:approval,serviceTier,createId,sendId},id=>{
       createdThread=id;
       save(`draft:${machine}:${id}`,text);save(`operation:${machine}:${id}`,{opId:sendId,action:'turn.send',submittedText:text});
       save(draftKey,'');setOperation(null);
+      setOptimistic(old=>old?.at===message.at?{...old,key:`${machine}:${id}`}:old);
       if(stillHere()&&current.current.newChat)navigate({...route,thread:id,newChat:false},true);
     },value=>{if(current.current.machine===machine&&current.current.selected===createdThread)setUploadProgress(value);},opId=>{
       const record={opId,action:'turn.send',submittedText:text};save(`operation:${machine}:${createdThread}`,record);
       if(current.current.machine===machine&&current.current.selected===createdThread)setPending(record);
     });
-    const id=result.threadId||'',key=`operation:${machine}:${id}`;
+    const id=result.threadId||'',key=`operation:${machine}:${id}`,here=current.current.machine===machine&&current.current.selected===id;
     if(result.result.state==='accepted'){
       save(key,null);save(`draft:${machine}:${id}`,'');
-      if(current.current.machine===machine&&current.current.selected===id){setPending(null);setDraft('');setImages([]);setFiles([]);setNotice('');}
+      if(here){setPending(null);setDraft('');setImages([]);setFiles([]);setNotice('');}
+      setOptimistic(old=>old?.at===message.at?{...old,acceptedAt:Date.now()}:old);
     }else if(result.result.state==='failed'){
-      save(key,null);if(current.current.machine===machine&&current.current.selected===id){setPending(null);setNotice('');setImages(images);setFiles(files);setError(result.result.error?.message||'发送失败，输入和附件已保留，请重试');}
-    }else if(current.current.machine===machine&&current.current.selected===id)setNotice('结果待核实，系统不会自动重发。');
+      save(key,null);if(here){setPending(null);setNotice('');setImages(images);setFiles(files);setDraft(old=>old.trim()?old:text);setError(result.result.error?.message||'发送失败，输入和附件已保留，请重试');}
+      setOptimistic(old=>old?.at===message.at?null:old);
+    }else{
+      if(here)setNotice('结果待核实，系统不会自动重发。');
+      setOptimistic(old=>old?.at===message.at?{...old,state:'uncertain'}:old);
+    }
     setBusy(false);setUploadProgress(null);void refreshSession();void list();
   }
   function fileRequest(action:'read'|'download',ownerMachine:string,threadId:string,payload:Json){
@@ -379,7 +450,7 @@ function App(){
     catch(error){e.preventDefault();fail(error);}
   }
   function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');const next=id?serviceHome(service):home;history.replaceState({cmwRoute:next,cmwMachine:id},'',location.pathname);rememberLocation(next,id);setMachine(id);setRoute(next);}
-  function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);changeMachine('');}
+  function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);void clearCache();changeMachine('');}
   async function copyText(text:string){
       if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
       else {
@@ -427,8 +498,12 @@ function App(){
   const modelLabel=modelDisplayName(modelInfo,selection.id)||'选择模型';
   const inheritedApproval=newChat?info?.approvalPolicy:view?.approvalPolicy;
   const approvalLabel=inheritedApproval==='never'?'不提示':inheritedApproval==='on-request'?'按需审批':'电脑配置';
-  const canWrite=connected&&!busy&&!pending&&!imageLoading&&!voiceBusy&&(newChat?Boolean(newCwd):Boolean(view?.canControl||queueNext&&view&&view.source!=='history'));
-  const canOperate=connected&&!busy&&!pending&&Boolean(view?.canControl);
+  // A cached view is only shown; its turn and generation may be outdated.
+  const cachedShown=Boolean((view as CachedView|null)?.cached);
+  const canWrite=connected&&!busy&&!pending&&!imageLoading&&!voiceBusy&&(newChat?Boolean(newCwd):!cachedShown&&Boolean(view?.canControl||queueNext&&view&&view.source!=='history'));
+  const canOperate=connected&&!busy&&!pending&&!cachedShown&&Boolean(view?.canControl);
+  // Hidden in the same render that shows the delivered message, so the two never appear together.
+  const pendingShown=optimistic&&optimistic.key===scope&&!optimisticDelivered(optimistic,view)?optimistic:null;
   const attachmentCount=images.length+files.length,selectedImageBytes=images.reduce((sum,url)=>sum+imageBytes(url),0);
   const effortLabel=reasoningLabel(selection.effort),sending=busy&&(Boolean(uploadProgress)||pending?.action==='turn.send'||pending?.action==='session.create');
   const activeApproval=approval||inheritedApproval;
@@ -438,7 +513,7 @@ function App(){
   const conversationEdit=useStableEvent((turnId:string,itemId:string,text:string)=>editTurn(mutate,target(),{turnId,itemId,text},{model,effort,approvalPolicy:approval,serviceTier}));
   const conversationFork=useStableEvent(fork),conversationDiff=useStableEvent((turn:TurnView)=>showPreview({kind:'diff',threadId:selected,turnId:turn.id,text:turn.diff!}));
   const conversation=useMemo(()=>view?.turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={Boolean(view.running)} source={view.source} latestUser={turn.id===latestUserTurn} disabled={!connected||busy||Boolean(pending)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} onFollowup={markdownFollowup} onCopy={conversationCopy} onEdit={conversationEdit} onFork={conversationFork} onDiff={conversationDiff} onBlocked={setNotice}/>),[view?.turns,view?.running,view?.source,latestUserTurn,connected,busy,Boolean(pending),markdownOpenFile,markdownOpenPreview,markdownFollowup,conversationCopy,conversationEdit,conversationFork,conversationDiff]);
-  const feedback=<>{error&&<div className="feedback error" role="alert"><span>{error}</span><IconButton icon="close" label="关闭提示" onClick={()=>setError('')}/></div>}{notice&&<div className="feedback" role="status">{notice}</div>}{pending&&!busy&&<div className="pending"><button onClick={()=>void checkPending()}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先查看最新任务，确认这次操作的实际结果。清除提示不会重发旧操作。')){setOperation(null);setNotice('');}}}>我已核实</button></div>}</>;
+  const feedback=<>{error&&<div className="feedback error" role="alert"><span>{error}</span><IconButton icon="close" label="关闭提示" onClick={()=>setError('')}/></div>}{notice&&<div className="feedback" role="status">{notice}</div>}{pending&&!busy&&<div className="pending"><button onClick={()=>void checkPending()}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先查看最新任务，确认这次操作的实际结果。清除提示不会重发旧操作。')){setOperation(null);setNotice('');setOptimistic(old=>old?.key===scope?null:old);}}}>我已核实</button></div>}</>;
 
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>通过自部署中继继续电脑上的对话。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   const selectService=(next:Service)=>navigate(switchRoute(machine,route,next));
@@ -503,13 +578,16 @@ function App(){
       </ThreadHeader>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
-      <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!,up=el.scrollTop<lastScrollTop.current;lastScrollTop.current=el.scrollTop;sticky.current=!up&&el.scrollHeight-el.scrollTop-el.clientHeight<24;if(up&&el.scrollTop<160&&!historyError)void loadOlder();}}>
+      <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!,up=el.scrollTop<lastScrollTop.current,distance=el.scrollHeight-el.scrollTop-el.clientHeight;lastScrollTop.current=el.scrollTop;
+          // Content that shrinks at the bottom moves the position up without the user; still at the bottom means still following.
+          sticky.current=distance<24&&(!up||distance<2);if(up&&el.scrollTop<160&&!historyError)void loadOlder();}}>
         <div className="timeline-content" ref={timelineContent}>
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={!connected||loadingOlder} onClick={()=>void loadOlder()}>{loadingOlder?'正在加载…':historyError?`${historyError} · 重试`:'加载更早内容'}</button>}
-        {newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:conversation}
+        {pendingShown&&(newChat||!view?.turns.length)?null:newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:conversation}
+        {pendingShown&&<PendingMessage message={pendingShown} openFile={markdownOpenFile} openPreview={markdownOpenPreview} onFollowup={markdownFollowup}/>}
         {!newChat&&view?.retry&&<ConversationStatus>{view.retry}</ConversationStatus>}
-        {!connected&&<ConversationStatus>{connectionLost}</ConversationStatus>}
+        {!connected?<ConversationStatus>{!everOnline.current?'正在连接电脑…':cachedShown?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost}</ConversationStatus>:cachedShown&&<ConversationStatus>正在同步最新内容…</ConversationStatus>}
         </div>
       </div>
       <div className="composer-area"><div className="request-stack">{!newChat&&view?.requests.map(req=><RequestCard key={`${view.generation}:${req.id}`} request={req} disabled={!canOperate} respond={response=>void mutate('request.respond',{...target(),requestId:req.id,response})}/>)}</div>{feedback}
@@ -579,4 +657,7 @@ function SheetPanel({title,close,children,className=''}:{title:string;close:()=>
   };document.addEventListener('keydown',key);return()=>{document.removeEventListener('keydown',key);previous?.focus();};},[]);
   return <div className="overlay" onClick={close}><section tabIndex={-1} ref={panel} className={`sheet ${className}`} role="dialog" aria-modal="true" aria-label={title} onClick={e=>e.stopPropagation()}><div className="sheet-handle"/><header><h2>{title}</h2><IconButton icon="close" label="关闭" onClick={close}/></header><div className="sheet-content">{children}</div></section></div>;
 }
-createRoot(document.getElementById('root')!).render(<App/>);
+// The app shell is cached by a service worker for instant reopening; see public/sw.js.
+if(import.meta.env.PROD&&'serviceWorker' in navigator)window.addEventListener('load',()=>{navigator.serviceWorker.register('/sw.js').catch(()=>{});});
+// The stored cache is read first (bounded by a short timeout) so the first paint can show it.
+void loadCache().finally(()=>createRoot(document.getElementById('root')!).render(<App/>));

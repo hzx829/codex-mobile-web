@@ -10,6 +10,7 @@ export class Client {
   private timer:ReturnType<typeof setTimeout>|undefined;
   private pending=new Map<string,{resolve:(v:any)=>void;reject:(e:any)=>void;timer:ReturnType<typeof setTimeout>;receiptTimeout:number}>();
   private previewListeners=new Set<(message:Json)=>void>();
+  private watching:{machineId:string;threadId:string}|null=null;
   constructor(private token:string,private receive:(m:Json)=>void,private status:(s:string)=>void){this.connect();}
   private connect() {
     this.status('connecting');
@@ -17,7 +18,7 @@ export class Client {
     ws.onopen=()=>ws.send(JSON.stringify({type:'hello',role:'phone',token:this.token}));
     ws.onmessage=e=>{
       let m:Json;try{m=JSON.parse(e.data);}catch{return;}
-      if(m.type==='ready'){this.ready=true;this.retry=0;this.status('online');}
+      if(m.type==='ready'){this.ready=true;this.retry=0;this.sendWatch();this.status('online');}
       if(m.type==='received'){
         const p=this.pending.get(m.id);if(!p)return;
         clearTimeout(p.timer);
@@ -52,6 +53,12 @@ export class Client {
       catch(e){clearTimeout(timer);this.pending.delete(id);reject(e);}
     });
   }
+  /** Tells the relay which thread is open, so its live frames reach this phone. */
+  watch(target:{machineId:string;threadId:string}|null){
+    if(this.watching?.machineId===target?.machineId&&this.watching?.threadId===target?.threadId)return;
+    this.watching=target;if(this.ready)this.sendWatch();
+  }
+  private sendWatch(){try{this.ws?.send(JSON.stringify({type:'watch',machineId:this.watching?.machineId??null,threadId:this.watching?.threadId??null}));}catch{}}
   onPreview(listener:(message:Json)=>void){this.previewListeners.add(listener);return()=>{this.previewListeners.delete(listener);};}
   close(){this.stopped=true;clearTimeout(this.timer);this.ws?.close();}
 }
