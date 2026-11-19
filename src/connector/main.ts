@@ -14,6 +14,7 @@ import { ServiceRouter } from './services.js';
 import { ClaudeCodeBridge, sdkQuery } from './claude-code.js';
 import { ClaudeRuntime } from './claude-runtime.js';
 import { ArtifactViewer } from './claude-artifacts.js';
+import { GUEST_ENTRYPOINT, NoDesktop, applyGuestEnv, guestPaths, noAntigravity, prepareGuest } from './guest.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -21,19 +22,27 @@ if(config.codexHome)process.env.CODEX_HOME=config.codexHome;
 if(config.profile)process.env.CODEX_PROFILE=config.profile;
 if(config.claudeBin)process.env.CLAUDE_CODE_BIN=config.claudeBin;
 mkdirSync(config.dataDir,{recursive:true});
+// Guest mode keeps both sides' sessions apart: the guest's Codex and Claude Code data live in the guest
+// directory, the host's desktop Codex is never connected, and Antigravity (which writes into the host's
+// ~/.gemini) is off. The environment must be set before Codex or Claude Code is constructed.
+const guest=config.guest?guestPaths(config.guestRoot):undefined;
+let signedIn={codex:true,claude:true};
+if(guest){signedIn=prepareGuest(guest);applyGuestEnv(guest);for(const [app,ok] of Object.entries(signedIn))if(!ok)console.warn(`借用电脑：${app==='codex'?'Codex':'Claude Code'} 未登录，暂不可用`);}
 const ledger=new Ledger(join(config.dataDir,'operations.sqlite'));
-const control=new Control(ledger);
-const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
+const control=new Control(ledger,undefined,guest?new NoDesktop():undefined);
+const antigravity=guest?undefined:new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
-// claudeEntrypoint: optional CLAUDE_CODE_ENTRYPOINT for Claude Code; unset keeps the SDK's 'sdk-ts'. See docs/claude-local/M1-RESULTS.md.
-const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:false));
+// CLAUDE_CODE_ENTRYPOINT: by default 'codex-mobile-web', which the terminal's `claude --resume` list shows; `claudeEntrypoint`
+// overrides it. A guest's sessions use 'sdk-ts', which that list hides. See docs/claude-local/M1-RESULTS.md.
+const claudeEntrypoint=guest?GUEST_ENTRYPOINT:typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:undefined;
+const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,claudeEntrypoint));
 // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
 claudeCode.artifacts=new ArtifactViewer(config.dataDir);
 const services=new ServiceRouter([
   {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save','claude.fork','claude.rename','claude.archive','claude.edit'],
     prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
-  {prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']},
+  antigravity?{prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']}:noAntigravity,
 ],request=>control.handle(request as any),()=>control.updating);
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
 let proxyBackpressure:NodeJS.Timeout|undefined;
@@ -54,7 +63,9 @@ function connect() {
   const pulse=setInterval(()=>{if(ws.readyState!==WebSocket.OPEN)return;if(!alive){ws.terminate();return;}alive=false;ws.ping();},15_000);
   ws.on('pong',()=>{alive=true;});
   let ready=false;const authTimer=setTimeout(()=>ws.terminate(),10_000);
-  ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname()}));
+  // services: the apps this computer offers; a guest computer offers only the signed-in ones of Codex and Claude Code.
+  const apps=guest?(['codex','claude'] as const).filter(app=>signedIn[app]):['codex','claude','antigravity'];
+  ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname(),services:apps,...guest?{guest:true}:{}}));
   ws.on('message',async data=>{
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
     if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');console.log('电脑已连接中继');return;}

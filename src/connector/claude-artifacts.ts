@@ -86,7 +86,11 @@ export class Cdp {
   close() {try {this.socket.close();} catch {}}
 }
 
-type Browser = {process: ChildProcess; cdp: Cdp; userAgent: string; visible: boolean};
+type Browser = {process: ChildProcess; pid?: number; cdp: Cdp; userAgent: string; visible: boolean};
+function running(pid?: number) {
+  if (!pid) return false;
+  try {process.kill(pid, 0);return true;} catch {return false;}
+}
 type Frame = {sessionId: string; frameId: string; url: string};
 type Serialized = {html: string; resources: string[]; frames: {src: string; name: string}[]};
 export type Snapshot = {state: 'ready'; slug: string; title: string; at: number; file: Json} | {state: 'login'} | {state: 'rendering'};
@@ -214,18 +218,20 @@ export class ArtifactViewer {
         '--no-default-browser-check', '--disable-sync', '--hide-crash-restore-bubble', '--mute-audio',
         ...(visible ? ['--window-position=-32000,-32000', '--window-size=1200,900'] : ['--headless=new']), 'about:blank'], {stdio: 'ignore', windowsHide: !visible});
       child.on('error', () => {});
+      // msedge.exe on Windows can be a launcher that hands the browser to another process and exits with 0,
+      // so only a failed exit ends the wait, and the browser's own process id is asked from the browser.
       let port = '';
       for (let i = 0; i < 150 && !port; i++) {
         await delay(100);
         port = await readFile(portFile, 'utf8').catch(() => '');
-        if (child.exitCode !== null) break;
+        if (child.exitCode) break;
       }
       const [number, path] = port.trim().split(/\r?\n/);
       if (!number || !path) {child.kill();throw new BridgeError('unavailable', '电脑上的中转浏览器没有启动。如果它已经在运行，请关闭后重试。');}
       const cdp = await Cdp.connect(`ws://127.0.0.1:${number}${path}`);
-      const {userAgent = ''} = await cdp.send('Browser.getVersion');
-      child.once('exit', () => {cdp.close();});
-      return {process: child, cdp, visible, userAgent: String(userAgent).replace('HeadlessChrome', 'Chrome').replace('HeadlessEdg', 'Edg')};
+      const [{userAgent = ''}, {processInfo = []}] = await Promise.all([cdp.send('Browser.getVersion'), cdp.send('SystemInfo.getProcessInfo').catch((): Json => ({}))]);
+      const pid = (processInfo as Json[]).find(info => info.type === 'browser')?.id;
+      return {process: child, pid: typeof pid === 'number' ? pid : child.pid, cdp, visible, userAgent: String(userAgent).replace('HeadlessChrome', 'Chrome').replace('HeadlessEdg', 'Edg')};
     })();
   }
 
@@ -234,15 +240,21 @@ export class ArtifactViewer {
     if (this.browser) {
       const current = await this.browser.catch(() => undefined);
       if (current && !current.cdp.closed && current.visible === visible) return current;
-      if (current) this.stop(current);
+      // The next browser uses the same profile, so the old one must be gone first.
+      if (current) await this.stop(current);
     }
     this.browser = this.launch(visible);
     this.browser.catch(() => {this.browser = undefined;});
     return this.browser;
   }
-  private stop(browser: Browser) {
-    browser.cdp.send('Browser.close').catch(() => {}).finally(() => {browser.cdp.close();setTimeout(() => browser.process.kill(), 2000).unref?.();});
+  /** Closes the browser, and ends its process if it has not exited within two seconds. */
+  private async stop(browser: Browser) {
     this.browser = undefined;this.login = undefined;
+    await browser.cdp.send('Browser.close', {}, undefined, 2000).catch(() => {});
+    for (let i = 0; i < 20 && running(browser.pid); i++) await delay(100);
+    browser.cdp.close();
+    if (running(browser.pid)) try {process.kill(browser.pid!);} catch {}
+    if (browser.process.exitCode === null) browser.process.kill();
   }
   private rest() {
     clearTimeout(this.idle);
@@ -510,5 +522,8 @@ export class ArtifactViewer {
     });
   }
 
-  close() {void this.browser?.then(browser => this.stop(browser), () => {});}
+  close(): Promise<void> {
+    clearTimeout(this.idle);
+    return this.browser ? this.browser.then(browser => this.stop(browser), () => {}) : Promise.resolve();
+  }
 }

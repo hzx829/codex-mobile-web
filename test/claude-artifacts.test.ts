@@ -72,8 +72,7 @@ test('a rendered Artifact frame becomes a static page without scripts', {skip: !
     assert.equal(again.state, 'ready');
     await assert.rejects(viewer.download({slug: result.slug, name: '../x.html', revision: '', offset: 0}), /无效/);
   } finally {
-    viewer.close();server.close();
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await viewer.close();server.close();
     await removeTestTemp(root);
   }
 });

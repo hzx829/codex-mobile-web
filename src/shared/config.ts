@@ -5,5 +5,7 @@ export function readConfig() {
   let c:any={};try{c=JSON.parse(readFileSync(file,'utf8'));}catch{}
   const token=process.env.BRIDGE_TOKEN||c.token;
   if(typeof token!=='string'||token.length<24)throw new Error('请先运行 setup 配置连接，或设置 BRIDGE_TOKEN（至少 24 位）');
-  return {...c,token,port:Number(process.env.PORT||c.port||3340),host:process.env.HOST||c.host||'127.0.0.1',relayUrl:process.env.RELAY_URL||c.relayUrl||'http://127.0.0.1:3340',dataDir:resolve(process.env.BRIDGE_DATA||'.local'),configFile:file};
+  return {...c,token,port:Number(process.env.PORT||c.port||3340),host:process.env.HOST||c.host||'127.0.0.1',relayUrl:process.env.RELAY_URL||c.relayUrl||'http://127.0.0.1:3340',dataDir:resolve(process.env.BRIDGE_DATA||'.local'),configFile:file,
+    // Guest mode (docs/guest-mode): Codex and Claude Code data live under guestRoot, apart from the host's.
+    guest:c.guest===true,guestRoot:c.guest===true?resolve(process.env.BRIDGE_GUEST_ROOT||(typeof c.guestRoot==='string'&&c.guestRoot)||'guest'):undefined};
 }
