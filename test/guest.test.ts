@@ -6,7 +6,8 @@ import {tmpdir} from 'node:os';
 import {join, toNamespacedPath} from 'node:path';
 import {test} from 'node:test';
 import {Control} from '../src/connector/control.js';
-import {claudeLogin, codexLogin, NoDesktop, syncLogin} from '../src/connector/guest.js';
+import {claudeEnv} from '../src/connector/claude-runtime.js';
+import {claudeLogin, codexLogin, GUEST_ENTRYPOINT, NoDesktop, syncLogin} from '../src/connector/guest.js';
 import {htmlEntry, openHtmlResource} from '../src/connector/html-preview.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {assertInsideWorkspace, createGuestProject, downloadProjectFile, projectDirectory, readProjectFile, setWorkspace, workspaceProjects} from '../src/connector/project.js';
@@ -97,4 +98,13 @@ test('Codex guest turns use the connector runtime across a resume', async () => 
     for (const method of ['thread/start', 'thread/resume', 'turn/start', 'turn/interrupt']) assert.ok(runtime.calls.includes(method), method);
     assert.equal(desktop.socket, null);
   } finally {control.close();await setWorkspace();await removeTestTemp(cwd);}
+});
+
+test('guest Claude sessions are hidden from the owner and the owner desktop is never reached', async () => {
+  const env = claudeEnv(GUEST_ENTRYPOINT, {CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'owner-session', PATH: 'x'});
+  assert.equal(env.CLAUDE_CODE_ENTRYPOINT, 'sdk-ts', "the owner's `claude --resume` list hides sdk-ts sessions");
+  assert.equal(env.CLAUDE_CODE_SESSION_ID, undefined, "a guest session is never recorded as a child of the owner's session");
+  const desktop = new NoDesktop();
+  await desktop.refreshThread('thread');
+  await assert.rejects(desktop.connect(), /借用电脑/);
 });

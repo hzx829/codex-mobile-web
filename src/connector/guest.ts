@@ -13,7 +13,15 @@ export class NoDesktop extends Desktop {
   override async connect(): Promise<never> {throw new BridgeError('desktop_offline', '借用电脑没有桌面会话');}
   override async follow(): Promise<Json> {return this.connect();}
   override async request(): Promise<Json> {return this.connect();}
+  override async refreshThread(_threadId: string) {}
 }
+
+/**
+ * Guest sessions are recorded as `sdk-ts`, which the owner's `claude --resume` list hides. The
+ * separate CLAUDE_CONFIG_DIR is what keeps them apart; this is a second layer if one ever lands in
+ * the owner's ~/.claude.
+ */
+export const GUEST_ENTRYPOINT = 'sdk-ts';
 
 type Login = {expires?: number; refresh?: boolean; updated?: number};
 type LoginReader = (value: Json, now?: number) => Login | undefined;
@@ -180,7 +188,8 @@ export async function preflight(paths: GuestPaths, owner = ownerHomes(), env: No
 
 export function useGuestHomes(paths: GuestPaths) {
   // The owner's own variables (proxy, API key, endpoint) stay: the guest uses the owner's account and network.
-  for (const key of ['CODEX_PROFILE', 'CODEX_LEGACY_BIN']) delete process.env[key];
+  // Variables that would point Codex at the owner's own data or desktop app are dropped.
+  for (const key of ['CODEX_PROFILE', 'CODEX_LEGACY_BIN', 'CODEX_SQLITE_HOME', 'CODEX_IPC_PATH']) delete process.env[key];
   process.env.CODEX_HOME = paths.codexHome;
   process.env.CLAUDE_CONFIG_DIR = paths.claudeConfig;
 }

@@ -27,10 +27,10 @@ type Props={
   openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(text:string)=>void;
   onCopy:(text:string)=>void;onEdit:(turnId:string,itemId:string,text:string)=>Promise<void>;
   onFork:(turn:TurnView)=>void;onDiff:(turn:TurnView)=>void;onBlocked:(reason:string)=>void;
-  /** Apps without edit or fork support pass a reason / hide the fork button. */
-  editBlocked?:string;hideFork?:boolean;
+  /** Apps without edit support pass the reason. */
+  editBlocked?:string;
 };
-export const ConversationTurn=memo(function ConversationTurn({turn,running,source,latestUser,disabled,openFile,openPreview,onFollowup,onCopy,onEdit,onFork,onDiff,onBlocked,editBlocked,hideFork}:Props){
+export const ConversationTurn=memo(function ConversationTurn({turn,running,source,latestUser,disabled,openFile,openPreview,onFollowup,onCopy,onEdit,onFork,onDiff,onBlocked,editBlocked}:Props){
   const groups=useMemo(()=>groupItems(turn.items),[turn.items]);
   const lastReply=turn.items.filter(item=>item.role==='assistant').at(-1);
   const editReason=editBlocked||(running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(item=>item.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':source==='desktop'&&!latestUser?'桌面会话目前只能改写最近一条用户消息':'');
@@ -40,8 +40,8 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
       const body=<><SafeMarkdown text={item.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}</>;
       return item.role==='user'?<UserMessage key={item.id} text={item.text} editReason={editReason} disabled={disabled} blocked={onBlocked} copy={()=>onCopy(item.text)} resend={text=>onEdit(turn.id,item.id,text)}>{body}</UserMessage>:<article className={`message ${item.role}`} key={item.id}>{body}</article>;
     }))}
-    {turn.status!=='completed'&&<div className="turn-status">{statusLabel[turn.status]||turn.status}</div>}{turn.diff&&<DiffCard diff={turn.diff} open={()=>onDiff(turn)}/>}{turn.error&&<p className="error">{turn.error}</p>}
-    {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/>{!hideFork&&<IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/>}</div>}
+    {turn.status!=='completed'&&<div className="turn-status">{statusLabel[turn.status]||turn.status}</div>}{turn.diff&&<DiffCard diff={turn.diff} open={()=>onDiff(turn)}/>}{turn.pages?.map(page=><button type="button" key={page.url} className="diff-card" onClick={()=>openPreview(page.url)} aria-label={`查看页面 ${page.title}`}><Icon name="browser" size={18}/><span className="diff-card-title">{page.title||'claude.ai 页面'}</span><span className="diff-card-open">查看<Icon name="chevron" size={14}/></span></button>)}{turn.error&&<p className="error">{turn.error}</p>}
+    {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/><IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/></div>}
   </section>;
 });
 export function ActivityGroup({items,running,openFile}:{items:MessageItem[];running:boolean;openFile:(path:string)=>void}){

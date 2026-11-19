@@ -5,13 +5,18 @@ export type PreviewTarget =
   | {kind:'file'; machineId:string; threadId:string; path:string; line?:number; file?:FilePreview; error?:string; request:number}
   | {kind:'diff'; threadId:string; turnId:string; text:string}
   | {kind:'image'; url:string; title:string}
-  | {kind:'web'; session:PreviewSession};
+  | {kind:'web'; session:PreviewSession}
+  | {kind:'artifact'; machineId:string; url:string; title?:string};
+
+/** claude.ai Artifact pages, which the computer renders and relays; the phone never opens claude.ai itself. */
+export function isArtifactUrl(value:string){return /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]{8,64}\/?(?:[?#].*)?$/.test(value);}
 
 export function samePreviewTarget(a:PreviewTarget,b:PreviewTarget):boolean{
   if(a.kind!==b.kind)return false;
   if(a.kind==='file'&&b.kind==='file')return a.machineId===b.machineId&&a.threadId===b.threadId&&a.path===b.path;
   if(a.kind==='diff'&&b.kind==='diff')return a.threadId===b.threadId&&a.turnId===b.turnId;
   if(a.kind==='image'&&b.kind==='image')return a.url===b.url;
+  if(a.kind==='artifact'&&b.kind==='artifact')return a.machineId===b.machineId&&a.url===b.url;
   return a.kind==='web'&&b.kind==='web'&&a.session.sessionId===b.session.sessionId;
 }
 

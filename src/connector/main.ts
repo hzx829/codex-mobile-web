@@ -13,7 +13,8 @@ import { AntigravityBridge } from './antigravity.js';
 import { ServiceRouter, type ServiceBridge } from './services.js';
 import { ClaudeCodeBridge, sdkQuery } from './claude-code.js';
 import { ClaudeRuntime } from './claude-runtime.js';
-import { NoDesktop, preflight, returnLogins, useGuestHomes } from './guest.js';
+import { ArtifactViewer } from './claude-artifacts.js';
+import { GUEST_ENTRYPOINT, NoDesktop, preflight, returnLogins, useGuestHomes } from './guest.js';
 import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './guest-checks.js';
 import { setWorkspace } from './project.js';
 const config=readConfig();
@@ -52,9 +53,14 @@ control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import
 const browserPreview=new BrowserPreview();
 const bridges:ServiceBridge[]=[];
 if(available.includes('claude')){
-  const entrypoint=!guest&&typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint||false;
+  // CLAUDE_CODE_ENTRYPOINT: by default 'codex-mobile-web', which the terminal's `claude --resume` list shows; `claudeEntrypoint`
+  // overrides it. A guest's sessions use 'sdk-ts', which that list hides. See docs/claude-local/M1-RESULTS.md.
+  const entrypoint=guest?GUEST_ENTRYPOINT:typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:undefined;
   const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,entrypoint));
-  bridges.push({prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save'],
+  // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
+  // A guest's profile lives in the guest folder, so clearing the guest data removes that sign-in too.
+  claudeCode.artifacts=new ArtifactViewer(guest?guest.root:config.dataDir);
+  bridges.push({prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save','claude.fork','claude.rename','claude.archive','claude.edit'],
     prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()});
 }
 if(!guest){

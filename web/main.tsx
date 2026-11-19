@@ -22,7 +22,8 @@ import {cachedList,cachedProjects,cachedView,clearCache,flushCache,loadCache,rem
 import {BrowserPreviewPanel,WebViewer,type PreviewSession} from './browser-preview';
 import {belongsToThread,defaultPreviewUrl,openThreadPreview,previewUrlKey} from './thread-preview';
 import {PreviewPane,useCompactPreview} from './preview-pane';
-import {fileReference,samePreviewTarget,type PreviewTarget} from './preview-target';
+import {fileReference,isArtifactUrl,samePreviewTarget,type PreviewTarget} from './preview-target';
+import {ArtifactPanel} from './artifact-view';
 import {home,initialLocation,rememberLocation,parseLocation,type Route} from './route-state';
 import {pastedImage,readAttachmentFiles,clipboardFiles,imageFile,isImageFile,type DraftFileAttachment} from './attachments';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
@@ -51,7 +52,7 @@ const load=(key:string,fallback:any)=>{try{return JSON.parse(localStorage.getIte
 const save=(key:string,value:any)=>{try{localStorage.setItem(key,JSON.stringify(value));}catch{}};
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const computerName=(machine:Machine)=>machine.name+(machine.guest?'（借用）':'');
-const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:'网页预览';
+const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:target.kind==='artifact'?target.title||'claude.ai 页面':'网页预览';
 function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('token');if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
 const savedLocation=initialLocation();
 const listKey=(machine:string,project:string,archived:boolean)=>`${machine}:${project}:${archived?'archived':'recent'}`;
@@ -470,7 +471,7 @@ function App(){
         try{if(!document.execCommand('copy'))throw Error('copy failed');}finally{input.remove();}
       }
   }
-  const markdownOpenFile=useStableEvent(openFile),markdownOpenPreview=useStableEvent((url:string)=>void openBrowser(url)),markdownFollowup=useStableEvent(insertFollowup);
+  const markdownOpenFile=useStableEvent(openFile),markdownOpenPreview=useStableEvent((url:string)=>{if(isArtifactUrl(url))showPreview({kind:'artifact',machineId:machine,url});else void openBrowser(url);}),markdownFollowup=useStableEvent(insertFollowup);
   const latestUserTurn=useMemo(()=>view?.turns.filter(turn=>turn.items.some(item=>item.role==='user')).at(-1)?.id,[view?.turns]);
   function fork(turn:TurnView){
     if(turn.status==='inProgress'){setNotice('请等这一轮结束后再分叉');return;}
@@ -530,7 +531,7 @@ function App(){
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>通过自部署中继继续电脑上的对话。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   const selectService=(next:Service)=>navigate(switchRoute(machine,route,next));
   const switcher=<ServiceSwitch active={service} available={available} disabled={busy||voiceBusy||imageLoading} select={selectService}/>;
-  const previewPane=preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:undefined}
+  const previewPane=preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:preview.kind==='artifact'?'经电脑中转，手机不直接访问 claude.ai':undefined}
        tabs={previewState.tabs.map(tab=>({id:tab.id,title:previewTitle(tab.target)}))} activeTab={previewState.activeId}
        selectTab={id=>setPreviewState(old=>({...old,activeId:id}))} closeTab={closePreviewTab}
        compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel||modelPoint)} close={closePreview}>
@@ -542,6 +543,8 @@ function App(){
            read={offset=>fileRequest('download',target.machineId,target.threadId,{path:target.file!.path,revision:target.file!.revision,offset})}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''),target.machineId,target.threadId)}>重试</button>}</div>)}
          {target.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer text={target.text} compact={compactPreview}/></Suspense>}
          {target.kind==='web'&&<WebViewer session={target.session} onEnd={closeBrowser}/>}
+         {target.kind==='artifact'&&<ArtifactPanel url={target.url} connected={connected&&target.machineId===machine} call={(action,payload)=>call(action,payload,target.machineId)}
+           onTitle={title=>setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.id===id&&tab.target.kind==='artifact'?{...tab,target:{...tab.target,title}}:tab)}))}/>}
          {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
        </div>)}
      </PreviewPane>;
@@ -551,15 +554,28 @@ function App(){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
     const open=(next:string)=>{setClaudeNewCwd(null);if(next!==id){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
     const creatingClaude=service==='claude'&&!id&&claudeNewCwd!==null;
+    const forked=(next:string)=>{refreshRemoteList(value=>value+1);open(next);};
+    async function claudeChange(action:RequestAction,payload:Json){
+      const result=await call(action,{...payload,opId:operationId()});
+      if(result.state!=='accepted')throw new Error(result.error?.message||'结果待核实，请刷新列表查看。');
+      return result;
+    }
+    const claudeActions=(thread:Json)=>({
+      rename:async(title:string)=>{await claudeChange('claude.rename',{conversationId:thread.id,title});},
+      archive:async()=>{await claudeChange('claude.archive',{conversationId:thread.id});if(thread.id===id)open('');},
+      duplicate:async()=>{forked((await claudeChange('claude.fork',{conversationId:thread.id})).conversationId);},
+    });
     return <div className={`shell ${id||creatingClaude?'has-session':''}`}>
-      <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
+      <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machine={machine} machineName={machineName}
+        copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
         listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='claude'&&route.project?
           <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
         onNew={service==='claude'?project=>setClaudeNewCwd(project):undefined}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
-        machine={machine} guest={guest} newCwd={id?null:claudeNewCwd} created={next=>{setClaudeNewCwd(null);refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);}}
+        machine={machine} guest={guest} newCwd={id?null:claudeNewCwd} created={next=>{setClaudeNewCwd(null);refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);}} forked={forked}
+        showDiff={turn=>{if(turn.diff)showPreview({kind:'diff',threadId:`claude:${id}`,turnId:turn.id,text:turn.diff});}} voiceMode={voiceMode} actions={claudeActions}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:

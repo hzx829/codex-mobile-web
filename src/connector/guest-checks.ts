@@ -1,5 +1,6 @@
 import type {Json} from '../shared/types.js';
-import {findClaude} from './claude-runtime.js';
+import {claudeEnv, findClaude} from './claude-runtime.js';
+import {GUEST_ENTRYPOINT} from './guest.js';
 
 /**
  * A borrowed computer is only useful if the apps reach their service with the owner's login, proxy and
@@ -91,7 +92,7 @@ export async function checkClaude(load: ClaudeLoader, cwd: string, ms = TIMEOUT)
   try {
     const query = await load();
     const executable = findClaude();
-    q = query({prompt: PROMPT, options: {cwd, persistSession: false, tools: [], maxTurns: 1,
+    q = query({prompt: PROMPT, options: {cwd, persistSession: false, tools: [], maxTurns: 1, env: claudeEnv(GUEST_ENTRYPOINT),
       ...(executable ? {pathToClaudeCodeExecutable: executable} : {}), stderr: () => {}}});
     const run = async () => {
       let error: string | undefined, text = '';

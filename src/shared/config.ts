@@ -27,7 +27,7 @@ export function readConfig() {
   const token=process.env.BRIDGE_TOKEN||c.token;
   if(typeof token!=='string'||token.length<24)throw new Error('请先运行 setup 配置连接，或设置 BRIDGE_TOKEN（至少 24 位）');
   const guest = c.guest === true;
-  const root = resolve(guest && typeof c.guestRoot === 'string' ? c.guestRoot : 'guest');
+  const root = resolve(process.env.BRIDGE_GUEST_ROOT || (guest && typeof c.guestRoot === 'string' ? c.guestRoot : 'guest'));
   const guestPaths: GuestPaths | undefined = guest ? {root, codexHome: join(root, 'codex-home'),
     claudeConfig: join(root, 'claude-config'), workspace: join(root, 'workspace')} : undefined;
   return {...c,token,guest,guestPaths,port:Number(process.env.PORT||c.port||3340),host:process.env.HOST||c.host||'127.0.0.1',relayUrl:process.env.RELAY_URL||c.relayUrl||'http://127.0.0.1:3340',dataDir:resolve(process.env.BRIDGE_DATA||'.local'),configFile:file};

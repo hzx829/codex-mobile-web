@@ -93,3 +93,16 @@
 }
 @keyframes preview-rise { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .preview-pane { animation: none; } }
+.artifact-viewer .viewer-toolbar small { color: var(--muted); }
+.artifact-login { display: flex; flex-direction: column; gap: 8px; padding: 12px; overflow: auto; flex: 1; min-height: 0; }
+.artifact-login > p { margin: 0; font-size: 13px; }
+.artifact-login-intro small { line-height: 1.5; }
+.artifact-screen { align-self: center; width: 100%; max-width: 430px; }
+.artifact-screen img { display: block; width: 100%; border: 1px solid var(--line-strong); border-radius: 12px; cursor: pointer; touch-action: manipulation; background: var(--panel); }
+.artifact-login-row { display: flex; gap: 6px; }
+.artifact-login-row input { padding: 9px 12px; }
+.artifact-login-row button { flex-shrink: 0; background: var(--panel); }
+.artifact-login-keys { display: flex; flex-wrap: wrap; gap: 6px; }
+.artifact-login-keys button { padding: 7px 11px; font-size: 13px; background: var(--panel); border-radius: 10px; }
+.artifact-login-done { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 12px; background: #1a7f3712; color: var(--success); }
+.artifact-login-done p { margin: 0; }

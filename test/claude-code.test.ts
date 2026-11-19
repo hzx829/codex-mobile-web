@@ -6,6 +6,8 @@ import {join} from 'node:path';
 import {claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
 import {ClaudeCodeBridge} from '../src/connector/claude-code.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
+import {Ledger} from '../src/connector/ledger.js';
+import {ClaudeRuntime, type QueryFn} from '../src/connector/claude-runtime.js';
 
 const sid = '11111111-2222-4333-8444-555555555555';
 
@@ -50,6 +52,9 @@ test('Claude Code transcripts become Codex-style turns', () => {
   assert.deepEqual(command.items.slice(1).map(item => [item.role, item.text]), [['status', 'Set model to opus']]);
   assert.equal(last.items[0].text, '再跑一遍测试');
   assert.equal(last.status, 'interrupted');
+  // A fork ends at the turn's last entry: the reply, not the next prompt.
+  assert.equal(first.anchor, lines[7].uuid);assert.equal(first.canFork, true);
+  assert.equal(last.anchor, lines.at(-1).uuid);
   assert.equal(claudeTurns([{type: 'user', uuid: 'u', message: {content: 'hi'}}], true)[0].status, 'inProgress');
   assert.equal(toolActivity({name: 'TodoWrite', input: {todos: [{content: 'a', status: 'completed'}, {content: 'b', status: 'pending'}]}}).text, '[x] a\n[ ] b');
   assert.equal(toolActivity({name: 'mcp__x__y', input: {q: 1}}).type, 'toolCall');
@@ -103,6 +108,105 @@ test('connector lists, reads and watches Claude Code sessions from the local tra
     await assert.rejects(bridge.handle('claude.read', {conversationId: '99999999-2222-4333-8444-555555555555'}), /找不到/);
     await assert.rejects(bridge.handle('claude.delete', {conversationId: sid}), /暂不支持/);
   } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('connector forks, copies, renames and archives Claude Code sessions with the SDK', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, transcript(cwd));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const bridge = new ClaudeCodeBridge(ledger, join(root, 'config'));
+    let op = 0;
+    const run = async (action: string, payload: object) => {
+      const result = await bridge.handle(action, {conversationId: sid, opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-${String(++op).padStart(12, '0')}`, ...payload});
+      assert.equal(result.state, 'accepted', JSON.stringify(result));
+      return result;
+    };
+
+    const view = await bridge.handle('claude.read', {conversationId: sid});
+    const forked = await run('claude.fork', {upToMessageId: view.turns[0].anchor});
+    const branch = await bridge.handle('claude.read', {conversationId: forked.conversationId});
+    assert.equal(branch.title, '修复登录 bug（分叉）');
+    assert.equal(branch.turns.length, 1);
+    assert.deepEqual(branch.turns[0].items.map((item: any) => item.text), view.turns[0].items.map((item: any) => item.text));
+
+    const copy = await run('claude.fork', {});
+    assert.equal((await bridge.handle('claude.read', {conversationId: copy.conversationId})).turns.length, 3);
+    const missing = await bridge.handle('claude.fork', {conversationId: sid, opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-ffffffffffff`, upToMessageId: '00000000-0000-4000-8000-0000000000ff'});
+    assert.equal(missing.state, 'failed');
+
+    await run('claude.rename', {title: '登录问题'});
+    assert.equal((await bridge.handle('claude.read', {conversationId: sid})).title, '登录问题');
+    await run('claude.archive', {});
+    const list = await bridge.handle('claude.list', {refresh: true});
+    assert.equal(list.data.some((item: any) => item.id === sid), false);
+    assert.equal(list.data.length, 2);
+  } finally {
+    ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('editing a message resumes the session from the turn before it, with diffs from the transcript', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    // The Edit's result carries the patch, as Claude Code writes it.
+    const text = transcript(cwd).split('\n').map(line => {
+      if (!line.includes('toolu_2')) return line;
+      const entry = JSON.parse(line);
+      if (entry.type !== 'user') return line;
+      entry.toolUseResult = {filePath: join(cwd, 'a.ts'), structuredPatch: [{oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-a', '+b']}]};
+      return JSON.stringify(entry);
+    }).join('\n');
+    await writeFile(file, text);
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const starts: any[] = [];
+    const sent: any[] = [];
+    const query: QueryFn = ({prompt, options}) => {
+      starts.push(options);
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const message of prompt) {sent.push(message);yield {type: 'result', subtype: 'success', session_id: sid, errors: []};}
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      return generator;
+    };
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000));
+    const view = await bridge.handle('claude.read', {conversationId: sid});
+    assert.match(view.turns[0].diff, /^diff --git a\/a\.ts b\/a\.ts\n--- a\/a\.ts\n\+\+\+ b\/a\.ts\n@@ -1,1 \+1,1 @@\n-a\n\+b\n$/);
+    assert.equal(view.turns[1].diff, undefined);
+    const opId = () => `${Date.now()}:a1b2c3d4-0000-4000-8000-${String(starts.length + sent.length + Math.floor(Math.random() * 1e6)).padStart(12, '0')}`;
+
+    const first = await bridge.handle('claude.edit', {conversationId: sid, opId: opId(), turnId: view.turns[0].id, text: '改一下'});
+    assert.equal(first.state, 'failed');assert.match(first.error.message, /第一条消息不能改写/);
+
+    const last = view.turns.at(-1);
+    const edited = await bridge.handle('claude.edit', {conversationId: sid, opId: opId(), turnId: last.id, text: '只跑单元测试'});
+    assert.equal(edited.state, 'accepted', JSON.stringify(edited));
+    assert.equal(starts.at(-1).resume, sid);
+    assert.equal(starts.at(-1).resumeSessionAt, view.turns.at(-2).anchor);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(sent.at(-1).message.content.at(-1).text, '只跑单元测试');
+  } finally {
+    bridge?.close();ledger.close();
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
     await removeTestTemp(root);
   }
