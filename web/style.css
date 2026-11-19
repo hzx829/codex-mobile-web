@@ -487,3 +487,15 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .claude-question input{width:100%;margin-top:6px}
 .request .choices button.chosen{background:var(--fg);color:#fff}
 .request button.primary{background:var(--fg);color:#fff}
+.claude-project-form label > textarea{margin:8px 0 18px}
+.claude-project-form details{margin:0 0 18px;color:var(--fg-2);font-size:13px}
+.claude-project-form details summary{cursor:pointer;margin-bottom:8px}
+.claude-project-form details textarea{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}
+.claude-project-form .muted{margin:-10px 0 18px;font-size:12px}
+.claude-project-form .danger-link{display:block;width:100%;margin-top:10px;padding:10px;color:var(--danger);font-size:14px}
+.claude-project-actions{display:flex;gap:14px;margin-bottom:12px}
+.claude-project-actions button{padding:6px 2px;font-size:13px;color:var(--fg-2)}
+.claude-project-actions button:hover{color:var(--fg)}
+.claude-project select{flex:1;min-width:0;border:0;background:transparent;font-size:15px;padding:0;outline:none;box-shadow:none}
+.claude-project + .claude-project{margin-top:8px}
+.new-chat-welcome > .muted{max-width:420px;margin:8px auto 0;overflow-wrap:anywhere;font-size:12px}

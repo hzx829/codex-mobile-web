@@ -71,7 +71,7 @@ test('connector lists, reads and watches Claude Code sessions from the local tra
 
     const list = await bridge.handle('claude.list', {});
     assert.deepEqual(list.data.map((item: any) => [item.id, item.title, item.cwd, item.running]), [[sid, '修复登录 bug', cwd, false]]);
-    assert.deepEqual(list.projects, [{id: cwd, path: cwd}]);
+    assert.deepEqual(list.projects, [{id: cwd, path: cwd, kind: 'folder'}]);
     assert.equal((await bridge.handle('claude.list', {search: '不存在'})).data.length, 0);
     assert.equal((await bridge.handle('claude.list', {project: join(root, 'other')})).data.length, 0);
 

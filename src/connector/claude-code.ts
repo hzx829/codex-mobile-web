@@ -9,6 +9,7 @@ import {validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
 import {ClaudeRuntime, PERMISSION_MODES, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
 import {claudeTurns, type ClaudeMessage} from './claude-transcript.js';
+import {PROJECT_ID, projectInput, projectLaunch, type ProjectStore} from './claude-projects.js';
 
 const sessionId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const PAGE = 50;
@@ -60,7 +61,7 @@ export class ClaudeCodeBridge {
   private sending = new Set<string>();
   readonly runtime: ClaudeRuntime;
   constructor(private ledger?: Ledger, private root = claudeConfigDir(), private sessions: () => Promise<ClaudeSessions> = sdkSessions,
-    private now = Date.now, runtime?: ClaudeRuntime) {
+    private now = Date.now, runtime?: ClaudeRuntime, private projects?: ProjectStore) {
     this.runtime = runtime || new ClaudeRuntime(sdkQuery);
     this.runtime.on('change', () => {this.catalog = undefined;});
   }
@@ -119,7 +120,8 @@ export class ClaudeCodeBridge {
     }
     const live = this.runtime.get(id);
     const sessions = await this.sessions();
-    const [info, messages] = current.exists ? await Promise.all([this.info(id), sessions.getSessionMessages(id, {includeSystemMessages: true})]) : [undefined, []];
+    // Right after a session starts its transcript can exist before the SDK can describe it; a live session just shows no messages yet.
+    const [info, messages] = current.exists ? await Promise.all([live ? sessions.getSessionInfo(id) : this.info(id), sessions.getSessionMessages(id, {includeSystemMessages: true})]) : [undefined, []];
     // A session this connector runs reports its real state; others are judged by recent transcript writes.
     const external = !live && current.external;
     const running = live ? live.running : external;
@@ -133,13 +135,24 @@ export class ClaudeCodeBridge {
       recent.push(turn);
     }
     if (turns.length && !recent.length) throw new BridgeError('too_large', 'Claude Code 最新一轮过长，请在电脑上查看');
+    const project = await this.projects?.ofSession(id).catch(() => undefined);
     return {
-      id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', revision: current.revision, running,
+      id, title: info ? title(info) : '新会话', project: project ? {id: project.id, name: project.name} : null, cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', revision: current.revision, running,
       controlled: Boolean(live), external, permissionMode: live?.permissionMode || '', requests: live?.pending || [], error: live?.error || '',
       queued: Boolean(live && live.inbox.size),
       turns: recent.reverse(), truncated: recent.length < turns.length,
       notice: external ? '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。' : '',
     };
+  }
+
+  private store() {
+    if (!this.projects) throw new BridgeError('unavailable', '这个连接器没有启用项目');
+    return this.projects;
+  }
+  /** Project options for a session: the project it belongs to, if any. */
+  private async launchFor(sessionIdValue: string) {
+    const project = await this.projects?.ofSession(sessionIdValue);
+    return project ? projectLaunch(project) : undefined;
   }
 
   private mutate(p: Json, payload: Json, run: () => Promise<Json>) {
@@ -153,9 +166,20 @@ export class ClaudeCodeBridge {
       const project = p.project ? textRequired(p.project, '项目', 4096) : '';
       const search = p.search ? textRequired(p.search, '搜索内容', 200).toLowerCase() : '';
       const all = await this.all(p.refresh === true && !offset);
-      const matches = all.filter(info => (!project || info.cwd === project) && (!search || title(info).toLowerCase().includes(search)));
+      const configured = this.projects ? await this.projects.list() : [];
+      const assigned = new Set(configured.flatMap(item => item.sessionIds));
+      // A configured project lists its registered sessions; other sessions are grouped by folder.
+      const chosen = PROJECT_ID.test(project) ? configured.find(item => item.id === project) : undefined;
+      if (PROJECT_ID.test(project) && !chosen) throw new BridgeError('missing', '项目不存在或已删除');
+      const members = chosen ? new Set(chosen.sessionIds) : undefined;
+      const matches = all.filter(info => (!project || (members ? members.has(info.sessionId) : info.cwd === project && !assigned.has(info.sessionId)))
+        && (!search || title(info).toLowerCase().includes(search)));
       const page = matches.slice(offset, offset + PAGE);
-      const projects = !offset && !search ? [...new Set(all.map(info => info.cwd).filter((cwd): cwd is string => Boolean(cwd)))].map(path => ({id: path, path})) : undefined;
+      const folders = [...new Set(all.filter(info => !assigned.has(info.sessionId)).map(info => info.cwd).filter((cwd): cwd is string => Boolean(cwd)))];
+      const projects = !offset && !search ? [
+        ...configured.map(item => ({id: item.id, path: item.folders[0], name: item.name, kind: 'project'})),
+        ...folders.map(path => ({id: path, path, kind: 'folder'})),
+      ] : undefined;
       const now = this.now();
       return {data: page.map(info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,
         running: this.runtime.get(info.sessionId)?.running ?? now - info.lastModified < ACTIVE_MS})), hasMore: matches.length > offset + PAGE, projects};
@@ -165,13 +189,34 @@ export class ClaudeCodeBridge {
       return this.ledger.read(textRequired(p.opId, '操作标识', 100));
     }
     if (action === 'claude.models') return {models: await this.runtime.supportedModels(p.cwd ? await projectDirectory(textRequired(p.cwd, '目录', 4096)) : homedir())};
+    if (action === 'claude.project.get') {
+      const project = await this.store().get(textRequired(p.projectId, '项目', 64));
+      return {project: {id: project.id, name: project.name, folders: project.folders, instructions: project.instructions,
+        memoryDir: project.memoryDir, mcpServers: project.mcpServers, sessions: project.sessionIds.length, coworkSpaceId: project.coworkSpaceId || ''}};
+    }
+    if (action === 'claude.project.save') {
+      const store = this.store(), input = projectInput(p);
+      const id = p.projectId ? textRequired(p.projectId, '项目', 64) : '';
+      if (id && !PROJECT_ID.test(id)) throw new BridgeError('invalid', '项目 ID 无效');
+      return this.mutate(p, {action, id, input}, async () => ({projectId: (id ? await store.update(id, input) : await store.create(input)).id}));
+    }
+    if (action === 'claude.project.delete') {
+      const store = this.store(), id = textRequired(p.projectId, '项目', 64);
+      // Deleting a project keeps its sessions; they fall back to their folder groups.
+      return this.mutate(p, {action, id}, async () => ({deleted: await store.remove(id)}));
+    }
     if (action === 'claude.create') {
-      const cwd = await projectDirectory(textRequired(p.cwd, '项目目录', 4096));
+      const projectId = p.projectId ? textRequired(p.projectId, '项目', 64) : '';
+      const project = projectId ? await this.store().get(projectId) : undefined;
+      const launch = project ? await projectLaunch(project) : undefined;
+      const cwd = await projectDirectory(launch ? launch.cwd : textRequired(p.cwd, '项目目录', 4096));
       const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode);
-      return this.mutate(p, {action, cwd, text: input.text, images: fingerprint(input.images), model, mode}, async () => {
-        const session = await this.runtime.start({cwd, model, permissionMode: mode});
+      return this.mutate(p, {action, cwd, projectId, text: input.text, images: fingerprint(input.images), model, mode}, async () => {
+        const session = await this.runtime.start({cwd, model, permissionMode: mode, project: launch});
         this.runtime.send(session, input.text, input.images);
-        return {conversationId: await this.runtime.waitForId(session)};
+        const conversationId = await this.runtime.waitForId(session);
+        if (project) await this.store().addSession(project.id, conversationId);
+        return {conversationId};
       });
     }
     const id = textRequired(p.conversationId, '会话', 36);
@@ -197,7 +242,7 @@ export class ClaudeCodeBridge {
             const directory = await projectDirectory(cwd);
             if ((await this.revision(id)).external && p.confirmIdle !== true)
               throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
-            session = await this.runtime.start({cwd: directory, resume: id, model, permissionMode: mode});
+            session = await this.runtime.start({cwd: directory, resume: id, model, permissionMode: mode, project: await this.launchFor(id)});
           } else await this.runtime.configure(session, model, mode);
           this.runtime.send(session, input.text, input.images, steer);
           return {submitted: true};

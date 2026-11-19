@@ -1,6 +1,6 @@
 export type Json = Record<string, any>;
 export type AntigravityAction = `antigravity.${'list' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'operation' | 'file.read' | 'file.download'}`;
-export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation'}`;
+export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation' | 'project.get' | 'project.save' | 'project.delete'}`;
 export type CoworkAction = 'cowork.list' | 'cowork.read';
 export type AntigravityModel = {id:string; label:string};
 export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; text:string};

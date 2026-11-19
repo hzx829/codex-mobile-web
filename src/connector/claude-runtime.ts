@@ -126,7 +126,9 @@ export class ClaudeRuntime extends EventEmitter {
     this.emit('change', session.id);
   }
 
-  async start(options: {cwd: string; resume?: string; model?: string; permissionMode?: PermissionMode}): Promise<LiveSession> {
+  /** `project` adds a project's extra folders, standing instructions and MCP servers to the session. */
+  async start(options: {cwd: string; resume?: string; model?: string; permissionMode?: PermissionMode;
+    project?: {additionalDirectories: string[]; append: string; mcpServers: Record<string, Json>}}): Promise<LiveSession> {
     if (options.resume) {const existing = this.live.get(options.resume);if (existing) return existing;}
     const query = await this.load();
     const inbox = new Inbox();
@@ -140,7 +142,9 @@ export class ClaudeRuntime extends EventEmitter {
       permissionMode: mode, ...(mode === 'bypassPermissions' ? {allowDangerouslySkipPermissions: true} : {}),
       ...(executable ? {pathToClaudeCodeExecutable: executable} : {}),
       ...(this.entrypoint ? {env: claudeEnv(this.entrypoint)} : {}),
-      systemPrompt: {type: 'preset', preset: 'claude_code'},
+      systemPrompt: {type: 'preset', preset: 'claude_code', ...(options.project?.append ? {append: options.project.append} : {})},
+      ...(options.project?.additionalDirectories.length ? {additionalDirectories: options.project.additionalDirectories} : {}),
+      ...(options.project && Object.keys(options.project.mcpServers).length ? {mcpServers: options.project.mcpServers as Options['mcpServers']} : {}),
       canUseTool: (tool, input, context) => this.ask(session, tool, input, context),
       stderr: () => {}, // Native diagnostics can contain credentials; never forward them.
     }});} catch (error) {

@@ -5,6 +5,7 @@ import {AntigravityPanel} from './antigravity';
 import {AntigravitySidebar} from './antigravity-sidebar';
 import {CoworkOpenAction,CoworkPanel} from './cowork';
 import {ClaudeCodePanel} from './claude-code';
+import {ClaudeProjectEditor,isClaudeProject} from './claude-projects';
 import {ChatSearch,HomeHeader,SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,withConversation,type Service} from './services';
@@ -55,14 +56,14 @@ function initialToken(){const params=new URLSearchParams(location.hash.slice(1))
 const savedLocation=initialLocation();
 const listKey=(machine:string,project:string,archived:boolean)=>`${machine}:${project}:${archived?'archived':'recent'}`;
 type PreviewTab={id:number;target:PreviewTarget};
-type Sheet='home'|'computer'|'projects'|'approval'|'add'|'file'|'browser'|'voice'|null;
+type Sheet='home'|'computer'|'projects'|'approval'|'add'|'file'|'browser'|'voice'|'claude-project'|null;
 
 function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Json[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const [remoteListRevision,refreshRemoteList]=useState(0);
-  const [claudeNewCwd,setClaudeNewCwd]=useState<string|null>(null);
+  const [claudeNewCwd,setClaudeNewCwd]=useState<string|null>(null),[claudeEditing,setClaudeEditing]=useState('');
   const service=serviceOf(route),codexActive=service==='codex';
   useEffect(()=>setClaudeNewCwd(null),[machine,service]);
   const lastCodex=useRef({machine,route:home});
@@ -545,7 +546,8 @@ function App(){
     return <div className={`shell ${id||creatingClaude?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machineName={machineName} connected={connected} relayOnline={status==='online'}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
-        listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='cowork'?<CoworkOpenAction project={route.project}/>:undefined}
+        listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='cowork'?<CoworkOpenAction project={route.project}/>:service==='claude'&&(!route.project||isClaudeProject(route.project))?
+          <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>{setClaudeEditing(route.project);setSheet('claude-project');}}>{route.project?'编辑项目':'新建项目'}</button></div>:undefined}
         onNew={service==='claude'?project=>setClaudeNewCwd(project):undefined}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
@@ -565,6 +567,9 @@ function App(){
       </SheetPanel>}
       {sheet==='computer'&&<SheetPanel title="电脑" close={()=>setSheet(null)}>{computerOptions}</SheetPanel>}
       {sheet==='file'&&<SheetPanel title="查看项目文件" close={()=>setSheet(null)}>{fileOptions}</SheetPanel>}
+      {sheet==='claude-project'&&<SheetPanel title={claudeEditing?'编辑项目':'新建项目'} close={()=>setSheet(null)}>
+        <ClaudeProjectEditor projectId={claudeEditing} connected={connected} call={call}
+          done={next=>{setSheet(null);refreshRemoteList(value=>value+1);navigate(serviceHome('claude',next));}}/></SheetPanel>}
       {previewPane}
     </div>;
   }
@@ -645,7 +650,7 @@ function App(){
      {threadMenu&&threadMenu.machine===machine&&<ThreadMenu key={`${machine}:${threadMenu.thread.id}`} thread={threadMenu.thread} point={threadMenu.point} preference={preferences[threadMenu.thread.id]||{}} sections={[...new Set(Object.values(preferences).map(p=>p.section).filter((s):s is string=>Boolean(s)))]} archived={threadMenu.archived} compact={threadMenu.compact} connected={connected} close={()=>setThreadMenu(current=>current===threadMenu?null:current)} change={patch=>changePreference(threadMenu.thread.id,patch,threadMenu.thread)} copy={()=>copyText(threadMenu.thread.id)} rename={name=>changeThread('session.rename',threadMenu.thread,{name})} archive={()=>changeThread(threadMenu.archived?'session.unarchive':'session.archive',threadMenu.thread)} openPreview={threadMenu.compact?()=>setSheet('browser'):undefined}/>}
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
      {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
-     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',approval:'许可',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页',voice:'语音输入'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
+     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',approval:'许可',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页',voice:'语音输入','claude-project':'项目'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
        {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
       {sheet==='computer'&&computerOptions}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>{setNewCwd(p);setModel('');setEffort('');setApproval('');setSheet(null);}}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div><details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details></>}
