@@ -94,7 +94,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       if(p.role==='phone'&&m.type==='request') {
         if(typeof m.id!=='string'||m.id.length>100||typeof m.action!=='string'||!m.payload||typeof m.payload!=='object'){ws.close(4400);return;}
         if(m.action==='session.read'&&m.payload.watch===true&&!m.payload.cursor&&typeof m.payload.threadId==='string'&&typeof m.machineId==='string')p.watch={machineId:m.machineId,threadId:m.payload.threadId};
-        if(m.action==='voice.transcribe'||m.action==='file.uploadChunk'||m.action==='turn.send'&&(m.payload.images?.length||m.payload.files?.length))send(ws,{type:'received',id:m.id});
+        if(m.action==='voice.transcribe'||m.action==='file.uploadChunk'||(m.action==='turn.send'||m.action==='claude.send'||m.action==='claude.create')&&(m.payload.images?.length||m.payload.files?.length))send(ws,{type:'received',id:m.id});
         if(m.action==='preview.start'||m.action==='preview.stop')try{
           m.payload.threadId=textRequired(m.payload.threadId,'会话');
           if(m.action==='preview.stop')m.payload.sessionId=textRequired(m.payload.sessionId,'预览会话');

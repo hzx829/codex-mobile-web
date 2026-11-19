@@ -33,7 +33,7 @@ test('connector routes app actions by prefix and keeps Codex as the fallback', a
 });
 
 test('phone app routes come from one registry', () => {
-  assert.deepEqual(SERVICE_IDS,['codex','antigravity','cowork']);
+  assert.deepEqual(SERVICE_IDS,['codex','antigravity','claude','cowork']);
   // Changing computers keeps the current app instead of falling back to Codex.
   assert.deepEqual(serviceHome('cowork'),{...home,cowork:''});
   assert.deepEqual(serviceHome('antigravity','file:///c%3A/work'),{...home,project:'file:///c%3A/work',antigravity:''});

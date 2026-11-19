@@ -1,10 +1,11 @@
 export type Json = Record<string, any>;
 export type AntigravityAction = `antigravity.${'list' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'operation' | 'file.read' | 'file.download'}`;
+export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation'}`;
 export type CoworkAction = 'cowork.list' | 'cowork.read';
 export type AntigravityModel = {id:string; label:string};
 export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; text:string};
 export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'};
-export type RequestAction = AntigravityAction | CoworkAction | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
+export type RequestAction = AntigravityAction | ClaudeAction | CoworkAction | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
 export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string }

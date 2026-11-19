@@ -32,9 +32,9 @@ test('app switches restore each machine and app independently, and retired apps 
     assert.deepEqual(switchRoute('other', home, 'antigravity'), {...home, antigravity:''});
     for (const route of [ag, cowork, codex]) assert.deepEqual(parseLocation({cmwRoute:route,cmwMachine:'pc'})?.route,route);
     assert.equal(serviceOf(cowork),'cowork');
-    for (const retired of [{chat:id},{claude:id,project:'D:/work'}]) {
-      assert.deepEqual(parseLocation({cmwRoute:{...home,...retired},cmwMachine:'pc'}),{route:home,machine:'pc'});
-    }
+    assert.deepEqual(parseLocation({cmwRoute:{...home,chat:id},cmwMachine:'pc'}),{route:home,machine:'pc'});
+    const claude = {...home, claude:id, project:'D:/work'};
+    assert.deepEqual(parseLocation({cmwRoute:claude,cmwMachine:'pc'}),{route:claude,machine:'pc'}, 'Claude Code is back and keeps its project');
     assert.equal(parseLocation({cmwRoute:{...cowork,antigravity:id},cmwMachine:'pc'}),null);
     assert.equal(parseLocation({cmwRoute:{...home,antigravity:'../bad'},cmwMachine:'pc'}),null);
   } finally {

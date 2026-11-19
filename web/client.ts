@@ -46,7 +46,7 @@ export class Client {
     return new Promise((resolve,reject)=>{
       // The timer starts before the browser finishes sending the WebSocket frame.
       // Attachments can spend much of the ordinary 45 seconds on a slow uplink.
-      const timeout=action==='voice.transcribe'||action==='file.uploadChunk'||action==='turn.send'&&(payload.images?.length||payload.files?.length)?240_000:45_000;
+      const timeout=action==='voice.transcribe'||action==='file.uploadChunk'||(action==='turn.send'||action==='claude.send'||action==='claude.create')&&(payload.images?.length||payload.files?.length)?240_000:45_000;
       const id=uuid();const timer=setTimeout(()=>{this.pending.delete(id);reject({code:'timeout',message:'回执超时，请核实操作结果',uncertain:true});},timeout);
       this.pending.set(id,{resolve,reject,timer,receiptTimeout:action==='voice.transcribe'?VOICE_REQUEST_TIMEOUT_MS+5000:45_000});
       try{this.ws!.send(JSON.stringify({type:'request',id,machineId,action,payload}));}

@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState,type ReactNode} from 'react';
 import {ChatSearch,HomeHeader,workspaceName} from './chat-layout';
 import {Icon} from './icons';
+import {IconButton} from './icon-button';
 import {relativeTime,ThreadRow} from './thread-menu';
 import {SessionListLoader} from './session-list-loader';
 import {useStableEvent} from './use-event';
@@ -12,10 +13,12 @@ type Page={data:Thread[];hasMore:boolean;projects?:Project[];notice?:string};
 type Props={
   /** List action and wording of the app this sidebar shows; defaults to Antigravity. */
   listAction?:RequestAction;appName?:string;
+  /** Starts a new conversation in the shown project; omitted for apps that cannot create one. */
+  onNew?:(project:string)=>void;
   selected:string;project:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;switcher:ReactNode;action?:ReactNode;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseProject:(id:string)=>void;chooseComputer:()=>void;more:()=>void;
 };
-export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',selected,project,machineName,connected,relayOnline,inert,revision,switcher,action,call,open,chooseProject,chooseComputer,more}:Props){
+export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',onNew,selected,project,machineName,connected,relayOnline,inert,revision,switcher,action,call,open,chooseProject,chooseComputer,more}:Props){
   const [search,setSearch]=useState(''),[query,setQuery]=useState(''),[projects,setProjects]=useState<Project[]>([]);
   const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean}|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
@@ -65,6 +68,6 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
         {current?.hasMore&&<button className="more-link" disabled={!connected||busy} onClick={()=>load(true)}>{busy?'正在加载…':'加载更多'}</button>}
       </section>
     </div>
-    <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/></div></div>
+    <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/>{onNew&&<IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected} onClick={()=>onNew(projectLabel||'')}/>}</div></div>
   </aside>;
 }
