@@ -72,6 +72,8 @@ export class LiveSession {
   closed = false;
   interrupting = false;
   hint = '';
+  /** Context window size, read once from Claude Code. */
+  window?: number | null;
   constructor(public cwd: string, public query: Query, public inbox: Inbox, public model: string, public permissionMode: PermissionMode) {}
   get pending() {return [...this.requests.values()].map(request => request.view);}
 }
@@ -127,7 +129,8 @@ export class ClaudeRuntime extends EventEmitter {
   }
 
   /** Project settings (CLAUDE.md, .mcp.json, .claude/settings.json, memory) come from the folder, as in the terminal. */
-  async start(options: {cwd: string; resume?: string; model?: string; permissionMode?: PermissionMode}): Promise<LiveSession> {
+  /** `resumeAt`: continue from this transcript entry, dropping what came after it (an edited message). */
+  async start(options: {cwd: string; resume?: string; resumeAt?: string; model?: string; permissionMode?: PermissionMode}): Promise<LiveSession> {
     if (options.resume) {const existing = this.live.get(options.resume);if (existing) return existing;}
     const query = await this.load();
     const inbox = new Inbox();
@@ -137,7 +140,7 @@ export class ClaudeRuntime extends EventEmitter {
     const hint = executable ? '' : '没有找到电脑上的 claude 程序；请安装 Claude Code，或在连接器配置中设置 claudeBin。';
     let q: Query;
     try {q = query({prompt: inbox, options: {
-      cwd: options.cwd, ...(options.resume ? {resume: options.resume} : {}), ...(options.model ? {model: options.model} : {}),
+      cwd: options.cwd, ...(options.resume ? {resume: options.resume} : {}), ...(options.resume && options.resumeAt ? {resumeSessionAt: options.resumeAt} : {}), ...(options.model ? {model: options.model} : {}),
       permissionMode: mode, ...(mode === 'bypassPermissions' ? {allowDangerouslySkipPermissions: true} : {}),
       ...(executable ? {pathToClaudeCodeExecutable: executable} : {}),
       ...(this.entrypoint ? {env: claudeEnv(this.entrypoint)} : {}),
@@ -209,6 +212,25 @@ export class ClaudeRuntime extends EventEmitter {
   }
 
   /** Ends the process so another client (terminal, IDE) may resume the session. */
+  /** Ends an idle session's process now, so it can be started again from an earlier point. */
+  async shutdown(session: LiveSession) {
+    if (session.running || session.requests.size || session.inbox.size) throw new BridgeError('active', 'Claude Code 正在处理这条会话，请等它结束');
+    session.inbox.close();
+    try {session.query.close();} catch {}
+    this.closeSession(session);
+  }
+
+  /** Context window use of a session this connector runs, as Claude Code reports it. */
+  async contextWindow(session: LiveSession): Promise<number | null> {
+    if (session.closed) return null;
+    if (session.window !== undefined) return session.window;
+    try {
+      const usage = await Promise.race([session.query.getContextUsage(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))]);
+      session.window = Number(usage.maxTokens) || null;
+    } catch {session.window = null;}
+    return session.window;
+  }
+
   release(session: LiveSession) {
     if (session.running || session.requests.size || session.inbox.size) return;
     session.inbox.close();

@@ -30,6 +30,34 @@ M0 中关于桌面 App 数据目录、Cowork 文件格式的记录保留在 `M0-
 - 保存时比较读取时的版本，电脑上改过就拒绝，提示重新打开。只发改过的 MCP 文本，`.mcp.json` 坏了也不影响改 `CLAUDE.md`。
 - 多文件夹：用 Claude Code 自己的 `.claude/settings.json` 里的 `permissions.additionalDirectories`，手机端暂不提供编辑。
 
+### 3. 会话操作（和 Codex 对齐）
+用 Agent SDK 自己的会话函数，写出来的会话终端 `claude --resume` 也能接着用：
+| 手机操作 | 连接器动作 | SDK |
+|---|---|---|
+| 某轮回复下的“分叉” | `claude.fork {conversationId, upToMessageId}` | `forkSession`，`upToMessageId` 是这一轮最后一条记录（`TurnView.anchor`），新会话标题加“（分叉）” |
+| 长按会话 →“复制会话” | `claude.fork {conversationId}` | 整条复制，标题加“（副本）”；会话运行中时拒绝 |
+| 重命名 | `claude.rename {conversationId, title}` | `renameSession`，写入会话记录；连接器记住自己写的版本，不会误判成“电脑上正在运行” |
+| 归档 | `claude.archive {conversationId}` | `archiveSession`；运行中或电脑上 20 秒内写过时拒绝。列表不显示已归档会话，在会话里再发消息会自动取消归档 |
+
+置顶和复制会话 ID 只在手机浏览器里，Claude Code 和 Antigravity 都有（按应用和电脑分开存）。Antigravity 的 Hub 目前没有用到复制、重命名或归档的接口，所以它的菜单只有置顶和复制 ID。
+
+### 4. 和 Codex 对齐的会话体验
+| Codex 里的功能 | Claude Code 的做法 |
+|---|---|
+| 改写并重发消息 | `claude.edit {conversationId, turnId, text}`：用 `resume` + `resumeSessionAt` 从上一轮的最后一条记录接着跑，这条消息及之后的内容被丢弃，会话 ID 不变（已用真实 claude.exe 验证）。第一条消息没有“上一轮”，提示改用“复制会话”。不传 `resumeDropsTurn`，因为它只允许丢弃一轮。 |
+| 每轮的“N 个文件已更改”卡片和差异查看 | SDK 的消息里没有改动内容，连接器另读原始记录里 Edit/Write 结果的 `toolUseResult.structuredPatch`（新建文件用 `content`），按工具调用拼成 unified diff 放进 `TurnView.diff`。 |
+| 标题栏的上下文指示和“会话操作”菜单 | 上下文用量取最后一条回复的 `usage`；会话在手机控制下时再用 `getContextUsage()` 取窗口大小。菜单有复制会话、复制 ID、重命名、归档。Claude Code 不提供账号额度。 |
+| 发送后立即显示消息、语音输入 | 复用 Codex 的 `PendingMessage` 和语音输入（Codex 识别或系统键盘）。 |
+
+### 5. claude.ai 上的 Artifact（完全经电脑中转）
+Claude Code 用 Artifact 工具发布的页面在 claude.ai 上，账户私有，而且 claude.ai 不允许被嵌入（`frame-ancestors 'self'`）。手机端不访问 claude.ai：
+- **入口**：回复里的 `claude.ai/artifact/…` 链接显示为“在应用内查看”；发布或修改过页面的那一轮下面有页面卡片（从 Artifact/ArtifactData 工具调用和结果中取 URL 与标题）。
+- **渲染**：连接器用自己的浏览器档案（数据目录下 `claude-browser`，Edge 或 Chrome，`CLAUDE_ARTIFACT_BROWSER` 可指定）打开页面。默认无头模式加普通 UA；被 Cloudflare 拦下时改用屏幕外窗口。连接器通过 CDP 找到 `*.frame.claudeusercontent.com` 框架，等内容稳定后，在隔离环境里把 DOM 序列化成静态 HTML：样式表、`adoptedStyleSheets`、Shadow DOM、canvas（转图片）、输入框的值、子框架（`srcdoc`）都保留；图片和字体用 `Page.getResourceContent` 从浏览器缓存取，不受页面 CSP 限制；所有脚本和事件属性删除，加上只允许内联样式和 data: 资源的 CSP。
+- **传输**：快照存在数据目录 `claude-artifacts/<id>/<宽度>-light.html`，按手机宽度（40px 一档）缓存。手机分块下载（复用文件下载），放进不带 `allow-scripts` 的 sandbox iframe 显示。渲染可能超过中继 40 秒超时，所以 `claude.artifact.snapshot` 最多等 25 秒，没好就返回 `rendering`，手机再次请求。
+- **登录**：第一次需要登录 claude.ai。手机上显示电脑浏览器的截图，点画面、输入文字、按键（回车/退格/Tab）、滚动、粘贴邮件登录链接（只允许 claude.ai / anthropic.com）都由 `claude.artifact.login` 转给电脑。Cloudflare 的“请验证您是真人”由用户自己点。登录状态以 `sessionKey` cookie 判断。
+- **限制**：快照是静态的，悬停提示、切换标签等交互不可用，需要时点“刷新”重新生成。浏览器空闲 3 分钟后关闭。
+- **信任边界**：持有中继 Token 的人可以通过登录窗口操作这台电脑上已登录 claude.ai 的浏览器，这与现有的“可以在电脑上运行 Claude Code”属于同一信任范围。
+
 ## 风险
 
 - `~/.claude/projects` 下目录的命名规则没有公开；推算失败只影响“还没有会话的文件夹”的记忆显示。

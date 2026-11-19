@@ -1,5 +1,12 @@
 import {useEffect,useRef,useState,type ClipboardEvent} from 'react';
-import {ConversationStatus,ConversationTurn,connectionLost} from './conversation';
+import {ConversationStatus,ConversationTurn,PendingMessage,connectionLost} from './conversation';
+import {ThreadMenu} from './thread-menu';
+import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
+import {optimisticDelivered,optimisticMessage,OPTIMISTIC_ACCEPTED_MS,type OptimisticMessage} from './optimistic';
+import {useVoiceInput} from './use-voice-input';
+import type {MenuPoint} from './popover';
+import type {ThreadActions} from './antigravity-sidebar';
+import type {VoiceProvider} from '../src/shared/voice';
 import {SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight,workspaceName} from './chat-layout';
 import {IconButton} from './icon-button';
 import {Icon} from './icons';
@@ -7,19 +14,24 @@ import {useStableEvent} from './use-event';
 import {operationId} from './client';
 import {clipboardImageFiles,readImageFiles,appendImages,pastedImage} from './attachments';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
-import type {Json,RequestAction,TurnView} from '../src/shared/types';
+import type {Json,RequestAction,SessionView,TurnView} from '../src/shared/types';
 
 type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;
   /** Where a new session starts: a project folder or '' to choose; null while a saved session is open. */
   newCwd:string|null;created:(id:string)=>void;
+  /** Opens a session copied from this one. */
+  forked:(id:string)=>void;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;
   openFile:(path:string)=>void;openPreview:(url:string)=>void;showFiles:()=>void;showImage:(url:string,title:string)=>void;
   copyText:(text:string)=>Promise<void>;clearPreviewError:()=>void;
+  /** Codex-style extras: a turn's file changes, voice input and the session menu (rename, copy, archive). */
+  showDiff:(turn:TurnView)=>void;voiceMode:VoiceProvider;actions?:(thread:Json)=>ThreadActions;
 };
 type Request={id:string;kind:'permission'|'question'|'plan';tool:string;title:string;detail:string;canRemember:boolean;questions?:{question:string;header:string;multiSelect:boolean;options:{label:string;description:string}[]}[]};
-const noop=()=>{};
-const notEditable=()=>Promise.reject(new Error('Claude Code 会话暂不支持改写旧消息'));
+const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
+const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:TurnView)=>turn.items.filter(item=>item.role==='user').map(item=>item.id)):[];
+function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
 type Place={id:string;path:string};
 const OTHER='__other';
 const MODES:[string,string][]=[['','默认审批'],['default','按规则审批'],['acceptEdits','自动接受编辑'],['plan','只做计划'],['bypassPermissions','全部允许（慎用）']];
@@ -34,6 +46,7 @@ export function ClaudeCodePanel(props:Props){
   const [view,setView]=useState<Json|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
   const [draft,setDraft]=useState(()=>load(`${scope}:draft`)),[images,setImages]=useState<string[]>([]),[pending,setPending]=useState(()=>load(`${scope}:pending`));
   const [model,setModel]=useState(()=>load(`claude:${machine}:model`)),[mode,setMode]=useState('');
+  const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null),[menuPoint,setMenuPoint]=useState<MenuPoint|null>(null),[statusPoint,setStatusPoint]=useState<MenuPoint|null>(null);
   const [models,setModels]=useState<Json[]|null>(null),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]);
   const request=useRef(call);request.current=call;
   const alive=useRef(true),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null),picker=useRef<HTMLInputElement>(null);
@@ -73,10 +86,20 @@ export function ClaudeCodePanel(props:Props){
     document.addEventListener('visibilitychange',watch);
     return()=>{active=false;clearTimeout(timer);document.removeEventListener('visibilitychange',watch);};
   },[connected,conversationId,view?.revision]);
-  useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view]);
+  useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,outgoing]);
+  // A sent message shows at once, until the conversation has it (or a while after the computer accepted it).
+  useEffect(()=>{if(outgoing&&optimisticDelivered(outgoing,{turns:view?.turns||[]} as unknown as SessionView))setOutgoing(null);},[view,outgoing]);
+  useEffect(()=>{if(!outgoing?.acceptedAt)return;const timer=setTimeout(()=>setOutgoing(null),OPTIMISTIC_ACCEPTED_MS);return()=>clearTimeout(timer);},[outgoing?.acceptedAt]);
+  const voice=useVoiceInput(props.voiceMode,scope,connected,{
+    keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
+    transcribe:recording=>request.current('voice.transcribe',recording),
+    text:text=>{edit(draft.trim()?`${draft.trimEnd()}\n${text}`:text);setNotice('已填入输入框，确认后发送。');},
+    error:failed,
+  });
+  const voiceBusy=voice.state!=='idle';
   useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice]);
 
-  async function mutate(action:'claude.create'|'claude.send'|'claude.stop'|'claude.respond',payload:Json,onAccepted?:(result:Json)=>void){
+  async function mutate(action:'claude.create'|'claude.send'|'claude.stop'|'claude.respond'|'claude.fork'|'claude.edit',payload:Json,onAccepted?:(result:Json)=>void){
     if(lock.current||pending||!connected)return false;
     lock.current=true;setBusy(true);setError('');
     const opId=operationId();remember(opId);
@@ -95,7 +118,7 @@ export function ClaudeCodePanel(props:Props){
     try{
       const result=await request.current('claude.operation',{opId:pending});
       if(!alive.current)return;
-      if(result.state==='accepted'){remember('');setError('');if(result.conversationId&&creating){edit('');props.created(result.conversationId);}else if(result.submitted){edit('');setImages([]);}}
+      if(result.state==='accepted'){remember('');setError('');if(result.conversationId&&creating){edit('');props.created(result.conversationId);}else if(result.conversationId)props.forked(result.conversationId);else if(result.submitted){edit('');setImages([]);}}
       else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
       else setError('结果尚未确认。请刷新会话并在电脑核实；系统不会自动重发。');
     }catch(e){failed(e);}finally{lock.current=false;if(alive.current)setBusy(false);}
@@ -120,8 +143,18 @@ export function ClaudeCodePanel(props:Props){
     }
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
     stick.current=true;
-    await mutate('claude.send',{conversationId,text,images,...settings,...(steer?{mode:'steer'}:{}),...(external?{confirmIdle:true}:{})},
+    const message={...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,[]),baseline:userIds(view)};
+    setOutgoing(message);
+    const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(steer?{mode:'steer'}:{}),...(external?{confirmIdle:true}:{})},
       ()=>{edit('');setImages([]);if(selectedMode==='bypassPermissions')setMode('');setNotice(running?steer?'已追加到当前任务':'已排队，当前任务结束后发送':'');});
+    setOutgoing(old=>old!==message?old:accepted?{...message,acceptedAt:Date.now()}:null);
+  }
+  /** Rewrites a sent message: the session continues from the turn before it, as Codex does. */
+  async function resend(turnId:string,text:string){
+    if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
+    const settings={...(model?{model}:{}),...(selectedMode&&selectedMode!=='bypassPermissions'?{permissionMode:selectedMode}:{})};
+    stick.current=true;
+    await mutate('claude.edit',{conversationId,turnId,text,...settings,...(external?{confirmIdle:true}:{})});
   }
   async function addImages(files:File[]){
     if(!files.length)return;
@@ -146,6 +179,13 @@ export function ClaudeCodePanel(props:Props){
   function chooseModel(value:string){setModel(value);store(`claude:${machine}:model`,value);}
 
   const copy=useStableEvent((text:string)=>void copyText(text).catch(()=>setError('复制失败，请长按选择文字')));
+  // A fork is a new Claude Code session holding the transcript up to the end of this turn.
+  const editTurn=useStableEvent((turnId:string,_item:string,text:string)=>resend(turnId,text));
+  const diff=useStableEvent((turn:TurnView)=>props.showDiff(turn));
+  const fork=useStableEvent((turn:TurnView)=>{
+    if(!turn.canFork||!turn.anchor){setNotice(turn.status==='inProgress'?'请等这一轮结束后再分叉':'这一轮暂不能分叉，请刷新后重试');return;}
+    void mutate('claude.fork',{conversationId,upToMessageId:turn.anchor},result=>props.forked(result.conversationId));
+  });
   const followup=useStableEvent((text:string)=>{edit(draft.trim()?`${draft.trimEnd()}\n\n${text}`:text);composer.current?.focus();});
   const turns:TurnView[]=view?.turns||[];
   const requests:Request[]=view?.requests||[];
@@ -156,7 +196,10 @@ export function ClaudeCodePanel(props:Props){
   const modelLabel=(models||[]).find(item=>item.id===model)?.label||model;
   return <main className="thread-panel" inert={inert}>
     <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}>
-      {!creating&&<IconButton icon="refresh" label="刷新会话" disabled={!connected||busy} onClick={()=>void refresh()}/>}
+      {!creating&&<>
+        <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文" disabled={!view} onClick={e=>setStatusPoint(headerPoint(e.currentTarget))}><ContextIndicator usage={view?.contextUsage}/></button>
+        <button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" title="会话操作" disabled={!view} onClick={e=>setMenuPoint(headerPoint(e.currentTarget))}><Icon name="more"/></button>
+      </>}
     </ThreadHeader>
     {view?.notice&&<div className="banner">{view.notice}</div>}
     <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={()=>{const el=scroll.current!;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;}}><div className="timeline-content">
@@ -171,8 +214,9 @@ export function ClaudeCodePanel(props:Props){
         {startPath&&<p className="muted">{startPath}</p>}</div>:<>
         {view?.truncated&&<p className="muted">仅显示近期记录，完整会话可在电脑查看。</p>}
         {!view&&busy&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
-        {turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source={view?.controlled?'connector':'history'} latestUser={false} disabled={!canWrite}
-          openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={notEditable} onFork={noop} onDiff={noop} onBlocked={setNotice} editBlocked="Claude Code 会话暂不支持改写旧消息" hideFork/>)}
+        {turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source="connector"  latestUser={false} disabled={!canWrite}
+          openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={editTurn} onFork={fork} onDiff={diff} onBlocked={setNotice} editBlocked={!view?.truncated&&turn.id===turns[0]?.id?FIRST_MESSAGE:undefined}/>)}
+        {outgoing&&<PendingMessage message={outgoing} openFile={openFile} openPreview={openPreview} onFollowup={followup}/>}
         {view&&!turns.length&&!running&&<p className="muted">这条会话还没有可显示的消息。</p>}
         {view?.error&&<ConversationStatus>{view.error}</ConversationStatus>}
       </>}
@@ -183,6 +227,7 @@ export function ClaudeCodePanel(props:Props){
         respond={(decision,answers)=>void mutate('claude.respond',{conversationId,requestId:item.id,decision,...(answers?{answers}:{})})}/>)}</div>
       {(error||previewError)&&<div className="feedback error" role="alert"><span>{error||previewError}</span><IconButton icon="close" label="关闭提示" onClick={()=>{setError('');clearPreviewError();}}/></div>}
       {notice&&<div className="feedback" role="status">{notice}</div>}
+      {voiceBusy&&<div className="voice-status" role="status"><span>{voice.state==='starting'?'正在请求麦克风…':voice.state==='recording'?'录音中 · 最长 2 分钟':'正在识别…'}</span><button type="button" onClick={voice.cancel}>取消</button></div>}
       {pending&&!busy&&<div className="pending"><button onClick={()=>void check()} disabled={!connected}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先在会话和电脑上确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
       {running&&view?.controlled&&<div className="running-status"><i className="dot online"/>Claude Code 正在处理{view?.queued?' · 有排队消息':''}</div>}
       <form className={`composer ${images.length?'with-images':''}`} onSubmit={e=>{e.preventDefault();void send();}}>
@@ -194,6 +239,8 @@ export function ClaudeCodePanel(props:Props){
           onChange={e=>edit(e.target.value)} onKeyDown={e=>submitOnDesktop(e,()=>void send())}/>
         <div className="composer-toolbar">
           <IconButton icon="image" label="添加图片" className="composer-add" disabled={!canWrite} onClick={()=>picker.current?.click()}/>
+          <IconButton icon={voice.state==='recording'?'stop':'mic'} label={voice.state==='recording'?'结束录音并识别':voice.state==='transcribing'?'正在识别':'语音输入'} className={`composer-add ${voice.state==='recording'?'recording':''}`}
+            disabled={busy||voice.state==='starting'||voice.state==='transcribing'||props.voiceMode==='codex'&&!connected} onClick={()=>{if(voice.state==='recording')voice.stop();else{setError('');voice.start();}}}/>
           {!creating&&<IconButton icon="file" label="查看项目文件" className="composer-add" disabled={!connected||!view} onClick={showFiles}/>}
           <input ref={picker} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={e=>{const files=Array.from(e.target.files||[]);e.target.value='';void addImages(files);}}/>
           <select className="claude-select" aria-label="模型" value={model} disabled={!connected||busy} onFocus={()=>void openModels()} onPointerDown={()=>void openModels()} onChange={e=>chooseModel(e.target.value)}>
@@ -212,6 +259,10 @@ export function ClaudeCodePanel(props:Props){
         </div>
       </form>
     </footer>
+    {menuPoint&&view&&<ThreadMenu thread={{id:conversationId,title:view.title,status:running?{type:'active'}:undefined}} point={menuPoint} preference={{}} sections={[]} archived={false} compact connected={connected}
+      close={()=>setMenuPoint(null)} copy={()=>copyText(conversationId)} {...(props.actions?.({id:conversationId,title:view.title})||{})}/>}
+    {statusPoint&&view&&<ThreadStatusPanel point={statusPoint} view={{...view,source:'connector'} as unknown as SessionView} threadId={conversationId} cwd={view.cwd} connected={connected} close={()=>setStatusPoint(null)}
+      copy={()=>copyText(conversationId)} read={async()=>({threadId:conversationId,limits:[],limitsNotice:'Claude Code 不提供额度信息，可在电脑上运行 /usage 查看'})}/>}
   </main>;
 }
 
