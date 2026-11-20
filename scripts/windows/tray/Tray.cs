@@ -1,36 +1,46 @@
-// System tray launcher for the Windows portable package.
+// System tray app for the Windows portable package.
 // Compiled by scripts/package-windows.ts with the .NET Framework C# 5 compiler that ships with Windows,
 // so it must stay within C# 5 (no string interpolation, no ?. operator, no expression-bodied members).
-// All service work is delegated to the existing PowerShell scripts, which stay the single source of truth.
+// Service work is delegated to the existing PowerShell scripts and build/setup.mjs, which stay the single
+// source of truth. The window (DesktopWindow.cs) is a WebView2 page; without the WebView2 runtime the tray
+// falls back to the connection page in the browser and the PowerShell settings form.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 static class Program {
   [STAThread]
   static int Main(string[] args) {
+    string root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
+    string runtime = Path.Combine(root, "runtime");
+    // WebView2's managed DLL ships in runtime\ to keep the package root tidy.
+    AppDomain.CurrentDomain.AssemblyResolve += delegate(object sender, ResolveEventArgs e) {
+      string path = Path.Combine(runtime, new AssemblyName(e.Name).Name + ".dll");
+      return File.Exists(path) ? Assembly.LoadFrom(path) : null;
+    };
     if (args.Length == 2 && args[0] == "--write-icon") {Logo.WriteIco(args[1]); return 0;}
     bool background = Array.IndexOf(args, "--background") >= 0;
-    string root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
     string key = "Local\\CodexMobileWeb-" + Hash(root.ToLowerInvariant());
     bool created;
     using (Mutex mutex = new Mutex(true, key, out created)) {
       if (!created) {
-        // Already running for this folder: ask that instance to show the connection page.
+        // Already running for this folder: ask that instance to show its window.
         if (!background) {try {EventWaitHandle.OpenExisting(key + "-show").Set();} catch (Exception) {}}
         return 0;
       }
       using (EventWaitHandle show = new EventWaitHandle(false, EventResetMode.AutoReset, key + "-show")) {
+        NativeMenus.FollowSystemTheme();
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new TrayContext(root, background, show));
@@ -48,55 +58,77 @@ static class Program {
   }
 }
 
-sealed class ScriptResult {
+// Lets the native tray menu follow the Windows light/dark setting (uxtheme ordinals used by Explorer and Terminal).
+static class NativeMenus {
+  [DllImport("uxtheme.dll", EntryPoint = "#135")] static extern int SetPreferredAppMode(int mode);
+  [DllImport("uxtheme.dll", EntryPoint = "#136")] static extern void FlushMenuThemes();
+  public static void FollowSystemTheme() {
+    try {
+      if (Environment.OSVersion.Version.Build < 17763) return;
+      SetPreferredAppMode(1);
+      FlushMenuThemes();
+    } catch (Exception) {}
+  }
+}
+
+sealed class ProcessResult {
   public int Code;
-  public string Error;
+  public string Output = "";
+  public string Error = "";
 }
 
 enum ServiceState {Stopped, Partial, Running}
 
 sealed class TrayContext : ApplicationContext {
-  const string Title = "Codex Mobile Web";
+  const string Title = "Codex 随行";
   readonly string root, local, configPath;
+  readonly bool webview;
   readonly NotifyIcon icon = new NotifyIcon();
-  readonly ContextMenuStrip menu = new ContextMenuStrip();
+  readonly ContextMenu menu = new ContextMenu();
   readonly Control invoker = new Control();
   readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
-  readonly ToolStripMenuItem statusItem, showItem, startItem, stopItem, configureItem, logsItem, autostartItem, exitItem;
-  readonly Icon runningIcon, partialIcon, stoppedIcon, busyIcon;
+  readonly System.Windows.Forms.Timer healthTimer = new System.Windows.Forms.Timer();
+  readonly JavaScriptSerializer json = new JavaScriptSerializer();
+  readonly MenuItem statusItem, openItem, copyItem, toggleItem, settingsItem, logsItem, autostartItem, exitItem;
+  readonly Icon runningIcon, partialIcon, stoppedIcon, busyIcon, appIcon;
+  DesktopWindow window;
   ServiceState state = ServiceState.Stopped;
-  bool busy, quiet, expectRunning, balloonOpensLogs;
-  string busyText = "";
+  string busy;            // "starting" | "stopping" | "saving" while an operation runs
+  string lastError;       // shown in the window until the next start
+  string lastPosted;
+  Dictionary<string, object> config;
+  bool quiet, expectRunning, balloonOpensLogs, checkingHealth, quitting;
 
   public TrayContext(string root, bool background, EventWaitHandle show) {
     this.root = root;
     local = Path.Combine(root, ".local");
     configPath = Path.Combine(local, "config.json");
     IntPtr handle = invoker.Handle; // Creates the window used to marshal calls back to the UI thread.
+    webview = File.Exists(Path.Combine(root, "build", "desktop", "index.html")) && Web.Available(Path.Combine(root, "runtime"));
 
     int size = SystemInformation.SmallIconSize.Width;
     runningIcon = Logo.Create(size, Color.FromArgb(34, 197, 94));
     partialIcon = Logo.Create(size, Color.FromArgb(239, 68, 68));
     stoppedIcon = Logo.Create(size, Color.FromArgb(156, 163, 175));
     busyIcon = Logo.Create(size, Color.FromArgb(245, 158, 11));
+    appIcon = Logo.Create(SystemInformation.IconSize.Width, Color.Empty);
 
-    statusItem = new ToolStripMenuItem("") {Enabled = false};
-    showItem = new ToolStripMenuItem("显示连接二维码", null, delegate {OpenOrStart();});
-    showItem.Font = new Font(showItem.Font, FontStyle.Bold);
-    startItem = new ToolStripMenuItem("启动服务", null, delegate {StartClicked();});
-    stopItem = new ToolStripMenuItem("停止服务", null, delegate {StopClicked();});
-    configureItem = new ToolStripMenuItem("修改连接配置…", null, delegate {ChangeConfig();});
-    logsItem = new ToolStripMenuItem("打开日志文件夹", null, delegate {OpenLogs();});
-    autostartItem = new ToolStripMenuItem("登录 Windows 时自动启动", null, delegate {ToggleAutostart();});
-    exitItem = new ToolStripMenuItem("退出", null, delegate {Exit();});
-    menu.Items.AddRange(new ToolStripItem[] {
-      statusItem, new ToolStripSeparator(), showItem, new ToolStripSeparator(),
-      startItem, stopItem, configureItem, logsItem, autostartItem, new ToolStripSeparator(), exitItem
+    statusItem = new MenuItem("") {Enabled = false};
+    openItem = new MenuItem("打开窗口", delegate {ShowWindow();}) {DefaultItem = true};
+    copyItem = new MenuItem("复制连接链接", delegate {CopyLink();});
+    toggleItem = new MenuItem("启动服务", delegate {ToggleService();});
+    settingsItem = new MenuItem("连接设置…", delegate {OpenSettings();});
+    logsItem = new MenuItem("查看日志", delegate {OpenLogs();});
+    autostartItem = new MenuItem("登录时自动启动", delegate {SetAutostart(!File.Exists(StartupLink));});
+    exitItem = new MenuItem("退出", delegate {Exit();});
+    menu.MenuItems.AddRange(new[] {
+      statusItem, new MenuItem("-"), openItem, copyItem, new MenuItem("-"),
+      toggleItem, settingsItem, logsItem, new MenuItem("-"), autostartItem, new MenuItem("-"), exitItem
     });
-    menu.Opening += delegate {autostartItem.Checked = File.Exists(StartupLink);};
+    menu.Popup += delegate {autostartItem.Checked = File.Exists(StartupLink);};
 
-    icon.ContextMenuStrip = menu;
-    icon.MouseClick += delegate(object sender, MouseEventArgs e) {if (e.Button == MouseButtons.Left) OpenOrStart();};
+    icon.ContextMenu = menu;
+    icon.MouseClick += delegate(object sender, MouseEventArgs e) {if (e.Button == MouseButtons.Left) ShowWindow();};
     icon.BalloonTipClicked += delegate {if (balloonOpensLogs) OpenLogs();};
     state = ReadState();
     UpdateUi();
@@ -105,9 +137,12 @@ sealed class TrayContext : ApplicationContext {
     timer.Interval = 3000;
     timer.Tick += delegate {RefreshStatus();};
     timer.Start();
+    healthTimer.Interval = 10000;
+    healthTimer.Tick += delegate {CheckHealth();};
+    healthTimer.Start();
 
     Thread listener = new Thread(delegate() {
-      while (true) {show.WaitOne(); invoker.BeginInvoke((MethodInvoker)delegate {OpenOrStart();});}
+      while (true) {show.WaitOne(); invoker.BeginInvoke((MethodInvoker)delegate {ShowWindow();});}
     });
     listener.IsBackground = true;
     listener.Start();
@@ -115,102 +150,274 @@ sealed class TrayContext : ApplicationContext {
     invoker.BeginInvoke((MethodInvoker)delegate {Launch(background);});
   }
 
+  bool Configured {get {return File.Exists(configPath);}}
+
   string StartupLink {
     get {return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "Codex Mobile Web.lnk");}
   }
 
   async void Launch(bool background) {
-    if (!File.Exists(configPath)) {
-      if (background) {Notify("尚未完成连接配置", "点击托盘图标完成配置后启动。", ToolTipIcon.Info, false); return;}
-      if (!await Configure()) return;
+    if (!Configured) {
+      if (background) {Notify("尚未完成连接设置", "点击托盘图标完成设置后启动。", ToolTipIcon.Info, false); return;}
+      if (webview) {ShowWindow(); return;}
+      if (!await LegacyConfigure()) return;
     }
     quiet = background;
-    await Start(!background);
+    if (!background && webview) ShowWindow();
+    await Start(!background && !webview);
     quiet = false;
   }
 
-  async void OpenOrStart() {
-    if (busy) return;
-    if (state == ServiceState.Running) {OpenPage(); return;}
-    if (!File.Exists(configPath) && !await Configure()) return;
-    await Start(true);
+  // ---- Window ------------------------------------------------------------------------------------------
+
+  void ShowWindow() {
+    if (!webview) {LegacyOpen(); return;}
+    if (window == null || window.IsDisposed) {
+      window = new DesktopWindow(root, appIcon);
+      window.MessageReceived += OnPageMessage;
+      window.Failed += delegate(string message) {
+        Report("窗口无法打开", message + "\n\n将改用浏览器显示连接页面。");
+        if (window != null) window.Close();
+        LegacyOpen();
+      };
+      window.FormClosed += delegate {window = null; lastPosted = null;};
+      lastPosted = null;
+    }
+    window.Reveal();
   }
 
-  async void StartClicked() {
-    if (busy) return;
-    if (!File.Exists(configPath) && !await Configure()) return;
+  void PostToWindow(object message) {
+    if (window != null && !window.IsDisposed) window.Post(message);
+  }
+
+  async void OnPageMessage(Dictionary<string, object> message) {
+    string type = Text(message, "type");
+    if (type == "ready") {
+      lastPosted = null;
+      // Reloaded on every open so changes made elsewhere show; before the first save the defaults carry the LAN relay address.
+      await LoadConfig();
+      PostState();
+      CheckHealth();
+    } else if (type == "start") {if (busy == null) await Start(false);}
+    else if (type == "stop") {if (busy == null) await Stop();}
+    else if (type == "exit") {
+      if (busy != null) return;
+      if (Equals(message.ContainsKey("stop") ? message["stop"] : null, true) && !await Stop()) return;
+      Quit();
+    } else if (type == "save") {
+      Dictionary<string, object> settings = message.ContainsKey("settings") ? message["settings"] as Dictionary<string, object> : null;
+      if (settings != null && busy == null) await Save(settings);
+    } else if (type == "autostart") {
+      SetAutostart(Equals(message.ContainsKey("enabled") ? message["enabled"] : null, true));
+    } else if (type == "logs") OpenLogs();
+    else if (type == "open") DesktopWindow.OpenExternal(Text(message, "url"));
+    else if (type == "copy") {try {Clipboard.SetText(Text(message, "text"));} catch (Exception) {}}
+    else if (type == "pick") Pick(Text(message, "field"));
+    else if (type == "hide") {if (window != null) window.Close();}
+  }
+
+  static string Text(Dictionary<string, object> message, string key) {
+    object value;
+    return message.TryGetValue(key, out value) && value != null ? value.ToString() : "";
+  }
+
+  void PostState() {
+    if (window == null || window.IsDisposed) return;
+    Dictionary<string, object> body = new Dictionary<string, object>();
+    body["service"] = busy ?? (state == ServiceState.Running ? "running" : state == ServiceState.Partial ? "partial" : "stopped");
+    body["configured"] = Configured;
+    body["error"] = lastError;
+    body["autostart"] = File.Exists(StartupLink);
+    body["config"] = config;
+    string text = json.Serialize(body);
+    if (text == lastPosted) return;
+    lastPosted = text;
+    Dictionary<string, object> message = new Dictionary<string, object>();
+    message["type"] = "state";
+    message["state"] = body;
+    window.Post(message);
+  }
+
+  async void CheckHealth() {
+    if (checkingHealth || window == null || window.IsDisposed || busy != null || state != ServiceState.Running) return;
+    checkingHealth = true;
+    try {
+      ProcessResult result = await RunNode(new[] {"--status"}, null, 15000);
+      if (result.Code != 0 || window == null || state != ServiceState.Running) return;
+      Dictionary<string, object> message = new Dictionary<string, object>();
+      message["type"] = "health";
+      message["health"] = json.DeserializeObject(result.Output);
+      PostToWindow(message);
+    } catch (Exception) {
+    } finally {checkingHealth = false;}
+  }
+
+  async Task LoadConfig() {
+    ProcessResult result = await RunNode(new[] {"--defaults"}, null, 15000);
+    if (result.Code != 0) return;
+    try {config = json.DeserializeObject(result.Output) as Dictionary<string, object>;} catch (Exception) {}
+  }
+
+  void Pick(string field) {
+    if (window == null) return;
+    string path = null;
+    if (field == "codexBin") {
+      using (OpenFileDialog dialog = new OpenFileDialog()) {
+        dialog.Title = "选择 Codex 程序";
+        dialog.Filter = "Codex 可执行文件 (codex.exe)|codex.exe|可执行文件 (*.exe)|*.exe";
+        if (dialog.ShowDialog(window) == DialogResult.OK) path = dialog.FileName;
+      }
+    } else if (field == "codexHome") {
+      using (FolderBrowserDialog dialog = new FolderBrowserDialog()) {
+        dialog.Description = "选择 Codex 配置目录";
+        if (dialog.ShowDialog(window) == DialogResult.OK) path = dialog.SelectedPath;
+      }
+    }
+    if (path == null) return;
+    Dictionary<string, object> message = new Dictionary<string, object>();
+    message["type"] = "picked";
+    message["field"] = field;
+    message["path"] = path;
+    PostToWindow(message);
+  }
+
+  void PostDialog(string name) {
+    ShowWindow();
+    Dictionary<string, object> message = new Dictionary<string, object>();
+    message["type"] = "dialog";
+    message["name"] = name;
+    PostToWindow(message);
+  }
+
+  // ---- Menu actions ------------------------------------------------------------------------------------
+
+  async void ToggleService() {
+    if (busy != null) return;
+    if (state == ServiceState.Running) {
+      if (webview) {PostDialog("stop"); return;}
+      if (Ask("停止后，电脑上由连接器管理的任务会被中断，手机也无法再连接这台电脑。\n\n确定停止服务吗？", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+      await Stop();
+      return;
+    }
+    if (!Configured) {OpenSettings(); return;}
     await Start(false);
   }
 
-  async void StopClicked() {
-    if (busy) return;
-    if (Ask("停止后，电脑上由连接器管理的任务会被中断，手机也无法再连接这台电脑。\n\n确定停止服务吗？", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
-    await Stop();
+  void OpenSettings() {
+    if (busy != null) return;
+    if (!webview) {LegacyChangeConfig(); return;}
+    ShowWindow();
+    Dictionary<string, object> message = new Dictionary<string, object>();
+    message["type"] = "screen";
+    message["name"] = "settings";
+    PostToWindow(message);
   }
 
-  async void ChangeConfig() {
-    if (busy) return;
-    bool wasRunning = state != ServiceState.Stopped;
-    if (wasRunning) {
-      if (Ask("修改连接配置需要先停止服务，会中断电脑上由连接器管理的任务。\n\n继续吗？", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
-      if (!await Stop()) return;
-    }
-    bool saved = await Configure();
-    // Cancelled after stopping: bring the previous configuration back up.
-    if (saved || wasRunning) await Start(saved);
+  async void CopyLink() {
+    if (config == null && Configured) await LoadConfig();
+    string link = ConnectionLink();
+    if (link == null) {Notify("还没有连接链接", "请先完成连接设置。", ToolTipIcon.Info, false); return;}
+    try {Clipboard.SetText(link); Notify("已复制连接链接", "在手机上打开它即可连接这台电脑。", ToolTipIcon.None, false);}
+    catch (Exception) {}
   }
 
-  async void ToggleAutostart() {
-    if (busy) return;
-    bool enabled = File.Exists(StartupLink);
-    SetBusy(enabled ? "正在取消自动启动…" : "正在设置自动启动…");
-    ScriptResult result = await RunScript("autostart.ps1", enabled ? "-Disable" : "", 30000);
-    SetIdle();
+  string ConnectionLink() {
+    if (config == null) return null;
+    object relay, token;
+    if (!config.TryGetValue("relayUrl", out relay) || !config.TryGetValue("token", out token) || relay == null || token == null) return null;
+    Uri uri;
+    if (!Uri.TryCreate(relay.ToString(), UriKind.Absolute, out uri)) return null;
+    return new UriBuilder(uri) {Fragment = "token=" + Uri.EscapeDataString(token.ToString())}.Uri.AbsoluteUri;
+  }
+
+  async void SetAutostart(bool enable) {
+    if (busy != null) return;
+    ProcessResult result = await RunScript("autostart.ps1", enable ? "" : "-Disable", 30000);
     if (result.Code != 0) Report("自动启动设置失败", result.Error);
+    lastPosted = null;
+    PostState();
   }
 
   async void Exit() {
-    if (busy) return;
-    if (state != ServiceState.Stopped) {
-      DialogResult answer = Ask("退出时要同时停止服务吗？\n\n是：停止服务并退出（会中断连接器管理的任务）\n否：只退出图标，服务继续在后台运行", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-      if (answer == DialogResult.Cancel) return;
-      if (answer == DialogResult.Yes && !await Stop()) return;
-    }
+    if (busy != null) return;
+    if (state == ServiceState.Stopped) {Quit(); return;}
+    if (webview) {PostDialog("exit"); return;}
+    DialogResult answer = Ask("退出时要同时停止服务吗？\n\n是：停止服务并退出（会中断连接器管理的任务）\n否：只退出图标，服务继续在后台运行", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+    if (answer == DialogResult.Cancel) return;
+    if (answer == DialogResult.Yes && !await Stop()) return;
+    Quit();
+  }
+
+  void Quit() {
+    if (quitting) return;
+    quitting = true;
     timer.Stop();
+    healthTimer.Stop();
+    if (window != null) window.Close();
     icon.Visible = false;
     ExitThread();
   }
 
-  async Task<bool> Configure() {
-    SetBusy("正在打开连接配置…");
-    ScriptResult result = await RunScript("configure.ps1", "", Timeout.Infinite);
-    SetIdle();
-    // configure.ps1 shows its own errors and exits 1 when the window is closed without saving.
-    if (result.Code != 0 && !string.IsNullOrEmpty(result.Error)) Report("连接配置未完成", result.Error);
-    return result.Code == 0;
-  }
+  // ---- Service operations ------------------------------------------------------------------------------
 
   async Task Start(bool openPage) {
-    SetBusy("正在启动…");
-    ScriptResult result = await RunScript("start.ps1", "-NoOpen", 120000);
+    lastError = null;
+    SetBusy("starting");
+    ProcessResult result = await RunScript("start.ps1", "-NoOpen", 120000);
     SetIdle();
     if (result.Code != 0) {
-      Report("启动失败", string.IsNullOrEmpty(result.Error) ? "请打开日志文件夹查看 *.error.log。" : result.Error);
+      lastError = string.IsNullOrEmpty(result.Error) ? "启动失败，请查看日志文件夹中的 *.error.log。" : result.Error;
+      PostState();
+      if (window == null || window.IsDisposed) Report("启动失败", lastError);
       return;
     }
-    if (openPage) OpenPage();
+    if (config == null) await LoadConfig();
+    PostState();
+    CheckHealth();
+    if (openPage) LegacyOpenPage();
   }
 
   async Task<bool> Stop() {
     expectRunning = false;
-    SetBusy("正在停止…");
-    ScriptResult result = await RunScript("stop.ps1", "", 60000);
+    SetBusy("stopping");
+    ProcessResult result = await RunScript("stop.ps1", "", 60000);
     SetIdle();
     if (result.Code != 0) {Report("停止失败", result.Error); return false;}
     return true;
   }
 
-  Task<ScriptResult> RunScript(string script, string arguments, int timeout) {
+  async Task Save(Dictionary<string, object> settings) {
+    bool wasRunning = state != ServiceState.Stopped;
+    SetBusy("saving");
+    if (wasRunning) {
+      expectRunning = false;
+      ProcessResult stopped = await RunScript("stop.ps1", "", 60000);
+      if (stopped.Code != 0) {SetIdle(); SaveResult(false, "停止服务失败：" + stopped.Error); return;}
+    }
+    Dictionary<string, object> payload = new Dictionary<string, object>();
+    foreach (string key in new[] {"mode", "relayUrl", "token", "codexBin", "codexHome"}) payload[key] = settings.ContainsKey(key) ? settings[key] : "";
+    ProcessResult saved = await RunNode(new[] {"--settings-stdin"}, json.Serialize(payload), 30000);
+    SetIdle();
+    if (saved.Code != 0) {
+      string error = saved.Error.Trim();
+      SaveResult(false, error.Length > 0 ? error : "配置未保存");
+      if (wasRunning) await Start(false); // Bring the previous configuration back up.
+      return;
+    }
+    await LoadConfig();
+    SaveResult(true, null);
+    await Start(false);
+  }
+
+  void SaveResult(bool ok, string error) {
+    Dictionary<string, object> message = new Dictionary<string, object>();
+    message["type"] = "saveResult";
+    message["ok"] = ok;
+    if (error != null) message["error"] = error;
+    PostToWindow(message);
+  }
+
+  Task<ProcessResult> RunScript(string script, string arguments, int timeout) {
     string path = Path.Combine(root, "scripts", "windows", script);
     return Task.Run(delegate {
       string errorFile = Path.Combine(Path.GetTempPath(), "codex-mobile-web-" + Guid.NewGuid().ToString("N") + ".txt");
@@ -223,8 +430,9 @@ sealed class TrayContext : ApplicationContext {
       info.WorkingDirectory = root;
       info.UseShellExecute = false;
       info.CreateNoWindow = true;
-      ScriptResult result = new ScriptResult();
+      ProcessResult result = new ProcessResult();
       try {
+        // No redirected pipes here: start.ps1 leaves node running, and it would inherit them.
         using (Process process = Process.Start(info)) {
           if (!process.WaitForExit(timeout)) {
             try {process.Kill();} catch (Exception) {}
@@ -245,26 +453,65 @@ sealed class TrayContext : ApplicationContext {
     });
   }
 
-  static string Quote(string value) {return "'" + value.Replace("'", "''") + "'";}
-
-  void OpenPage() {
-    string page = Path.Combine(local, "connect.html");
-    if (!File.Exists(page)) {Report("找不到连接页面", "请先启动服务。"); return;}
-    try {Process.Start(new ProcessStartInfo(page) {UseShellExecute = true});}
-    catch (Exception error) {Report("无法打开连接页面", error.Message);}
+  // build/setup.mjs exits on its own, so its output can be read through pipes.
+  Task<ProcessResult> RunNode(string[] setupArgs, string input, int timeout) {
+    return Task.Run(delegate {
+      ProcessResult result = new ProcessResult();
+      string node = Path.Combine(root, "runtime", "node.exe");
+      if (!File.Exists(node)) node = "node.exe";
+      StringBuilder arguments = new StringBuilder("\"" + Path.Combine(root, "build", "setup.mjs") + "\"");
+      foreach (string arg in setupArgs) arguments.Append(' ').Append(arg);
+      ProcessStartInfo info = new ProcessStartInfo(node, arguments.ToString());
+      info.WorkingDirectory = root;
+      info.UseShellExecute = false;
+      info.CreateNoWindow = true;
+      info.RedirectStandardInput = true;
+      info.RedirectStandardOutput = true;
+      info.RedirectStandardError = true;
+      info.StandardOutputEncoding = new UTF8Encoding(false);
+      info.StandardErrorEncoding = new UTF8Encoding(false);
+      try {
+        using (Process process = Process.Start(info)) {
+          Task<string> output = process.StandardOutput.ReadToEndAsync(), errors = process.StandardError.ReadToEndAsync();
+          if (input != null) {
+            byte[] bytes = new UTF8Encoding(false).GetBytes(input);
+            process.StandardInput.BaseStream.Write(bytes, 0, bytes.Length);
+          }
+          process.StandardInput.Close();
+          if (!process.WaitForExit(timeout)) {
+            try {process.Kill();} catch (Exception) {}
+            result.Code = -1;
+            result.Error = "检查超时，请确认 Codex 可以正常启动。";
+            return result;
+          }
+          result.Code = process.ExitCode;
+          result.Output = output.Result;
+          result.Error = errors.Result;
+        }
+      } catch (Exception error) {
+        result.Code = -1;
+        result.Error = error.Message;
+      }
+      return result;
+    });
   }
+
+  static string Quote(string value) {return "'" + value.Replace("'", "''") + "'";}
 
   void OpenLogs() {
     Directory.CreateDirectory(local);
     Process.Start(new ProcessStartInfo("explorer.exe", "\"" + local + "\"") {UseShellExecute = true});
   }
 
-  void SetBusy(string text) {busy = true; busyText = text; UpdateUi();}
-  void SetIdle() {busy = false; RefreshStatus();}
+  // ---- State -------------------------------------------------------------------------------------------
+
+  void SetBusy(string kind) {busy = kind; UpdateUi();}
+  void SetIdle() {busy = null; RefreshStatus();}
 
   void RefreshStatus() {
+    ServiceState previous = state;
     state = ReadState();
-    if (!busy) {
+    if (busy == null) {
       if (state == ServiceState.Running) expectRunning = true;
       else if (expectRunning) {
         expectRunning = false;
@@ -272,23 +519,29 @@ sealed class TrayContext : ApplicationContext {
       }
     }
     UpdateUi();
+    if (previous != ServiceState.Running && state == ServiceState.Running) CheckHealth();
   }
 
   void UpdateUi() {
     string status;
-    if (busy) {icon.Icon = busyIcon; status = busyText;}
+    if (busy == "starting") {icon.Icon = busyIcon; status = "正在启动…";}
+    else if (busy == "stopping") {icon.Icon = busyIcon; status = "正在停止…";}
+    else if (busy == "saving") {icon.Icon = busyIcon; status = "正在保存设置…";}
     else if (state == ServiceState.Running) {icon.Icon = runningIcon; status = "运行中";}
     else if (state == ServiceState.Partial) {icon.Icon = partialIcon; status = "部分服务未运行";}
-    else {icon.Icon = stoppedIcon; status = File.Exists(configPath) ? "已停止" : "尚未配置";}
+    else if (lastError != null) {icon.Icon = partialIcon; status = "启动失败";}
+    else {icon.Icon = stoppedIcon; status = Configured ? "已停止" : "尚未设置";}
     string tip = Title + " · " + status;
     icon.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
-    statusItem.Text = status;
-    showItem.Enabled = !busy;
-    startItem.Enabled = !busy && state != ServiceState.Running;
-    stopItem.Enabled = !busy && state != ServiceState.Stopped;
-    configureItem.Enabled = !busy;
-    autostartItem.Enabled = !busy;
-    exitItem.Enabled = !busy;
+    statusItem.Text = "● " + status;
+    bool idle = busy == null;
+    toggleItem.Text = state == ServiceState.Running ? "停止服务" : state == ServiceState.Partial ? "重新启动服务" : "启动服务";
+    toggleItem.Enabled = idle;
+    copyItem.Enabled = state == ServiceState.Running;
+    settingsItem.Enabled = idle;
+    autostartItem.Enabled = idle;
+    exitItem.Enabled = idle;
+    PostState();
   }
 
   ServiceState ReadState() {
@@ -315,7 +568,7 @@ sealed class TrayContext : ApplicationContext {
   }
 
   void Report(string title, string message) {
-    if (quiet) Notify(title, message, ToolTipIcon.Error, true);
+    if (quiet || (window != null && !window.IsDisposed && window.Visible)) Notify(title, message, ToolTipIcon.Error, true);
     else Ask(title + "\n\n" + message, MessageBoxButtons.OK, MessageBoxIcon.Error);
   }
 
@@ -324,7 +577,42 @@ sealed class TrayContext : ApplicationContext {
     icon.ShowBalloonTip(10000, title, string.IsNullOrEmpty(message) ? " " : message, kind);
   }
 
-  // A tray app has no window, so dialogs get a hidden topmost owner to appear in front.
+  // ---- Fallback without the WebView2 runtime -----------------------------------------------------------
+
+  async void LegacyOpen() {
+    if (busy != null) return;
+    if (state == ServiceState.Running) {LegacyOpenPage(); return;}
+    if (!Configured && !await LegacyConfigure()) return;
+    await Start(true);
+  }
+
+  void LegacyOpenPage() {
+    string page = Path.Combine(local, "connect.html");
+    if (!File.Exists(page)) {Report("找不到连接页面", "请先启动服务。"); return;}
+    try {Process.Start(new ProcessStartInfo(page) {UseShellExecute = true});}
+    catch (Exception error) {Report("无法打开连接页面", error.Message);}
+  }
+
+  async Task<bool> LegacyConfigure() {
+    SetBusy("saving");
+    ProcessResult result = await RunScript("configure.ps1", "", Timeout.Infinite);
+    SetIdle();
+    if (result.Code != 0 && !string.IsNullOrEmpty(result.Error)) Report("连接设置未完成", result.Error);
+    config = null;
+    return result.Code == 0;
+  }
+
+  async void LegacyChangeConfig() {
+    bool wasRunning = state != ServiceState.Stopped;
+    if (wasRunning) {
+      if (Ask("修改连接设置需要先停止服务，会中断电脑上由连接器管理的任务。\n\n继续吗？", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+      if (!await Stop()) return;
+    }
+    bool saved = await LegacyConfigure();
+    if (saved || wasRunning) await Start(saved);
+  }
+
+  // A tray app has no window of its own, so dialogs get a hidden topmost owner to appear in front.
   static DialogResult Ask(string text, MessageBoxButtons buttons, MessageBoxIcon kind) {
     using (Form owner = new Form()) {
       owner.TopMost = true;
@@ -340,85 +628,7 @@ sealed class TrayContext : ApplicationContext {
   }
 
   protected override void Dispose(bool disposing) {
-    if (disposing) {timer.Dispose(); icon.Dispose(); menu.Dispose(); invoker.Dispose();}
+    if (disposing) {timer.Dispose(); healthTimer.Dispose(); icon.Dispose(); menu.Dispose(); invoker.Dispose(); if (window != null) window.Dispose();}
     base.Dispose(disposing);
-  }
-}
-
-static class Logo {
-  static readonly Color Ink = Color.FromArgb(17, 17, 17);
-
-  // Same artwork as web/public/icon.svg (192 unit canvas), with an optional status dot.
-  public static void Draw(Graphics g, int size, Color dot) {
-    g.SmoothingMode = SmoothingMode.AntiAlias;
-    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-    g.Clear(Color.Transparent);
-    float s = size / 192f;
-    using (GraphicsPath path = Rounded(new RectangleF(0, 0, size, size), 44 * s))
-    using (SolidBrush brush = new SolidBrush(Ink)) g.FillPath(brush, path);
-    using (Pen pen = new Pen(Color.White, Math.Max(12 * s, 1.75f))) {
-      pen.StartCap = LineCap.Round;
-      pen.EndCap = LineCap.Round;
-      pen.LineJoin = LineJoin.Round;
-      g.DrawLines(pen, new[] {P(73, 62, s), P(40, 96, s), P(73, 130, s)});
-      g.DrawLines(pen, new[] {P(119, 62, s), P(152, 96, s), P(119, 130, s)});
-    }
-    if (dot.IsEmpty) return;
-    float d = size * 0.4f, ring = Math.Max(size * 0.07f, 1f);
-    using (SolidBrush brush = new SolidBrush(Ink)) g.FillEllipse(brush, size - d - ring, size - d - ring, d + ring * 2, d + ring * 2);
-    using (SolidBrush brush = new SolidBrush(dot)) g.FillEllipse(brush, size - d, size - d, d - 0.5f, d - 0.5f);
-  }
-
-  public static Icon Create(int size, Color dot) {
-    using (Bitmap bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb)) {
-      using (Graphics g = Graphics.FromImage(bitmap)) Draw(g, size, dot);
-      return Icon.FromHandle(bitmap.GetHicon());
-    }
-  }
-
-  // Writes a multi-size .ico (PNG entries) used as the executable's own icon.
-  public static void WriteIco(string path) {
-    int[] sizes = {16, 20, 24, 32, 40, 48, 64, 256};
-    List<byte[]> images = new List<byte[]>();
-    foreach (int size in sizes) {
-      using (Bitmap bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb))
-      using (MemoryStream stream = new MemoryStream()) {
-        using (Graphics g = Graphics.FromImage(bitmap)) Draw(g, size, Color.Empty);
-        bitmap.Save(stream, ImageFormat.Png);
-        images.Add(stream.ToArray());
-      }
-    }
-    using (BinaryWriter writer = new BinaryWriter(File.Create(path))) {
-      writer.Write((short)0);
-      writer.Write((short)1);
-      writer.Write((short)sizes.Length);
-      int offset = 6 + 16 * sizes.Length;
-      for (int i = 0; i < sizes.Length; i++) {
-        byte edge = (byte)(sizes[i] >= 256 ? 0 : sizes[i]);
-        writer.Write(edge);
-        writer.Write(edge);
-        writer.Write((byte)0);
-        writer.Write((byte)0);
-        writer.Write((short)1);
-        writer.Write((short)32);
-        writer.Write(images[i].Length);
-        writer.Write(offset);
-        offset += images[i].Length;
-      }
-      foreach (byte[] image in images) writer.Write(image);
-    }
-  }
-
-  static PointF P(float x, float y, float s) {return new PointF(x * s, y * s);}
-
-  static GraphicsPath Rounded(RectangleF r, float radius) {
-    float d = radius * 2;
-    GraphicsPath path = new GraphicsPath();
-    path.AddArc(r.X, r.Y, d, d, 180, 90);
-    path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-    path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-    path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-    path.CloseFigure();
-    return path;
   }
 }

@@ -19,6 +19,7 @@
 | 本机 Codex CLI | `0.146.0`，Windows 原生 npm 安装 | 生成协议类型，实际 app-server 配置、线程、输入、补充和中断测试 |
 | 本机官方桌面 | `26.901.6511.0` | 对照已安装程序的 IPC 方法版本；只读握手、活动会话快照及 canonical 历史结构验证 |
 | Node | `24.11.1`，Windows x64 | 本机开发与便携包运行时；便携包附同版本 Node 许可证 |
+| Microsoft.Web.WebView2 | `1.0.4314.35`（nuget.org，SHA512 固定在打包脚本） | 便携包托盘窗口；只分发 `Microsoft.Web.WebView2.Core.dll` 与 `WebView2Loader.dll`，附 `runtime/WEBVIEW2-LICENSE.txt` |
 
 Codex Anywhere 的连接、设备身份、浏览器控制与主要执行路径耦合较深；桌面调用以 `codex-browser-use` 工具为主，不能直接补齐本项目要求的原生审批闭环。因此按原设计的回退条件选择小型 TypeScript 项目，不维护第二套 fork。
 

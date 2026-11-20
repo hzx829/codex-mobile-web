@@ -61,7 +61,10 @@ try {
   await cp(resolve(artifact),install,{recursive:true});await mkdir(project);await mkdir(codexHome);
   await assert.rejects(stat(join(install,'node_modules')));
   await stat(trayPath);for(const name of ['start.cmd','stop.cmd','configure.cmd','connector-only.cmd'])await assert.rejects(stat(join(install,name)),`${name} should be replaced by the tray`);
-  const bind=createServer();bind.listen(0,'127.0.0.1');await once(bind,'listening');const port=(bind.address() as any).port;await new Promise<void>(r=>bind.close(()=>r()));
+  // The relay also listens on port+1 for previews (on all interfaces), so both must be free.
+  const free=async(candidate:number)=>{const probe=createServer();probe.on('error',()=>{});try{probe.listen(candidate,'0.0.0.0');await once(probe,'listening');return (probe.address() as any).port as number;}catch{return 0;}finally{await new Promise<void>(r=>probe.close(()=>r()));}};
+  let port=0;for(let attempt=0;attempt<50&&!port;attempt++){const candidate=await free(0);if(candidate&&await free(candidate+1))port=candidate;}
+  assert.ok(port,'no free relay/preview port pair');
   await writeFile(join(codexHome,'config.toml'),'model = "portable-fixture"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "No external model calls"\nbase_url = "http://127.0.0.1:1/v1"\nwire_api = "responses"\n');
   const token=randomUUID()+randomUUID();
   const output=await setup({relayUrl:`http://127.0.0.1:${port}`,token,mode:'all',codexBin:resolveCodex(),codexHome});

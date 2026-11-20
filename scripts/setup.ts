@@ -7,13 +7,17 @@ import QRCode from 'qrcode';
 import {resolveCodex} from '../src/connector/app-server.js';
 import {defaultRelay,prepareSettings,savedSettings} from './setup-config.js';
 import {connectionPage} from './connection-page.js';
+import {relayStatus} from './setup-status.js';
 
 const args=process.argv.slice(2),value=(key:string)=>{const i=args.indexOf(key);return i>=0?args[i+1]:undefined;};
 try {
   const dir=resolve('.local'),file=join(dir,'config.json'),old=await savedSettings(file);
   if(args.includes('--defaults')) {
     // Consumed through redirected stdout by the local Windows form, never written to logs.
-    process.stdout.write(JSON.stringify({relayUrl:defaultRelay(),mode:'all',...old}));
+    process.stdout.write(JSON.stringify({relayUrl:defaultRelay(),mode:'all',...old,localRelay:defaultRelay()}));
+  } else if(args.includes('--status')) {
+    // Polled by the desktop window while it is open; prints JSON and never changes anything.
+    process.stdout.write(JSON.stringify(await relayStatus(old)));
   } else {
     let input:any={};
     if(args.includes('--settings-stdin')) {
