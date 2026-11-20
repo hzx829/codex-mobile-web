@@ -55,17 +55,27 @@ async function info(config:any,token=config.token):Promise<any> {
 }
 async function online(config:any) {const until=Date.now()+20000;let last:any;while(Date.now()<until){try{return await info(config);}catch(e){last=e;await new Promise(r=>setTimeout(r,300));}}throw last;}
 const configPath=join(install,'.local','config.json');
-let cleanup:any={status:'removed'};
+let cleanup:any={status:'removed'},tray:ReturnType<typeof spawn>|undefined;
+const trayPath=join(install,'Codex Mobile Web.exe');
 try {
   await cp(resolve(artifact),install,{recursive:true});await mkdir(project);await mkdir(codexHome);
   await assert.rejects(stat(join(install,'node_modules')));
+  await stat(trayPath);for(const name of ['start.cmd','stop.cmd','configure.cmd','connector-only.cmd'])await assert.rejects(stat(join(install,name)),`${name} should be replaced by the tray`);
   const bind=createServer();bind.listen(0,'127.0.0.1');await once(bind,'listening');const port=(bind.address() as any).port;await new Promise<void>(r=>bind.close(()=>r()));
   await writeFile(join(codexHome,'config.toml'),'model = "portable-fixture"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "No external model calls"\nbase_url = "http://127.0.0.1:1/v1"\nwire_api = "responses"\n');
   const token=randomUUID()+randomUUID();
   const output=await setup({relayUrl:`http://127.0.0.1:${port}`,token,mode:'all',codexBin:resolveCodex(),codexHome});
   assert.ok(!output.includes(token));
   const config=JSON.parse(await readFile(configPath,'utf8'));assert.equal(config.roots,undefined);assert.equal(config.codexHome,codexHome);
-  console.log('Checking packaged startup...');await ps('start.ps1',['-NoOpen']);const initial=await online(config);
+  console.log('Checking tray startup...');
+  tray=spawn(trayPath,['--background'],{cwd:install,env,windowsHide:true,stdio:'ignore'});
+  const initial=await online(config);
+  // A second launch for the same folder must hand over to the running tray and exit.
+  const second=spawn(trayPath,['--background'],{cwd:install,env,windowsHide:true,stdio:'ignore'});
+  const [secondCode]=await Promise.race([once(second,'exit'),new Promise<any>((_,reject)=>setTimeout(()=>reject(Error('second tray instance did not exit')),10000))]);
+  assert.equal(secondCode,0);assert.equal(tray.exitCode,null,'first tray instance must keep running');
+  // Services outlive the tray; close it so later stop/start steps do not raise its desktop notifications.
+  tray.kill();await once(tray,'exit');
   assert.equal(initial.provider,'fixture');assert.equal(initial.model,'portable-fixture');
   assert.equal((await fetch(config.relayUrl)).status,200);
   const connectorPid=Number((await readFile(join(install,'.local','connector.pid'),'utf8')).trim());
@@ -84,10 +94,11 @@ try {
   await ps('stop.ps1');await assert.rejects(stat(join(install,'.local','connector.pid')));
   for(const name of ['relay.log','relay.error.log','connector.log','connector.error.log']){const content=await readFile(join(install,'.local',name),'utf8');assert.ok(!content.includes(token)&&!content.includes(rotated.token));}
 } finally {
+  tray?.kill();
   try{await ps('stop.ps1');}catch{}
   for(let i=0;i<10;i++) {
     try{await removeTestTemp(temp);break;}
     catch(e:any){if(!['EBUSY','EPERM','EACCES'].includes(e.code))throw e;if(i===9){cleanup={status:'retained',path:temp,reason:e.code};break;}await new Promise(r=>setTimeout(r,250));}
   }
 }
-console.log(JSON.stringify({result:'passed',checks:['bundled Node without node_modules','Chinese project and installation paths','configured Codex and provider inherited','background startup and duplicate launch','relay restart preserves native process','rotated token rejects old clients','owned processes stop','no token in logs'],cleanup,interactiveUiTest:false,liveModelTest:false}));
+console.log(JSON.stringify({result:'passed',checks:['bundled Node without node_modules','tray replaces cmd launchers, starts services and stays single-instance','Chinese project and installation paths','configured Codex and provider inherited','background startup and duplicate launch','relay restart preserves native process','rotated token rejects old clients','owned processes stop','no token in logs'],cleanup,interactiveUiTest:false,liveModelTest:false}));

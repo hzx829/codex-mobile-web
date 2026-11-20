@@ -5,7 +5,7 @@ Set-Location -LiteralPath $projectRoot
 $nodePath=Join-Path $projectRoot 'runtime\node.exe'
 if(-not(Test-Path -LiteralPath $nodePath)){$nodePath=(Get-Command node -ErrorAction Stop).Source}
 if(-not(Test-Path -LiteralPath '.local\config.json')){
-  if($NoOpen){throw '请先双击 configure.cmd 完成连接配置'}
+  if($NoOpen){throw '请先完成连接配置（点击托盘图标，或运行 configure.cmd）'}
   & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'configure.ps1') -Mode $Mode
   if($LASTEXITCODE -ne 0){throw '配置未完成'}
 }

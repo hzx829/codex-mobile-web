@@ -80,7 +80,7 @@ Windows 上未指定 `codexBin` 时，连接器优先使用桌面安装目录中
 
 下一轮使用 `$codex-mobile-web-setup`，提供已有中继地址即可。Skill 会下载并校验 Windows 便携包、识别本机 Codex、启动连接器并只读检查连接；首次 Token 在本机密码输入框中填写，也可指定本地 Token 文件。GitHub 账号不自动同步中继凭据。详见 [新电脑自动配置](QUICKSTART.md#让-codex-配置新电脑)。
 
-从 [Releases](https://github.com/hzx829/codex-mobile-web/releases) 下载 Windows 便携 ZIP，解压后双击 `start.cmd`。包内附带 Node 和构建结果，Codex 需事先单独安装。
+从 [Releases](https://github.com/hzx829/codex-mobile-web/releases) 下载 Windows 便携 ZIP，解压后双击 `Codex Mobile Web.exe`。它常驻系统托盘：首次弹出连接配置，之后在后台启动服务并打开连接二维码；启动、停止、修改配置、日志和登录自启都在托盘图标菜单里，不再出现命令行窗口。包内附带 Node 和构建结果，Codex 需事先单独安装。
 
 从源码启动时，安装 Node 24，在仓库目录执行：
 
@@ -120,7 +120,7 @@ curl --fail https://your-domain.example/health
 
 预览网页时，先在电脑启动开发服务。对话里出现的本机地址可直接点击“打开预览”；也可以在已有会话的顶部“会话操作”或输入框“＋”中选择“打开本机网页”，手工填写 `http://127.0.0.1:5173` 等地址。地址按电脑和 thread 分别记忆。网页在预览区运行，禁止嵌入的站点可选择“独立打开”。切换 thread 保留右侧预览和网页代理；关闭面板也保留网页会话。“结束预览”或切换电脑会停止代理。每台连接器同时保留一个活动预览。中继通过电脑连接器转发 HTTP 和 WebSocket 请求，不持续传输截图。预览端口为中继端口加一（默认 3341）。使用绝对 `localhost` 地址或限制 Host/Origin 的项目可能无法直接工作。
 
-停止本安装后，用 `configure.cmd` 修改配置。`stop.cmd` 会停止连接器和它的 Codex 子进程，应先完成连接器管理的任务。详细启动、可选登录自启及卸载方法见 [QUICKSTART.md](QUICKSTART.md)。
+便携包在托盘菜单中选择“修改连接配置”，源码目录停止后用 `configure.cmd`。停止服务（托盘菜单或 `stop.cmd`）会停止连接器和它的 Codex 子进程，应先完成连接器管理的任务。详细启动、可选登录自启及卸载方法见 [QUICKSTART.md](QUICKSTART.md)。
 
 点击回复中的文件链接，在文件面板选择“下载文件”，接收完成后点击“保存到设备”。也可从输入框“＋”中的“查看项目文件”输入路径。文件按需从对应电脑传输，中继不保存副本；电脑需保持在线。下载支持 100 MiB 以内的文件，显示接收进度并可取消；文件变化或连接中断会报错，重新打开文件即可重试。关闭文件面板会取消接收并释放临时内容。此功能需要同时更新中继网页和电脑连接器；只有新网页时仍无法从旧连接器下载。
 
