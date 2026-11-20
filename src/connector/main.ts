@@ -40,7 +40,7 @@ const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new C
 // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
 claudeCode.artifacts=new ArtifactViewer(config.dataDir);
 const services=new ServiceRouter([
-  {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save','claude.fork','claude.rename','claude.archive','claude.edit'],
+  {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save','claude.fork','claude.rename','claude.archive','claude.edit','claude.steerQueued','claude.withdrawQueued','claude.cancelQueued'],
     prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
   antigravity?{prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']}:noAntigravity,
 ],request=>control.handle(request as any),()=>control.updating);

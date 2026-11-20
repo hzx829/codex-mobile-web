@@ -297,8 +297,12 @@ export class ClaudeRuntime extends EventEmitter {
       ...(response.decision === 'allowSession' && request.suggestions?.length ? {updatedPermissions: request.suggestions} : {})});
   }
 
-  send(session: LiveSession, text: string, images: string[], steer = false) {
-    session.inbox.push(userMessage(text, images, session.running ? steer ? 'next' : 'later' : undefined));
+  /**
+   * `priority` applies only while a turn runs: 'next' joins it once its current tool calls finish, 'now' moves
+   * movable work to the background (or interrupts) and joins at once, 'later' waits for the turn to end.
+   */
+  send(session: LiveSession, text: string, images: string[], priority?: 'now' | 'next' | 'later') {
+    session.inbox.push(userMessage(text, images, session.running ? priority : undefined));
     session.running = true;session.error = '';
     this.touch(session);
   }

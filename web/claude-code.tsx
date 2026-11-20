@@ -9,12 +9,13 @@ import type {ThreadActions} from './antigravity-sidebar';
 import type {VoiceProvider} from '../src/shared/voice';
 import {SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight,workspaceName} from './chat-layout';
 import {IconButton} from './icon-button';
+import {QueuedMessages} from './queued-messages';
 import {Icon} from './icons';
 import {useStableEvent} from './use-event';
 import {operationId} from './client';
 import {clipboardImageFiles,readImageFiles,appendImages,pastedImage} from './attachments';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
-import type {Json,RequestAction,SessionView,TurnView} from '../src/shared/types';
+import type {Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
 
 type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;
@@ -99,7 +100,7 @@ export function ClaudeCodePanel(props:Props){
   const voiceBusy=voice.state!=='idle';
   useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice]);
 
-  async function mutate(action:'claude.create'|'claude.send'|'claude.stop'|'claude.respond'|'claude.fork'|'claude.edit',payload:Json,onAccepted?:(result:Json)=>void){
+  async function mutate(action:'claude.create'|'claude.send'|'claude.stop'|'claude.respond'|'claude.fork'|'claude.edit'|'claude.steerQueued'|'claude.withdrawQueued'|'claude.cancelQueued',payload:Json,onAccepted?:(result:Json)=>void){
     if(lock.current||pending||!connected)return false;
     lock.current=true;setBusy(true);setError('');
     const opId=operationId();remember(opId);
@@ -118,7 +119,7 @@ export function ClaudeCodePanel(props:Props){
     try{
       const result=await request.current('claude.operation',{opId:pending});
       if(!alive.current)return;
-      if(result.state==='accepted'){remember('');setError('');if(result.conversationId&&creating){edit('');props.created(result.conversationId);}else if(result.conversationId)props.forked(result.conversationId);else if(result.submitted){edit('');setImages([]);}}
+      if(result.state==='accepted'){remember('');setError('');if(result.conversationId&&creating){edit('');props.created(result.conversationId);}else if(result.conversationId)props.forked(result.conversationId);else if(result.submitted||result.kind==='queued'){edit('');setImages([]);}}
       else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
       else setError('结果尚未确认。请刷新会话并在电脑核实；系统不会自动重发。');
     }catch(e){failed(e);}finally{lock.current=false;if(alive.current)setBusy(false);}
@@ -131,7 +132,11 @@ export function ClaudeCodePanel(props:Props){
   const chosen=places.find(place=>place.id===target)||(target&&target!==OTHER?{id:target,path:target}:undefined);
   const startPath=target===OTHER?cwd.trim():chosen?.path||'';
   const selectedMode=mode==='bypassPermissions'&&view?.controlled?'':mode;
-  async function send(steer=false){
+  const queued:QueuedMessage[]=view?.queuedMessages||[];
+  // As in Codex: behind a running turn or waiting messages, a plain send waits on the computer until the turn ends.
+  const queueNext=!creating&&(running||queued.length>0);
+  /** 'queue': after the running turn; 'steer': into it once its current tool calls finish; 'now': at once. */
+  async function send(delivery:'queue'|'steer'|'now'='queue'){
     const text=draft.trim();
     if(!text&&!images.length)return;
     const settings={...(model?{model}:{}),...(selectedMode?{permissionMode:selectedMode}:{})};
@@ -143,11 +148,24 @@ export function ClaudeCodePanel(props:Props){
     }
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
     stick.current=true;
-    const message={...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,[]),baseline:userIds(view)};
-    setOutgoing(message);
-    const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(steer?{mode:'steer'}:{}),...(external?{confirmIdle:true}:{})},
-      ()=>{edit('');setImages([]);if(selectedMode==='bypassPermissions')setMode('');setNotice(running?steer?'已追加到当前任务':'已排队，当前任务结束后发送':'');});
-    setOutgoing(old=>old!==message?old:accepted?{...message,acceptedAt:Date.now()}:null);
+    // Queued messages appear in the queue; everything else appears in the conversation now.
+    const message=queueNext&&delivery==='queue'?null:{...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,[]),baseline:userIds(view)};
+    if(message)setOutgoing(message);
+    const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(delivery!=='queue'?{mode:delivery}:{}),...(external?{confirmIdle:true}:{})},
+      result=>{edit('');setImages([]);if(selectedMode==='bypassPermissions')setMode('');
+        setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='sent_now'?'已立即发送':'');});
+    if(message)setOutgoing(old=>old!==message?old:accepted?{...message,acceptedAt:Date.now()}:null);
+  }
+  function withdrawQueued(queuedId:string){
+    void mutate('claude.withdrawQueued',{conversationId,queuedId},result=>{
+      const message=result.message||{};
+      edit([draft.trim(),message.text].filter(Boolean).join('\n\n'));
+      setImages(old=>[...old,...(message.images||[])]);
+      if(message.model)setModel(message.model);
+      setMode(message.permissionMode||'');
+      setNotice('已撤回到输入框');
+      requestAnimationFrame(()=>composer.current?.focus());
+    });
   }
   /** Rewrites a sent message: the session continues from the turn before it, as Codex does. */
   async function resend(turnId:string,text:string){
@@ -191,6 +209,7 @@ export function ClaudeCodePanel(props:Props){
   const requests:Request[]=view?.requests||[];
   const status=!connected?connectionLost:watchError||(pending&&busy?'正在等待电脑确认…':'');
   const canWrite=connected&&!busy&&!pending&&(creating||Boolean(view));
+  const drafted=Boolean(draft.trim()||images.length);
   const title=creating?'新的 Claude Code 会话':view?.title||'正在打开…';
   const project=creating?(startPath?workspaceName(startPath):'选择项目'):view?.cwd?workspaceName(view.cwd):'Claude Code';
   const modelLabel=(models||[]).find(item=>item.id===model)?.label||model;
@@ -229,13 +248,17 @@ export function ClaudeCodePanel(props:Props){
       {notice&&<div className="feedback" role="status">{notice}</div>}
       {voiceBusy&&<div className="voice-status" role="status"><span>{voice.state==='starting'?'正在请求麦克风…':voice.state==='recording'?'录音中 · 最长 2 分钟':'正在识别…'}</span><button type="button" onClick={voice.cancel}>取消</button></div>}
       {pending&&!busy&&<div className="pending"><button onClick={()=>void check()} disabled={!connected}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先在会话和电脑上确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
-      {running&&view?.controlled&&<div className="running-status"><i className="dot online"/>Claude Code 正在处理{view?.queued?' · 有排队消息':''}</div>}
+      {running&&view?.controlled&&<div className="running-status"><i className="dot online"/>Claude Code 正在处理</div>}
+      {!creating&&<QueuedMessages messages={queued} disabled={!connected||busy||Boolean(pending)} canSteer={running&&Boolean(view?.controlled)} withdrawBlocked={voiceBusy}
+        attachmentsFull={message=>images.length+message.imageCount>MAX_IMAGES||images.reduce((sum,url)=>sum+imageBytes(url),0)+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
+        onSteer={queuedId=>void mutate('claude.steerQueued',{conversationId,queuedId},()=>setNotice('已追加到当前任务'))}
+        onWithdraw={withdrawQueued} onCancel={queuedId=>void mutate('claude.cancelQueued',{conversationId,queuedId},()=>setNotice('已删除排队消息'))}/>}
       <form className={`composer ${images.length?'with-images':''}`} onSubmit={e=>{e.preventDefault();void send();}}>
         {images.length>0&&<div className="image-strip"><span className="attachment-count" role="status">图片 {images.length}/{MAX_IMAGES}</span><div className="attachment-thumbnails">{images.map((url,i)=><div className="attachment-thumb" key={i}>
           <button type="button" aria-label={`查看第 ${i+1} 张图片`} onClick={()=>showImage(url,`待发送图片 ${i+1}/${images.length}`)}><img src={url} alt={`待发送图片 ${i+1}`} decoding="async"/></button>
           <button className="attachment-remove" type="button" disabled={busy} aria-label={`移除第 ${i+1} 张图片`} onClick={()=>setImages(old=>old.filter((_,index)=>index!==i))}><Icon name="close" size={14}/></button></div>)}</div></div>}
         <textarea ref={composer} aria-label="任务输入" readOnly={Boolean(pending)} value={draft} maxLength={100_000} rows={1} onPaste={paste}
-          placeholder={creating?'想让 Claude Code 做什么？':running?'当前任务完成后发送…':`在 ${machineName} 上继续…`}
+          placeholder={creating?'想让 Claude Code 做什么？':queueNext?'当前任务完成后发送…':`在 ${machineName} 上继续…`}
           onChange={e=>edit(e.target.value)} onKeyDown={e=>submitOnDesktop(e,()=>void send())}/>
         <div className="composer-toolbar">
           <IconButton icon="image" label="添加图片" className="composer-add" disabled={!canWrite} onClick={()=>picker.current?.click()}/>
@@ -252,9 +275,11 @@ export function ClaudeCodePanel(props:Props){
             {MODES.filter(([value])=>value!=='bypassPermissions'||creating||!view?.controlled).map(([value,label])=><option key={value} value={value}>{value===''&&view?.permissionMode?`权限：${MODES.find(m=>m[0]===view.permissionMode)?.[1]||view.permissionMode}`:label}</option>)}
           </select>
           <div className="composer-actions">
-            {running&&view?.controlled&&<IconButton icon="stop" label="停止当前任务" className="round stop" disabled={!connected||busy||Boolean(pending)} onClick={()=>void mutate('claude.stop',{conversationId})}/>}
-            {running&&view?.controlled&&(draft.trim()||images.length>0)&&<IconButton icon="steer" label="立即追加到当前任务" className="round" disabled={!canWrite} onClick={()=>void send(true)}/>}
-            <SendMessageButton sending={Boolean(pending&&busy)} label={running?'完成后发送':'发送消息'} disabled={!canWrite||!draft.trim()&&!images.length||creating&&!startPath}/>
+            {running&&view?.controlled&&(drafted?<>
+              <IconButton icon="now" label="立即发送（可转后台的工作转入后台，否则打断当前回复）" className="round" disabled={!canWrite} onClick={()=>void send('now')}/>
+              <IconButton icon="steer" label="追加到当前任务（当前工具调用结束后读到）" className="round" disabled={!canWrite} onClick={()=>void send('steer')}/>
+            </>:<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!connected||busy||Boolean(pending)} onClick={()=>void mutate('claude.stop',{conversationId})}/>)}
+            {!(running&&view?.controlled&&!drafted)&&<SendMessageButton sending={Boolean(pending&&busy)} label={queueNext?'完成后发送':'发送消息'} disabled={!canWrite||!drafted||creating&&!startPath}/>}
           </div>
         </div>
       </form>

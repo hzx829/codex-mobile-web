@@ -121,16 +121,31 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
     assert.deepEqual(fake.answers[1].updatedInput.answers, {'用哪个数据库？': 'Postgres'});
     await until(() => read(id), value => !value.running);
 
-    // Queue behind a running task, steer, stop, and change model.
+    // Queue behind a running task on this computer, withdraw and delete queued messages, steer, send now, stop, and change model.
     await bridge.handle('claude.send', {conversationId: id, text: 'slow', opId: opId()});
     await until(() => read(id), value => value.running);
-    await bridge.handle('claude.send', {conversationId: id, text: '之后再做', opId: opId()});
+    const queuedOp = opId();
+    assert.equal((await bridge.handle('claude.send', {conversationId: id, text: '之后再做', images: [image], model: 'opus', opId: queuedOp})).kind, 'queued');
+    await bridge.handle('claude.send', {conversationId: id, text: '撤回我', opId: opId()});
+    const dropOp = opId();
+    await bridge.handle('claude.send', {conversationId: id, text: '删掉我', opId: dropOp});
+    view = await read(id);
+    assert.deepEqual(view.queuedMessages.map((m: any) => [m.text, m.imageCount, m.state]), [['之后再做', 1, 'queued'], ['撤回我', 0, 'queued'], ['删掉我', 0, 'queued']]);
+    assert.equal(fake.calls.filter(call => call.type === 'message').at(-1).text, 'slow', 'queued messages stay on this computer while the turn runs');
+    const withdrawn = await bridge.handle('claude.withdrawQueued', {conversationId: id, queuedId: view.queuedMessages[1].id, opId: opId()});
+    assert.deepEqual([withdrawn.kind, withdrawn.message.text], ['queue_withdrawn', '撤回我']);
+    assert.equal((await bridge.handle('claude.cancelQueued', {conversationId: id, queuedId: dropOp, opId: opId()})).kind, 'queue_cancelled');
+    assert.equal((await bridge.handle('claude.operation', {opId: dropOp})).kind, 'queue_cancelled', 'a deleted message reads back as not sent');
+    assert.equal((await bridge.handle('claude.archive', {conversationId: id, opId: opId()})).state, 'failed', 'queued messages block archiving');
     await bridge.handle('claude.send', {conversationId: id, text: '顺便', mode: 'steer', model: 'sonnet', opId: opId()});
-    assert.equal((await read(id)).queued, true);
+    await bridge.handle('claude.send', {conversationId: id, text: '马上', mode: 'now', opId: opId()});
+    await assert.rejects(bridge.handle('claude.send', {conversationId: id, text: 'x', mode: 'later', opId: opId()}), /发送方式无效/, 'unknown send modes are refused');
     assert.equal((await bridge.handle('claude.stop', {conversationId: id, opId: opId()})).state, 'accepted');
-    await until(() => read(id), value => !value.running && !value.queued);
+    await until(() => read(id), value => !value.running && !value.queuedMessages.length);
     const messages = fake.calls.filter(call => call.type === 'message');
-    assert.deepEqual(messages.slice(-3).map(call => [call.text, call.priority]), [['slow', undefined], ['之后再做', 'later'], ['顺便', 'next']]);
+    assert.deepEqual(messages.slice(-4).map(call => [call.text, call.priority, call.images]),
+      [['slow', undefined, 0], ['顺便', 'next', 0], ['马上', 'now', 0], ['之后再做', undefined, 1]], 'the queued message goes out after the turn, with its image');
+    assert.equal((await bridge.handle('claude.operation', {opId: queuedOp})).submitted, true);
     assert.ok(fake.calls.some(call => call.type === 'model' && call.model === 'sonnet'));
     assert.ok(fake.calls.some(call => call.type === 'interrupt'));
     assert.equal((await read(id)).error, '', 'a requested stop is not reported as an error');

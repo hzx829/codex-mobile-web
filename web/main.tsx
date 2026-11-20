@@ -10,6 +10,7 @@ import {ServiceSwitch, switchRoute} from './service-switch';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,withConversation,type Service} from './services';
 import {Icon,type IconName} from './icons';
 import {IconButton} from './icon-button';
+import {QueuedMessages} from './queued-messages';
 import {connectionLost,ConversationStatus,ConversationTurn,PendingMessage} from './conversation';
 import {RequestCard} from './content';
 import {createFirstTurn} from './new-chat';
@@ -620,22 +621,9 @@ function App(){
       </div>
       <div className="composer-area"><div className="request-stack">{!newChat&&view?.requests.map(req=><RequestCard key={`${view.generation}:${req.id}`} request={req} disabled={!canOperate} respond={response=>void mutate('request.respond',{...target(),requestId:req.id,response})}/>)}</div>{feedback}
         {connected&&view?.running&&!newChat&&!view.retry&&view.turns.at(-1)?.items.at(-1)?.type!=='retry'&&<div className="running-status"><i className="dot online"/>Codex 正在处理</div>}
-        {!newChat&&Boolean(view?.queuedMessages?.length)&&<div className="queued-messages" aria-label="待发送消息">
-          <div className="queue-heading">完成后发送 <span>{view?.queuedMessages?.length}</span></div>
-          {view?.queuedMessages?.map((message,index)=>{
-            const disabled=!connected||busy||Boolean(pending)||message.state==='sending';
-            const attachmentsFull=attachmentCount+message.imageCount+(message.fileNames?.length||0)>MAX_ATTACHMENTS||selectedImageBytes+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES;
-            const confirmUncertain=()=>message.state!=='uncertain'||window.confirm('请先核实这条消息是否已经发送。移出后，后续排队消息会继续发送。');
-            return <div className="queued-message" key={message.id}>
-              <div className="queued-content"><small>{message.state==='queued'?`排队 ${index+1}`:message.state==='sending'?'正在发送':message.state==='uncertain'?'结果待核实':'发送失败'}{message.imageCount>0?` · ${message.imageCount} 张图片`:''}{message.fileNames?.length?` · ${message.fileNames.length} 个文件`:''}</small><p title={[message.text,...message.fileNames||[]].join('\n')}>{message.text||message.fileNames?.join('、')||'图片消息'}</p>{message.error&&<small className="error">{message.error}；后续消息已暂停，请核实后移出。</small>}</div>
-              <div className="queued-actions">
-                <IconButton icon="steer" label="立即追加到当前任务（Steer，沿用当前任务设置）" disabled={disabled||!canOperate||!view?.activeTurnId||message.state!=='queued'} onClick={()=>void mutate('turn.steerQueued',{...target(),queuedId:message.id})}/>
-                <IconButton icon="undo" label={attachmentsFull?'输入框附件已满，请先处理草稿':'撤回到输入框'} disabled={disabled||imageLoading||voiceBusy||attachmentsFull} onClick={()=>{if(confirmUncertain())void mutate('turn.withdrawQueued',{threadId:selected,queuedId:message.id});}}/>
-                <IconButton icon="trash" label="删除排队消息" disabled={disabled} onClick={()=>{if(confirmUncertain())void mutate('turn.cancelQueued',{threadId:selected,queuedId:message.id});}}/>
-              </div>
-            </div>;
-          })}
-        </div>}
+        {!newChat&&view?.queuedMessages&&<QueuedMessages messages={view.queuedMessages} disabled={!connected||busy||Boolean(pending)} canSteer={canOperate&&Boolean(view.activeTurnId)} withdrawBlocked={imageLoading||voiceBusy}
+          attachmentsFull={message=>attachmentCount+message.imageCount+(message.fileNames?.length||0)>MAX_ATTACHMENTS||selectedImageBytes+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
+          onSteer={queuedId=>void mutate('turn.steerQueued',{...target(),queuedId})} onWithdraw={queuedId=>void mutate('turn.withdrawQueued',{threadId:selected,queuedId})} onCancel={queuedId=>void mutate('turn.cancelQueued',{threadId:selected,queuedId})}/>}
         <form className={`composer ${attachmentCount?'with-images':''}`} onSubmit={e=>{e.preventDefault();void submit();}}>
           {images.length>0&&<div className="image-strip"><span className="attachment-count" role="status">图片 {images.length}/{MAX_IMAGES}</span><div className="attachment-thumbnails">{images.map((url,i)=><div className="attachment-thumb" key={i}><button type="button" aria-label={`查看第 ${i+1} 张图片，共 ${images.length} 张`} onClick={()=>showPreview({kind:'image',url,title:`待发送图片 ${i+1}/${images.length}`})}><img src={url} alt={`待发送图片 ${i+1}`} decoding="async"/></button><button className="attachment-remove" type="button" disabled={busy||imageLoading} aria-label={`移除第 ${i+1} 张图片`} onClick={()=>setImages(old=>old.filter(value=>value!==url))}><Icon name="close" size={14}/></button></div>)}</div></div>}
           {files.length>0&&<div className="file-attachments">{files.map((file,i)=><div className="file-attachment" key={i}><Icon name="file" size={18}/><span title={file.name}>{file.name}<small>{file.size>=1024*1024?`${(file.size/1024/1024).toFixed(1)} MiB`:`${Math.max(1,Math.ceil(file.size/1024))} KiB`}</small></span><IconButton icon="close" label={`移除 ${file.name}`} disabled={busy||imageLoading} onClick={()=>setFiles(old=>old.filter((_,index)=>index!==i))}/></div>)}</div>}

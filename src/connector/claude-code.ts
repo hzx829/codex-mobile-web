@@ -5,7 +5,7 @@ import {dirname, join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {BridgeError, MAX_FRAME, textRequired, type Json, type TurnView} from '../shared/types.js';
 import {downloadProjectFile, projectDirectory, readProjectFile} from './project.js';
-import {validateImages} from '../shared/images.js';
+import {imageBytes, validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
 import {ClaudeRuntime, PERMISSION_MODES, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
 import {claudeArtifactTitles, claudePatches, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
@@ -13,6 +13,14 @@ import type {ArtifactViewer} from './claude-artifacts.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
 
 const sessionId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+/** How a message sent during a running turn is delivered, as in Codex: after the turn, into it, or at once. */
+const SEND_MODES = ['queue', 'steer', 'now'] as const;
+type SendMode = typeof SEND_MODES[number];
+function sendMode(value: unknown): SendMode {
+  if (value === undefined || value === null || value === '') return 'queue';
+  if (!SEND_MODES.includes(value as SendMode)) throw new BridgeError('invalid', '发送方式无效');
+  return value as SendMode;
+}
 const PAGE = 50;
 const MAX_TURNS = 60;
 /** A transcript written to this recently is treated as an active terminal or IDE session. */
@@ -63,6 +71,10 @@ export class ClaudeCodeBridge {
   private catalog?: {at: number; sessions: SessionInfo[]};
   private paths = new Map<string, string>();
   private sending = new Set<string>();
+  /** Bumped when a session's queue changes, so watching phones see it without a transcript write. */
+  private queueVersions = new Map<string, number>();
+  private queueTimer: NodeJS.Timeout;
+  private closed = false;
   /** Transcript versions this connector wrote itself (a rename), which must not look like a terminal at work. */
   private ownWrites = new Map<string, bigint>();
   readonly runtime: ClaudeRuntime;
@@ -71,10 +83,51 @@ export class ClaudeCodeBridge {
   constructor(private ledger?: Ledger, private root = claudeConfigDir(), private sessions: () => Promise<ClaudeSessions> = sdkSessions,
     private now = Date.now, runtime?: ClaudeRuntime) {
     this.runtime = runtime || new ClaudeRuntime(sdkQuery);
-    this.runtime.on('change', () => {this.catalog = undefined;});
+    this.runtime.on('change', (id: string) => {this.catalog = undefined;if (id) setImmediate(() => this.drainSoon(id));});
+    // Also picks up messages left queued across a connector restart, or behind a session that was busy elsewhere.
+    this.queueTimer = setInterval(() => {
+      try {if (!this.closed) for (const id of new Set(this.queue?.queued().map(message => message.threadId))) this.drainSoon(id);} catch {}
+    }, 1500);
+    this.queueTimer.unref?.();
   }
-  get busy() {return this.runtime.busy;}
-  close() {this.runtime.close();this.artifacts?.close();}
+  private get queue() {return this.ledger?.claudeQueue;}
+  get busy() {return this.runtime.busy || Boolean(this.queue?.queued().length);}
+  close() {this.closed = true;clearInterval(this.queueTimer);this.runtime.close();this.artifacts?.close();}
+
+  private drainSoon(id: string) {if (!this.closed) this.drain(id).catch(() => {});}
+  private queueChanged(id: string) {this.queueVersions.set(id, (this.queueVersions.get(id) || 0) + 1);}
+
+  /**
+   * Sends the first queued message once the session's turn has ended, one per turn, as Codex does. A message that
+   * failed or whose delivery is uncertain stops the queue until the phone removes it.
+   */
+  private async drain(id: string) {
+    const queue = this.queue, head = queue?.queued(id)[0];
+    if (!queue || !head || head.state !== 'queued' || this.sending.has(id)) return;
+    let session = this.runtime.get(id);
+    if (session && (session.running || session.requests.size || session.inbox.closed)) return;
+    this.sending.add(id);
+    try {
+      const {text, images = [], model, permissionMode: mode} = head.payload;
+      if (!session) {
+        const info = await this.info(id).catch(() => undefined);
+        // Wait while the terminal or IDE may be running it; never start a second writer.
+        if (!info || (await this.revision(id).catch(() => ({external: true}))).external || queue.queued(id)[0]?.id !== head.id) return;
+      }
+      queue.sending(head.id);this.queueChanged(id);
+      try {
+        if (!session || session.closed) {
+          const {cwd = ''} = await this.info(id);
+          session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, model, permissionMode: mode});
+        } else await this.runtime.configure(session, model, mode);
+        this.runtime.send(session, text, images);
+        queue.finishQueued(head.id, {conversationId: id, submitted: true});
+      } catch (error) {
+        queue.finishQueued(head.id, {}, error instanceof BridgeError ? error : new BridgeError('unexpected', '排队消息发送结果待核实，不会自动重发', true));
+      }
+      this.queueChanged(id);
+    } finally {this.sending.delete(id);}
+  }
 
   /** All sessions, newest first, cached briefly: projects and search both need the whole catalog. */
   private async all(force = false) {
@@ -103,7 +156,7 @@ export class ClaudeCodeBridge {
     const info = path ? await stat(path, {bigint: true}).catch(() => {this.paths.delete(id);return null;}) : null;
     if (!info && !live) throw new BridgeError('missing', 'Claude Code 会话已移动或删除，请刷新列表');
     const external = !live && info !== null && this.now() - Number(info.mtimeMs) < ACTIVE_MS && this.ownWrites.get(id) !== info.mtimeNs;
-    return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${live ? live.version : external ? 'external' : '-'}`, external, exists: Boolean(info)};
+    return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${live ? live.version : external ? 'external' : '-'}:${this.queueVersions.get(id) || 0}`, external, exists: Boolean(info)};
   }
 
   private async info(id: string) {
@@ -152,7 +205,9 @@ export class ClaudeCodeBridge {
     return {
       id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', revision: current.revision, running,
       controlled: Boolean(live), external, permissionMode: live?.permissionMode || '', requests: live?.pending || [], error: live?.error || '',
-      queued: Boolean(live && live.inbox.size),
+      queuedMessages: (this.queue?.queued(id) || []).map(message => ({id: message.id, text: message.payload.text || '',
+        imageCount: message.payload.images?.length || 0, imageBytes: (message.payload.images || []).reduce((sum: number, url: string) => sum + imageBytes(url), 0),
+        state: message.state, error: message.error})),
       turns: recent.reverse(), truncated: recent.length < turns.length, contextUsage,
       notice: external ? '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。' : '',
     };
@@ -240,12 +295,19 @@ export class ClaudeCodeBridge {
         : downloadProjectFile(cwd, path, textRequired(p.revision, '文件版本', 64), p.offset);
     }
     if (action === 'claude.send') {
-      const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode), steer = p.mode === 'steer';
-      return this.mutate(p, {action, id, text: input.text, images: fingerprint(input.images), model, mode, steer, confirmIdle: p.confirmIdle === true}, async () => {
+      const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode), delivery = sendMode(p.mode);
+      return this.mutate(p, {action, id, text: input.text, images: fingerprint(input.images), model, mode, delivery, confirmIdle: p.confirmIdle === true}, async () => {
         if (this.sending.has(id)) throw new BridgeError('busy', '这条会话已有一条消息正在提交，请稍后再试');
         this.sending.add(id);
         try {
           let session = this.runtime.get(id);
+          // Behind a running turn, or behind messages already waiting, a plain send waits its turn on this computer.
+          if (delivery === 'queue' && this.queue && (session?.running || session?.requests.size || this.queue.queued(id).length)) {
+            await this.info(id);
+            this.queue.enqueue(textRequired(p.opId, '操作标识', 100), id, {text: input.text, images: input.images, model, permissionMode: mode});
+            this.queueChanged(id);
+            return {conversationId: id, kind: 'queued'};
+          }
           if (!session) {
             const {cwd = ''} = await this.info(id);
             const directory = await projectDirectory(cwd);
@@ -253,9 +315,40 @@ export class ClaudeCodeBridge {
               throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
             session = await this.runtime.start({cwd: directory, resume: id, model, permissionMode: mode});
           } else await this.runtime.configure(session, model, mode);
-          this.runtime.send(session, input.text, input.images, steer);
-          return {submitted: true};
+          const running = session.running;
+          this.runtime.send(session, input.text, input.images, delivery === 'steer' ? 'next' : delivery === 'now' ? 'now' : undefined);
+          return {submitted: true, kind: running ? delivery === 'now' ? 'sent_now' : 'steer_accepted' : 'turn_accepted'};
         } finally {this.sending.delete(id);}
+      });
+    }
+    if (action === 'claude.steerQueued' || action === 'claude.withdrawQueued' || action === 'claude.cancelQueued') {
+      const queuedId = textRequired(p.queuedId, '排队消息', 100), queue = this.queue;
+      return this.mutate(p, {action, id, queuedId}, async () => {
+        if (!queue) throw new BridgeError('unavailable', '连接器未启用操作记录');
+        if (action !== 'claude.steerQueued') {
+          const message = queue.cancelQueued(id, queuedId);
+          this.queueChanged(id);
+          return action === 'claude.withdrawQueued'
+            ? {queuedId, kind: 'queue_withdrawn', message: {text: message.text || '', images: message.images || [], model: message.model, permissionMode: message.permissionMode}}
+            : {queuedId, kind: 'queue_cancelled'};
+        }
+        // Into the running turn with that turn's settings, as Codex's steer does.
+        const message = queue.queued(id).find(item => item.id === queuedId), session = this.runtime.get(id);
+        if (!message) throw new BridgeError('changed', '消息已经发送或移出队列，请刷新');
+        if (message.state !== 'queued') throw new BridgeError('active', '这条消息暂不能追加，请核实发送状态');
+        if (!session?.running || session.inbox.closed) throw new BridgeError('changed', '当前没有正在运行的任务，消息会按顺序发送');
+        if (this.sending.has(id)) throw new BridgeError('busy', '这条会话已有一条消息正在提交，请稍后再试');
+        this.sending.add(id);
+        try {
+          queue.sending(queuedId);
+          try {this.runtime.send(session, message.payload.text, message.payload.images || [], 'next');}
+          catch (error) {
+            const failure = error instanceof BridgeError ? error : new BridgeError('unexpected', '追加结果待核实，不会自动重发', true);
+            queue.finishQueued(queuedId, {}, failure);throw failure;
+          }
+          queue.finishQueued(queuedId, {conversationId: id, submitted: true, kind: 'steer_accepted'});
+          return {queuedId, kind: 'steer_accepted'};
+        } finally {this.sending.delete(id);this.queueChanged(id);}
       });
     }
     if (action === 'claude.edit') {
@@ -313,6 +406,7 @@ export class ClaudeCodeBridge {
       await this.info(id);
       const live = this.runtime.get(id);
       if (live?.running || live?.requests.size || (await this.revision(id)).external) throw new BridgeError('active', '这条会话正在运行，请等它结束后再归档');
+      if (this.queue?.queued(id).length) throw new BridgeError('active', '请先处理排队消息再归档');
       if (live) this.runtime.release(live);
       await (await this.sessions()).archiveSession(id);
       this.catalog = undefined;
