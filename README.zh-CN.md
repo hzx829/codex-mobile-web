@@ -6,12 +6,12 @@
 
 查看项目和会话、发送任务、补充要求、停止任务，以及回应 Codex 的审批和问题。任务仍在电脑上执行，沿用原有工作区、模型配置和工具。手机无需安装 App，也无需注册项目方账号。
 
-手机首页可在 **Codex / Antigravity / Claude Code** 间切换。三个入口共用同一台电脑和自部署中继，切回来会恢复上次打开的会话。Antigravity 读取 Windows 桌面已有对话，支持文字续聊、模型选择、停止任务和文件预览。Claude Code 在电脑上运行会话，支持新建、续聊、停止和审批；项目就是文件夹，项目说明、MCP 和记忆用的是 Claude Code 自己的 `CLAUDE.md`、`.mcp.json` 和记忆目录，终端和桌面 App 里打开同一个文件夹也会用到。[Claude Code 接入记录](docs/claude-local/DESIGN.md) · [Antigravity 接入与验收](docs/antigravity/IMPLEMENTATION.md)
+手机首页可在 **Codex / Antigravity / Claude Code** 间切换。三个入口共用同一台电脑和自部署中继，切回来会恢复上次打开的会话。Antigravity 读取 Windows 桌面已有对话，支持文字和语音续聊、模型选择、停止任务和文件预览。Claude Code 在电脑上运行会话，支持新建、续聊、停止和审批；项目就是文件夹，项目说明、MCP 和记忆用的是 Claude Code 自己的 `CLAUDE.md`、`.mcp.json` 和记忆目录，终端和桌面 App 里打开同一个文件夹也会用到。[Claude Code 接入记录](docs/claude-local/DESIGN.md) · [Antigravity 接入与验收](docs/antigravity/IMPLEMENTATION.md)
 
 ## 可以做什么
 
 - 自动发现已有项目和会话，包括归档会话。
-- 语音支持 Codex 识别和系统键盘，在首页选项或“＋ → 语音输入”切换并记住选择。默认 Codex 识别：点麦克风录音，再点停止，结果填入草稿；需要 HTTPS、麦克风许可和电脑上的 Codex ChatGPT 登录。录音最长 2 分钟，经中继、电脑发送至桌面的私有语音服务，手机兼容性待人工验证。
+- Codex、Claude Code 和 Antigravity 都能语音输入，支持 Codex 识别和系统键盘，在各应用首页选项（或 Codex 的“＋ → 语音输入”）切换，三个应用共用一个选择。默认 Codex 识别：点麦克风录音，再点停止，结果填入草稿；需要 HTTPS、麦克风许可和电脑上的 Codex ChatGPT 登录。录音最长 2 分钟，经中继、电脑发送至桌面的私有语音服务，手机兼容性待人工验证。
   电脑需使用代理时，在启动连接器前设置 `HTTPS_PROXY`（或 `HTTP_PROXY`）；语音请求也遵循 `NO_PROXY`，支持小写变量名。
 - 新建或继续任务，查看进度、补充要求、停止任务，以及回应支持的审批和问题。
 - 运行中默认“完成后发送”，发送后队列贴在输入框上方，每条用图标提供立即追加（Steer）、撤回和删除。撤回保留文字、图片和设置，并保留已有草稿。排队消息由电脑连接器按顺序发送，关闭手机页面后仍会继续等待。

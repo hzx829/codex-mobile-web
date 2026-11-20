@@ -15,8 +15,17 @@ export type ClaudeQuestion = {question: string; header: string; multiSelect: boo
 export type ClaudeRequestView = {
   id: string; kind: 'permission' | 'question' | 'plan'; tool: string; title: string; detail: string;
   canRemember: boolean; questions?: ClaudeQuestion[];
+  /** Where "remember" saves the rule, so the phone can name it: this session, this project or every project. */
+  rememberScope?: 'session' | 'project' | 'user';
 };
 export type ClaudeResponse = {decision: 'allow' | 'allowSession' | 'deny'; answers?: Record<string, string>; message?: string};
+
+/** The broadest place the suggested permission updates would be written. */
+function rememberScope(suggestions: PermissionUpdate[] | undefined): ClaudeRequestView['rememberScope'] {
+  if (!suggestions?.length) return undefined;
+  const places = suggestions.map(update => update.destination);
+  return places.includes('userSettings') ? 'user' : places.some(place => place === 'projectSettings' || place === 'localSettings') ? 'project' : 'session';
+}
 
 type Pending = {view: ClaudeRequestView; input: Record<string, unknown>; suggestions?: PermissionUpdate[]; resolve: (result: PermissionResult) => void};
 
@@ -262,6 +271,7 @@ export class ClaudeRuntime extends EventEmitter {
       title: kind === 'question' ? 'Claude 有问题要问你' : kind === 'plan' ? 'Claude 已完成计划，是否开始执行？' : context.title || `Claude 想使用 ${context.displayName || tool}`,
       detail: kind === 'plan' ? str(input.plan) : kind === 'question' ? '' : [context.description, inputSummary(tool, input), context.decisionReason].filter(Boolean).join('\n\n'),
       canRemember: kind === 'permission' && Boolean(context.suggestions?.length), ...(asked ? {questions: asked} : {}),
+      ...(kind === 'permission' && context.suggestions?.length ? {rememberScope: rememberScope(context.suggestions)} : {}),
     };
     return new Promise(resolve => {
       const finish = (result: PermissionResult) => {

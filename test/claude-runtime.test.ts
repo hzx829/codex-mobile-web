@@ -106,7 +106,7 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
     view = await until(() => read(id), value => value.requests.length === 1);
     const firstRequestId = view.requests[0].id;
     assert.equal(view.running, true);
-    assert.deepEqual({kind: view.requests[0].kind, detail: view.requests[0].detail, canRemember: view.requests[0].canRemember}, {kind: 'permission', detail: 'npm test', canRemember: true});
+    assert.deepEqual({kind: view.requests[0].kind, detail: view.requests[0].detail, canRemember: view.requests[0].canRemember, rememberScope: view.requests[0].rememberScope}, {kind: 'permission', detail: 'npm test', canRemember: true, rememberScope: 'session'});
     const watched = bridge.handle('claude.watch', {conversationId: id, revision: view.revision});
     assert.equal((await bridge.handle('claude.respond', {conversationId: id, requestId: view.requests[0].id, decision: 'allowSession', opId: opId()})).state, 'accepted');
     assert.notEqual((await watched).revision, view.revision, 'an answered request wakes the phone without a transcript write');
