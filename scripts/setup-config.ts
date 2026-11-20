@@ -46,6 +46,15 @@ export async function prepareSettings(input:any,old:any={}) {
     }
     config[key]=path;
   }
+  if(input.claudeBin!==undefined) {
+    if(typeof input.claudeBin!=='string')throw new Error('Claude Code 路径无效');
+    if(!input.claudeBin.trim())delete config.claudeBin;
+    else {
+      const path=await realpath(resolve(input.claudeBin.trim())).catch(()=>{throw new Error('找不到所选的 Claude Code 程序');}),entry=await stat(path);
+      if(!entry.isFile()||(process.platform==='win32'&&!/\.exe$/i.test(path)))throw new Error('请选择 Claude Code 可执行文件（claude.exe）');
+      config.claudeBin=path;
+    }
+  }
   if(mode==='all') {
     if(url.protocol!=='http:')throw new Error('本机中继使用 HTTP 地址；HTTPS 公网中继请选择“连接自己的中继”');
     config.port=Number(url.port||80);

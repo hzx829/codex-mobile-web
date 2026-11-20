@@ -267,6 +267,12 @@ sealed class TrayContext : ApplicationContext {
         dialog.Filter = "Codex 可执行文件 (codex.exe)|codex.exe|可执行文件 (*.exe)|*.exe";
         if (dialog.ShowDialog(window) == DialogResult.OK) path = dialog.FileName;
       }
+    } else if (field == "claudeBin") {
+      using (OpenFileDialog dialog = new OpenFileDialog()) {
+        dialog.Title = "选择 Claude Code 程序";
+        dialog.Filter = "Claude Code 可执行文件 (claude.exe)|claude.exe|可执行文件 (*.exe)|*.exe";
+        if (dialog.ShowDialog(window) == DialogResult.OK) path = dialog.FileName;
+      }
     } else if (field == "codexHome") {
       using (FolderBrowserDialog dialog = new FolderBrowserDialog()) {
         dialog.Description = "选择 Codex 配置目录";
@@ -395,7 +401,7 @@ sealed class TrayContext : ApplicationContext {
       if (stopped.Code != 0) {SetIdle(); SaveResult(false, "停止服务失败：" + stopped.Error); return;}
     }
     Dictionary<string, object> payload = new Dictionary<string, object>();
-    foreach (string key in new[] {"mode", "relayUrl", "token", "codexBin", "codexHome"}) payload[key] = settings.ContainsKey(key) ? settings[key] : "";
+    foreach (string key in new[] {"mode", "relayUrl", "token", "codexBin", "codexHome", "claudeBin"}) payload[key] = settings.ContainsKey(key) ? settings[key] : "";
     ProcessResult saved = await RunNode(new[] {"--settings-stdin"}, json.Serialize(payload), 30000);
     SetIdle();
     if (saved.Code != 0) {

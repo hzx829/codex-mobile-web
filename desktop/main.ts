@@ -3,23 +3,24 @@
 import QRCode from 'qrcode';
 
 type Mode = 'all' | 'connector' | 'relay';
-type Config = {mode?: Mode; relayUrl?: string; token?: string; codexBin?: string; codexHome?: string; localRelay?: string};
+type Config = {mode?: Mode; relayUrl?: string; token?: string; codexBin?: string; codexHome?: string; claudeBin?: string; localRelay?: string};
 type Service = 'running' | 'partial' | 'stopped' | 'starting' | 'stopping' | 'saving';
 type HostState = {service: Service; configured: boolean; error?: string | null; autostart: boolean; config?: Config | null};
 type Health = {relay: 'ok' | 'unreachable' | 'unauthorized'; connector: 'online' | 'offline' | 'unknown'; services?: string[]; codexVersion?: string; desktopOnline?: boolean};
-type Settings = {mode: Mode; relayUrl: string; token: string; codexBin: string; codexHome: string};
+type Settings = {mode: Mode; relayUrl: string; token: string; codexBin: string; codexHome: string; claudeBin: string};
+type PathField = 'codexBin' | 'codexHome' | 'claudeBin';
 type FromHost =
   | {type: 'state'; state: HostState}
   | {type: 'health'; health: Health | null}
   | {type: 'dialog'; name: 'stop' | 'exit'}
   | {type: 'screen'; name: 'settings' | 'status'}
-  | {type: 'picked'; field: 'codexBin' | 'codexHome'; path: string}
+  | {type: 'picked'; field: PathField; path: string}
   | {type: 'saveResult'; ok: boolean; error?: string};
 type ToHost =
   | {type: 'ready'} | {type: 'start'} | {type: 'stop'} | {type: 'exit'; stop: boolean}
   | {type: 'save'; settings: Settings} | {type: 'autostart'; enabled: boolean}
   | {type: 'logs'} | {type: 'open'; url: string} | {type: 'copy'; text: string}
-  | {type: 'pick'; field: 'codexBin' | 'codexHome'} | {type: 'hide'};
+  | {type: 'pick'; field: PathField} | {type: 'hide'};
 
 declare global {interface Window {chrome?: {webview?: {postMessage(message: unknown): void; addEventListener(type: 'message', listener: (event: {data: unknown}) => void): void}}}}
 
@@ -151,7 +152,8 @@ function openSettings() {
   ($('token') as HTMLInputElement).value = config.token || '';
   ($('codexBin') as HTMLInputElement).value = config.codexBin || '';
   ($('codexHome') as HTMLInputElement).value = config.codexHome || '';
-  ($('advanced') as HTMLDetailsElement).open = !!(config.codexBin || config.codexHome);
+  ($('claudeBin') as HTMLInputElement).value = config.claudeBin || '';
+  ($('advanced') as HTMLDetailsElement).open = !!(config.codexBin || config.codexHome || config.claudeBin);
   $('save-error').hidden = true;
   show('settings');
 }
@@ -261,14 +263,14 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('.segmented bu
     renderSettingsChrome();
   });
 }
-for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pick]')) button.addEventListener('click', () => send({type: 'pick', field: button.dataset.pick as 'codexBin' | 'codexHome'}));
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pick]')) button.addEventListener('click', () => send({type: 'pick', field: button.dataset.pick as PathField}));
 $('settings-form').addEventListener('submit', event => {
   event.preventDefault();
   if (saving) return;
   saving = true;
   $('save-error').hidden = true;
   const value = (id: string) => ($(id) as HTMLInputElement).value.trim();
-  send({type: 'save', settings: {mode: draftMode === 'relay' ? 'all' : draftMode, relayUrl: value('relay'), token: value('token'), codexBin: value('codexBin'), codexHome: value('codexHome')}});
+  send({type: 'save', settings: {mode: draftMode === 'relay' ? 'all' : draftMode, relayUrl: value('relay'), token: value('token'), codexBin: value('codexBin'), codexHome: value('codexHome'), claudeBin: value('claudeBin')}});
   render();
 });
 document.addEventListener('keydown', event => {
