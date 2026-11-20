@@ -1,6 +1,7 @@
 import {open, realpath} from 'node:fs/promises';
 import {basename, dirname, extname, isAbsolute, relative, resolve, sep} from 'node:path';
 import {BridgeError, textRequired} from '../shared/types.js';
+import {assertInsideWorkspace} from './project.js';
 
 const assetTypes: Record<string,string> = {
   '.css':'text/css', '.js':'text/javascript', '.mjs':'text/javascript',
@@ -14,7 +15,9 @@ const missing = () => new BridgeError('not_found','网页文件不存在或超�
 export async function htmlEntry(value:unknown) {
   const path = textRequired(value,'网页文件路径',4096);
   if (!isAbsolute(path) || /^[\\/]{2}/.test(path) || !isHtml(path)) throw missing();
+  assertInsideWorkspace(path);
   const entry = await realpath(path).catch(() => {throw missing();});
+  assertInsideWorkspace(entry);
   if (!isHtml(entry)) throw missing();
   return entry;
 }
@@ -25,6 +28,7 @@ export async function openHtmlResource(entry:string, pathname:string) {
   const parts = decodeURIComponent(pathname).slice(1).split('/');
   if (parts.some(part => !part || part.startsWith('.') || /[\\:\0]/.test(part))) throw missing();
   const target = await realpath(resolve(root,...parts));
+  assertInsideWorkspace(target);
   const within = relative(root,target);
   if (isAbsolute(within) || within.split(sep).some(part=>part.startsWith('.'))) throw missing();
   const mime = target === entry ? 'text/html; charset=utf-8' : assetTypes[extname(target).toLowerCase()];

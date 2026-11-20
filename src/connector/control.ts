@@ -7,8 +7,8 @@ import { Ledger } from './ledger.js';
 import { codexRetryText, desktopTurns, normalizeSession, normalizeTurn, turnPage } from './normalize.js';
 import { LiveDiff, RuntimeLive, type LiveFrame } from './live.js';
 import { approvalResult } from './approvals.js';
-import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
-import { nativeProjects, indexedSessions } from './projects.js';
+import { createGuestProject, guestWorkspace, projectDirectory, readProjectFile, downloadProjectFile, workspaceProjects } from './project.js';
+import { nativeProjects, indexedSessions, indexedProjectPaths } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor, type TurnView } from '../shared/types.js';
 import {imageBytes} from '../shared/images.js';
@@ -130,6 +130,10 @@ export class Control extends EventEmitter {
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
     if(req.action==='runtime.reload')return this.reloadRuntime(p);
     if(this.reloading)throw new BridgeError('maintenance','连接器正在适配 Codex 更新，请稍后刷新');
+    if(req.action==='project.create'){
+      if(!guestWorkspace())throw new BridgeError('unsupported','此操作仅在借用电脑时可用');
+      return this.ledger.run(textRequired(p.opId,'操作标识',100),{action:req.action,name:p.name},()=>createGuestProject(p.name));
+    }
     if(req.action==='voice.transcribe')return transcribeVoice(this.runtime,p);
     if(req.action==='file.uploadStart'||req.action==='file.uploadChunk'){
       const threadId=textRequired(p.threadId,'会话'),id=uploadId(p.id);
@@ -151,20 +155,33 @@ export class Control extends EventEmitter {
       }));
     }
     if(req.action==='info') {
-      const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
+      const requested=p.cwd?textRequired(p.cwd,'目录'):undefined;
+      const cwd=guestWorkspace()?requested?await projectDirectory(requested):guestWorkspace():requested;
       const config=await this.runtime.rpc('config/read',{includeLayers:false,cwd});
       const models=await readModels(this.runtime);
       const c=config.config||{};
-      const projects=await this.projects(c);
+      let projects;
+      if(guestWorkspace()){
+        let paths:string[]=[];
+        try {paths=indexedProjectPaths();}catch(error){
+          if((error as {errcode?:number}).errcode!==14)throw error; // The app-server may still be creating the state DB.
+        }
+        projects=await workspaceProjects(paths);
+      }else projects=await this.projects(c);
       return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',serviceTier:c.service_tier??null,models:models.data||[],runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},generation:this.generation};
     }
     if(req.action==='sessions.list') {
-      const cwd=p.cwd?textRequired(p.cwd,'目录'):undefined;
+      const requested=p.cwd?textRequired(p.cwd,'目录'):undefined;
+      const cwd=requested&&guestWorkspace()?await projectDirectory(requested):requested;
       const search=p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined;
       if(p.refresh===true)await this.runtime.rpc('thread/list',{limit:1,useStateDbOnly:false},3000).catch(()=>{});
       // The desktop-owned thread can block app-server thread/list; the state index remains readable.
       const page=this.listSessions({cwd,archived:Boolean(p.archived),search,cursor:p.cursor});
-      return {...page,data:page.data.map(thread=>({...thread,status:this.desktop.states.get(thread.id)?.state.threadRuntimeStatus}))};
+      const threads=guestWorkspace()?await Promise.all(page.data.map(async thread=>{
+        const path=await projectDirectory(thread.cwd).catch(()=>undefined);
+        return path?{...thread,cwd:path}:null;
+      })):page.data;
+      return {...page,data:threads.flatMap(thread=>thread?[{...thread,status:this.desktop.states.get(thread.id)?.state.threadRuntimeStatus}]:[])};
     }
     if(req.action==='session.read') {
       const cursor:TurnCursor|undefined=p.cursor==null?undefined:{before:textRequired(p.cursor.before,'历史位置',200)};
@@ -214,15 +231,16 @@ export class Control extends EventEmitter {
         if(e instanceof BridgeError&&e.code==='changed')throw e;
         const {raw,hasMore,notice,resumeUnavailable,nextCursor}=await this.runtimeThread(id,limit,cursor);
         nativeCursor=nextCursor;
-        const managed=this.ledger.owns(id)&&!resumeUnavailable;
+        const managed=Boolean(guestWorkspace()||this.ledger.owns(id))&&!resumeUnavailable;
         for(const [key,value] of Object.entries(this.settings.get(id)||{}))if(raw[key]===undefined||raw[key]===null||raw[key]==='')raw[key]=value;
         view=normalizeSession(raw,managed?'connector':'history',[],limit);
         if(managed){view.contextUsage=this.contexts.get(id)||null;for(const turn of view.turns)turn.diff=this.diffs.get(turn.id)||turn.diff;}
         view.hasMore=hasMore||view.hasMore;
         view.resumeUnavailable=resumeUnavailable;
-        if(!managed)view.notice=notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
+        if(!managed)view.notice=guestWorkspace()?'这条会话的历史格式暂不支持继续。':notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
       }
     }
+    if(guestWorkspace())view.cwd=await projectDirectory(view.cwd);
     view.nextCursor=view.hasMore&&view.turns.length?{before:view.turns[0].id,...nativeCursor?{native:nativeCursor}:{}}:null;
     const starting=this.starting.get(id);
     if(starting&&!cursor&&view.source!=='history') {
@@ -421,11 +439,13 @@ export class Control extends EventEmitter {
       this.emit('change',forkId);return {threadId:forkId,title,cwd:r.thread.cwd||source.cwd};
     }
     if(action==='session.rename') {
+      if(guestWorkspace())await this.checkThreadDirectory(id);
       const name=textRequired(p.name,'会话名称',200);
       await this.runtime.rpc('thread/name/set',{threadId:id,name});
       this.emit('change',id);return {threadId:id,name};
     }
     if(action==='session.unarchive') {
+      if(guestWorkspace())await this.checkThreadDirectory(id);
       await this.runtime.rpc('thread/unarchive',{threadId:id});
       this.emit('change',id);return {threadId:id,archived:false};
     }
@@ -534,6 +554,10 @@ export class Control extends EventEmitter {
       this.emit('change',id);return {threadId:id,requestId:req.id,kind:'response_submitted'};
     }
     throw new BridgeError('unsupported','此操作暂不支持');
+  }
+  private async checkThreadDirectory(threadId:string) {
+    const result=await this.runtime.rpc('thread/read',{threadId,includeTurns:false});
+    await projectDirectory(result.thread.cwd);
   }
   private async startDesktopTurn(context:Json,request:Json):Promise<Json> {
     try {

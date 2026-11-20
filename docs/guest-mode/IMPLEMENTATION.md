@@ -2,28 +2,7 @@
 
 按 [设计](DESIGN.md) 分阶段交付。每个阶段都能单独合并，且不改变自用模式的行为：没有 `guest: true` 的配置，和现在完全一样。
 
-## 进度（2026-11-19）
-
-会话“谁能看到谁的”这一部分已经接上，和 Codex 对齐：
-
-| | Codex | Claude Code |
-|---|---|---|
-| 自用：电脑上能看到手机建的会话 | 同一个 `~/.codex`，桌面应用的列表照常显示；连接器通过桌面 IPC 把新会话加进最近列表 | entrypoint 默认 `codex-mobile-web`，终端 `claude --resume` 列表能看到（见 `docs/claude-local/M1-RESULTS.md`） |
-| 访客：B 看不到你的会话，你也看不到 B 的 | `CODEX_HOME=guest/codex-home`；`NoDesktop` 不连 `\\.\pipe\codex-ipc` | `CLAUDE_CONFIG_DIR=guest/claude-config`；entrypoint `sdk-ts` |
-
-已完成（M1 的一部分）：
-
-- `src/shared/config.ts`：`guest`、`guestRoot`（默认 `<启动目录>/guest`，也可以用 `BRIDGE_GUEST_ROOT`）。
-- `src/connector/guest.ts`：`guestPaths`、`syncLogin`（目标不存在时才复制，从不写回 B 的文件）、`prepareGuest`、`applyGuestEnv`（同时去掉 `CODEX_SQLITE_HOME`、`CODEX_IPC_PATH`、`CODEX_PROFILE`）、`NoDesktop`、`noAntigravity`。
-- `src/connector/main.ts`：访客模式下按上面的顺序准备目录和环境，再构造 Codex 和 Claude Code；配置里的 `codexHome`、`claudeEntrypoint` 被忽略；Antigravity 返回 `unsupported`；`hello` 带上 `services`（只含已登录的应用）和 `guest:true`。
-- `test/guest.test.ts`；用假的用户目录启动过一次访客连接器，Codex app-server 的数据确实写进了 `guest/codex-home`。
-
-还没做：
-
-- M0 实测（登录副本会不会互相顶掉）。在此之前不要拿真实账号试访客模式。
-- M1 的路径限定（`assertInsideWorkspace`）、`project.create`、项目列表过滤。
-- M2 中继的连接器专用 Token，以及把 `services`、`guest` 放进 `machines`（现在中继会忽略这两个字段）。
-- M3 网页端、M4 访客包、M5 人工验收。
+Windows 测试包先采用登录文件副本。自动化检查使用模拟凭证，验证目录隔离、授权和便携包启停。真实账号的首次启动和双向令牌刷新按 M0 人工验收。
 
 ## M0 · 先实测登录副本（不写产品代码）
 
@@ -63,7 +42,6 @@ guestPaths?: {root, codexHome, claudeConfig, workspace}   // 都是绝对路径
    - 调用新模块 `src/connector/guest.ts` 的 `syncLogin()`，复制 B 的两份登录文件（按 M0 的结论决定是复制还是链接）。
    - 设置 `process.env.CODEX_HOME` 和 `process.env.CLAUDE_CONFIG_DIR`。**必须在**构造 `Control`、`AppServer`、`ClaudeCodeBridge` 之前设置，因为 `claudeConfigDir()`、`nativeProjects`、`indexedSessions`、`readPaginatedHistory` 都是在调用时读环境变量的默认值。
    - 忽略配置里的 `codexHome`：访客模式下固定使用访客目录。
-   - 构造 `ClaudeRuntime` 时 entrypoint 传 `'sdk-ts'`（自用模式默认是 `codex-mobile-web`，终端 `/resume` 能看到）。B 看不到你的会话靠的是 `CLAUDE_CONFIG_DIR` 目录隔离，这一项只是多一层保险：万一会话写进了 B 的 `~/.claude`，终端列表也会隐藏 `sdk-*` 会话。忽略配置里的 `claudeEntrypoint`。
 2. 访客模式下 `Control` 改用 `NoDesktop`：一个实现 `Desktop` 现有接口（`connect`、`request`、`follow`、`states`、`clientId`、事件）的空对象，永远离线，`request` 直接抛 `offline`。这样所有 `session.source==='desktop'` 的分支都不会被走到，也不会去连 `\\.\pipe\codex-ipc`。
 3. 访客模式下不构造 `AntigravityBridge`，`ServiceRouter` 里也不注册 `antigravity` 前缀。手机如果发来 `antigravity.*`，返回 `unsupported`。
 4. `hello` 里增加 `services:['codex','claude'].filter(可用)` 和 `guest:true`。是否可用由 `guest.ts` 的 `preflight()` 判断（见 M4）。自用模式下发 `services:['codex','claude','antigravity']`，`guest` 不发。
@@ -119,7 +97,7 @@ guestPaths?: {root, codexHome, claudeConfig, workspace}   // 都是绝对路径
 
 参数：`--name "B 的电脑"`、`--relay https://…`。可选 `--relay-config <路径>`：直接把新 Token 写进本机中继配置。
 
-1. 运行 `package:windows` 的产物步骤，或者要求先执行过一次，复用 `release/` 下最新的目录。
+1. 从当前分支重新构建，复用 Windows 便携包的 Node 运行时和许可证步骤。
 2. 生成 `machineId`（`guest-` + 随机 12 位）和 32 字节随机访客 Token（base64url）。
 3. 写入包内的 `.local/config.json`：
 
@@ -128,9 +106,9 @@ guestPaths?: {root, codexHome, claudeConfig, workspace}   // 都是绝对路径
    ```
 
 4. 只放访客需要的脚本：`启动.cmd`、`停止.cmd`、`清除访客数据.cmd`，以及一份面向 B 的简短说明 `说明.txt`。不放 `configure.cmd`、`start.cmd`，避免 B 误改配置。
-5. 打成 zip，输出到 `release/guest-<machineId>.zip`。终端打印需要加到中继配置里的 `{"token":"…","machineId":"…"}`（如果给了 `--relay-config` 就直接写入，并提醒重启中继）。
+5. 打成 zip，输出到 `release/<machineId>.zip`。注册记录保存在同名 `.relay.json`，可用 `--token-out` 指定路径。提供 `--relay-config` 时直接追加到该中继配置。
 
-### 启动：`scripts/windows/guest-start.ps1`
+### 启动：`scripts/windows/guest.ps1 -Action Start`
 
 1. 预检（`guest.ts` 的 `preflight()` 也可以用 `node app/connector.js --preflight` 的形式复用）：
    - Codex：能否解析到可执行文件；`~/.codex/auth.json` 或访客副本是否存在。
@@ -139,12 +117,14 @@ guestPaths?: {root, codexHome, claudeConfig, workspace}   // 都是绝对路径
 2. 复用 `start.ps1 -Mode connector` 的启动逻辑（进程记录、日志）。
 3. 状态窗口显示：连接状态、电脑名、可用的应用。失败时显示日志位置。
 
-`guest-stop.ps1` 复用 `stop.ps1`。`guest-clear.ps1` 先确认，再停止连接器，删除 `guest\` 和 `.local\operations.sqlite*`，保留 `config.json`，以便下次还能直接启动。
+连接器连上中继后，对每个可用的应用做一次真实的测试消息（设计 2c），结果显示在状态窗口。
+
+`guest.ps1 -Action Stop` 复用 `stop.ps1`，停止后运行 `connector.mjs --return-login` 把刷新过的登录写回 B（设计第 2 节）。`guest.ps1 -Action Clear` 先确认，再停止连接器，删除 `guest\` 和 `.local\operations.sqlite*`，保留 `config.json`，以便下次还能直接启动。
 
 ### 测试
 
 - `test/setup.test.ts` 或新增的 `test/package-guest.test.ts`：生成的 `config.json` 字段完整，Token 长度达标，zip 里不包含 `configure.cmd`。
-- `npm run test:portable` 增加一个访客包的冒烟测试：在临时目录解压，用假的 `~/.codex` 和 `~/.claude`（把 `USERPROFILE` 指向临时目录）运行预检。
+- `npm run test:guest-package -- release/guest-….zip` 在临时目录解压，使用模拟登录文件运行预检、测试中继连接、会话目录隔离、重启和清除流程。
 
 ## M5 · 人工验收
 
@@ -153,7 +133,7 @@ guestPaths?: {root, codexHome, claudeConfig, workspace}   // 都是绝对路径
 1. 生成访客包，把 Token 加进中继，重启中继。
 2. 在 B 的电脑上解压并启动。手机上出现“B 的电脑（借用）”，应用只有 Codex 和 Claude Code。
 3. 新建项目“demo”，在 Codex 和 Claude Code 里各跑一轮，内容是创建一个文件。
-4. 在 B 的电脑上打开 Codex 桌面应用、运行 `claude --resume`：**都看不到**第 3 步的会话。另外检查 `guest/claude-config/projects` 下 demo 会话的 JSONL，`entrypoint` 是 `sdk-ts`；B 的 `~/.claude/projects` 里没有这个会话。B 自己跑一轮后，手机上**看不到** B 的会话。
+4. 在 B 的电脑上打开 Codex 桌面应用、运行 `claude --resume`：**都看不到**第 3 步的会话。B 自己跑一轮后，手机上**看不到** B 的会话。
 5. 手机预览 `demo` 里的文件可以；手动输入工作区以外的路径（比如 `C:\Windows\win.ini`），提示只能使用访客工作区。
 6. 第二天再跑一轮，B 和访客都没有被登出（对应 M0 的结论）。
 7. 拿访客 Token 改成手机身份连中继，被拒绝；从中继删掉访客 Token 并重启后，B 的电脑连不上。

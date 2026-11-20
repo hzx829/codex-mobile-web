@@ -5,45 +5,76 @@ import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { readConfig } from '../shared/config.js';
-import { MAX_FRAME, BridgeError, type Json } from '../shared/types.js';
+import { MAX_FRAME, BridgeError, bridgeServices, type BridgeRequest, type Json } from '../shared/types.js';
 import { Ledger } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
 import { AntigravityBridge } from './antigravity.js';
-import { ServiceRouter } from './services.js';
+import { ServiceRouter, type ServiceBridge } from './services.js';
 import { ClaudeCodeBridge, sdkQuery } from './claude-code.js';
 import { ClaudeRuntime } from './claude-runtime.js';
 import { ArtifactViewer } from './claude-artifacts.js';
-import { GUEST_ENTRYPOINT, NoDesktop, applyGuestEnv, guestPaths, noAntigravity, prepareGuest } from './guest.js';
+import { GUEST_ENTRYPOINT, NoDesktop, preflight, returnLogins, useGuestHomes } from './guest.js';
+import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './guest-checks.js';
+import { setWorkspace } from './project.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
-if(config.codexHome)process.env.CODEX_HOME=config.codexHome;
+if(config.codexHome&&!config.guest)process.env.CODEX_HOME=config.codexHome;
 if(config.profile)process.env.CODEX_PROFILE=config.profile;
 if(config.claudeBin)process.env.CLAUDE_CODE_BIN=config.claudeBin;
+const guest=config.guestPaths;
+if(guest&&(typeof config.machineId!=='string'||!config.machineId.startsWith('guest-')))
+  throw new Error('访客配置缺少有效的电脑 ID');
+if(process.argv.includes('--return-login')){
+  // Run by the guest launcher after stopping the connector: the owner gets back the login the guest refreshed.
+  const result=guest?await returnLogins(guest):{messages:[],failed:false};
+  for(const message of result.messages)console.log(message);
+  process.exit(result.failed?1:0);
+}
+const checks=guest?await preflight(guest):undefined;
+const available=checks?.services??bridgeServices;
+if(checks){
+  for(const message of checks.messages)console.log(message);
+  if(!available.length){
+    console.error('请先安装并登录 Codex 或 Claude Code。');
+    process.exit(1);
+  }
+}
+if(process.argv.includes('--preflight'))process.exit(0);
+if(guest){
+  useGuestHomes(guest);
+  await setWorkspace(guest.workspace);
+}
 mkdirSync(config.dataDir,{recursive:true});
-// Guest mode keeps both sides' sessions apart: the guest's Codex and Claude Code data live in the guest
-// directory, the host's desktop Codex is never connected, and Antigravity (which writes into the host's
-// ~/.gemini) is off. The environment must be set before Codex or Claude Code is constructed.
-const guest=config.guest?guestPaths(config.guestRoot):undefined;
-let signedIn={codex:true,claude:true};
-if(guest){signedIn=prepareGuest(guest);applyGuestEnv(guest);for(const [app,ok] of Object.entries(signedIn))if(!ok)console.warn(`借用电脑：${app==='codex'?'Codex':'Claude Code'} 未登录，暂不可用`);}
 const ledger=new Ledger(join(config.dataDir,'operations.sqlite'));
 const control=new Control(ledger,undefined,guest?new NoDesktop():undefined);
-const antigravity=guest?undefined:new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
-// CLAUDE_CODE_ENTRYPOINT: by default 'codex-mobile-web', which the terminal's `claude --resume` list shows; `claudeEntrypoint`
-// overrides it. A guest's sessions use 'sdk-ts', which that list hides. See docs/claude-local/M1-RESULTS.md.
-const claudeEntrypoint=guest?GUEST_ENTRYPOINT:typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:undefined;
-const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,claudeEntrypoint));
-// claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
-claudeCode.artifacts=new ArtifactViewer(config.dataDir);
-const services=new ServiceRouter([
-  {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save','claude.fork','claude.rename','claude.archive','claude.edit','claude.steerQueued','claude.withdrawQueued','claude.cancelQueued'],
-    prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
-  antigravity?{prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']}:noAntigravity,
-],request=>control.handle(request as any),()=>control.updating);
+const bridges:ServiceBridge[]=[];
+if(available.includes('claude')){
+  // CLAUDE_CODE_ENTRYPOINT: by default 'codex-mobile-web', which the terminal's `claude --resume` list shows; `claudeEntrypoint`
+  // overrides it. A guest's sessions use 'sdk-ts', which that list hides. See docs/claude-local/M1-RESULTS.md.
+  const entrypoint=guest?GUEST_ENTRYPOINT:typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:undefined;
+  const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,entrypoint));
+  // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
+  // A guest's profile lives in the guest folder, so clearing the guest data removes that sign-in too.
+  claudeCode.artifacts=new ArtifactViewer(guest?guest.root:config.dataDir);
+  bridges.push({prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save','claude.fork','claude.rename','claude.archive','claude.edit','claude.steerQueued','claude.withdrawQueued','claude.cancelQueued'],
+    prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()});
+}
+if(!guest){
+  const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
+  bridges.push({prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']});
+}
+const useCodex=available.includes('codex');
+const services=new ServiceRouter(bridges,request=>{
+  if(guest&&(request.action==='runtime.reload'||request.action.startsWith('antigravity.')||request.action.startsWith('claude.')))
+    throw new BridgeError('unsupported','借用电脑暂不支持此操作');
+  if(!useCodex&&!['project.create','operation.read'].includes(request.action))
+    throw new BridgeError('unavailable','借用电脑上的 Codex 暂不可用');
+  return control.handle(request);
+},()=>control.updating);
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
 let proxyBackpressure:NodeJS.Timeout|undefined;
 const dirtyIds=new Set<string|null>();
@@ -57,15 +88,14 @@ browserPreview.on('message',(message:Json)=>{try{
 }catch{}});
 browserPreview.on('ended',(event:Json)=>{try{send({type:'preview.ended',...event});}catch{}});
 function connect() {
+  if(guest)console.log('正在连接中继…');
   const url=new URL('/ws',config.relayUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';
   const ws=new WebSocket(url,{maxPayload:MAX_FRAME});socket=ws;
   let alive=true;
   const pulse=setInterval(()=>{if(ws.readyState!==WebSocket.OPEN)return;if(!alive){ws.terminate();return;}alive=false;ws.ping();},15_000);
   ws.on('pong',()=>{alive=true;});
   let ready=false;const authTimer=setTimeout(()=>ws.terminate(),10_000);
-  // services: the apps this computer offers; a guest computer offers only the signed-in ones of Codex and Claude Code.
-  const apps=guest?(['codex','claude'] as const).filter(app=>signedIn[app]):['codex','claude','antigravity'];
-  ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname(),services:apps,...guest?{guest:true}:{}}));
+  ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname(),services:available,...guest?{guest:true}:{}}));
   ws.on('message',async data=>{
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
     if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');console.log('电脑已连接中继');return;}
@@ -76,7 +106,7 @@ function connect() {
     try{
       const result=m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
-        :await services.handle({id:String(m.id),action:m.action,payload:m.payload&&typeof m.payload==='object'?m.payload:{}});
+        :await services.handle({id:String(m.id),action:String(m.action) as BridgeRequest['action'],payload:m.payload&&typeof m.payload==='object'?m.payload:{}});
       if(socket===ws)send({type:'response',id:m.id,result});
     }
     catch(e){const err=e instanceof BridgeError?e:new BridgeError('computer_error','电脑处理失败，请查看本机状态');if(socket===ws)send({type:'response',id:m.id,error:{code:err.code,message:err.message,uncertain:err.uncertain}});}
@@ -86,7 +116,11 @@ function connect() {
     clearInterval(proxyBackpressure);proxyBackpressure=undefined;
     void browserPreview.stop();
     clearTimeout(authTimer);clearInterval(pulse);if(stopping)return;
-    if(code===4401||code===4409){console.error(code===4401?'连接 Token 不匹配，请在电脑更新配置':'同一电脑连接已被替换');return;}
+    if(code===4401||code===4409){
+      console.error(code===4401?(guest?'连接 Token 不匹配，请检查中继配置':'连接 Token 不匹配，请在电脑更新配置'):'同一电脑连接已被替换');
+      if(guest){services.close();control.close();process.exit(1);}
+      return;
+    }
     retry=setTimeout(connect,backoff+Math.random()*500);backoff=Math.min(15_000,backoff*2);
   });
 }
@@ -110,5 +144,17 @@ control.on('change',(id:string|null)=>{
 });
 connect();
 // Keep the relay connection independent of Codex startup and recovery.
-void control.start().catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
+const codexStarted=useCodex?control.start():undefined;
+codexStarted?.catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
+if(guest&&process.env.BRIDGE_GUEST_CHECK!=='0'){
+  const report=(label:string,result:CheckResult)=>console.log(result.ok?`${label}：测试通过，可以使用${result.message?`（${result.message}）`:''}`:`${label}：${result.message}`);
+  if(codexStarted){
+    console.log('Codex：正在发送一条测试消息…');
+    void codexStarted.then(()=>checkCodex(control.runtime,guest.workspace),()=>({ok:false,message:'Codex 没能启动，请查看下方错误'})).then(result=>report('Codex',result));
+  }
+  if(available.includes('claude')){
+    console.log('Claude Code：正在发送一条测试消息…');
+    void checkClaude(sdkQuery as unknown as ClaudeLoader,guest.workspace).then(result=>report('Claude Code',result));
+  }
+}
 for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();services.close();socket?.close();control.close();process.exit(0);});

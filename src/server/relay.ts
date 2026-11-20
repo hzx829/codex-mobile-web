@@ -5,16 +5,21 @@ import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { WebSocketServer, WebSocket } from 'ws';
-import { MAX_FRAME, textRequired, type Json } from '../shared/types.js';
+import { MAX_FRAME, bridgeServices, textRequired, type Json, type Machine } from '../shared/types.js';
+import { machineIdPattern, type ConnectorToken } from '../shared/config.js';
 import { PreviewTunnel } from './preview-tunnel.js';
 import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 
-type Peer={role:'phone'|'connector';machineId?:string;name?:string;alive:boolean;watch?:{machineId:string;threadId:string}};
+type Peer={role:'phone'|'connector';machine?:Machine;alive:boolean;watch?:{machineId:string;threadId:string}};
 // Text frames compress well; file bytes and preview traffic are already dense or large.
 const COMPRESS_LIMIT=2*1024*1024;
 const DENSE_ACTIONS=new Set(['file.download','file.uploadChunk','voice.transcribe']);
 const compress=promisify(gzip);
-export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3341) {
+export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3341,connectorTokens:ConnectorToken[] = []) {
+  if(connectorTokens.some(entry=>entry.token===token))throw new Error('连接器专用 Token 不能与主 Token 相同');
+  const mainToken=Buffer.from(token);
+  const restricted=connectorTokens.map(entry=>({...entry,token:Buffer.from(entry.token)}));
+  const matches=(supplied:Buffer,actual:Buffer)=>supplied.length===actual.length&&timingSafeEqual(supplied,actual);
   const peers=new Map<WebSocket,Peer>();
   const routes=new Map<string,{phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;threadId?:string;timer:NodeJS.Timeout}>();
   const compressed=new Map<string,{mtimeMs:number;size:number;body:Buffer}>();
@@ -55,7 +60,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
     ws.send(frame,{compress:!dense&&size<=COMPRESS_LIMIT});
   }
   const preview=new PreviewTunnel(send,previewPort);
-  function machines(){return [...peers.values()].filter(p=>p.role==='connector').map(p=>({id:p.machineId,name:p.name}));}
+  function machines(){return [...peers.values()].flatMap(p=>p.machine?[p.machine]:[]);}
   function publish(){for(const [ws,p]of peers)if(p.role==='phone')send(ws,{type:'machines',data:machines()});}
   function finish(routeId:string,message:Json){
     const r=routes.get(routeId);if(!r)return;clearTimeout(r.timer);routes.delete(routeId);
@@ -78,11 +83,20 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       if(!m||typeof m!=='object'){ws.close(4400);return;}
       const p=peers.get(ws);
       if(!p) {
-        const supplied=Buffer.from(typeof m.token==='string'?m.token:''),actual=Buffer.from(token);
-        if(m.type!=='hello'||!['phone','connector'].includes(m.role)||supplied.length!==actual.length||!timingSafeEqual(supplied,actual)){ws.close(4401,'invalid_token');return;}
-        if(m.role==='connector'&&(!/^[a-zA-Z0-9_-]{1,80}$/.test(m.machineId)||typeof m.name!=='string')){ws.close(4400);return;}
-        if(m.role==='connector')for(const [old,q]of peers)if(q.machineId===m.machineId){peers.delete(old);old.close(4409,'replaced');}
-        peers.set(ws,{role:m.role,machineId:m.machineId,name:m.name?.slice(0,100),alive:true});clearTimeout(authTimer);
+        const supplied=Buffer.from(typeof m.token==='string'?m.token:'');
+        const primary=matches(supplied,mainToken);
+        const binding=primary?undefined:restricted.find(entry=>matches(supplied,entry.token));
+        if(m.type!=='hello'||!['phone','connector'].includes(m.role)||
+          !primary&&!(binding&&m.role==='connector'&&m.machineId===binding.machineId)){ws.close(4401,'invalid_token');return;}
+        let machine:Machine|undefined;
+        if(m.role==='connector'){
+          if(typeof m.machineId!=='string'||!machineIdPattern.test(m.machineId)||typeof m.name!=='string'){ws.close(4400);return;}
+          machine={id:m.machineId,name:m.name.slice(0,100)};
+          if(m.guest===true||binding)machine.guest=true;
+          if(Array.isArray(m.services))machine.services=bridgeServices.filter(service=>m.services.includes(service));
+          for(const [old,q]of peers)if(q.machine?.id===machine.id){peers.delete(old);old.close(4409,'replaced');}
+        }
+        peers.set(ws,{role:m.role,machine,alive:true});clearTimeout(authTimer);
         // `features` lets connectors push live frames only through a relay that forwards them.
         send(ws,{type:'ready',machines:machines(),features:['live']});publish();return;
       }
@@ -99,7 +113,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
           m.payload.threadId=textRequired(m.payload.threadId,'会话');
           if(m.action==='preview.stop')m.payload.sessionId=textRequired(m.payload.sessionId,'预览会话');
         }catch(e){send(ws,{type:'response',id:m.id,error:{code:'invalid',message:(e as Error).message}});return;}
-        const connector=[...peers].find(([,q])=>q.role==='connector'&&q.machineId===m.machineId)?.[0];
+        const connector=[...peers].find(([,q])=>q.machine?.id===m.machineId&&q.role==='connector')?.[0];
         if(!connector){send(ws,{type:'response',id:m.id,error:{code:'offline',message:'电脑未连接'}});return;}
         if([...routes.values()].filter(r=>r.phone===ws).length>=32){send(ws,{type:'response',id:m.id,error:{code:'busy',message:'请求较多，请稍后重试'}});return;}
         const routeId=randomUUID();
@@ -114,9 +128,9 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       } else if(p.role==='connector'&&typeof m.type==='string'&&m.type.startsWith('proxy.')) {
         preview.handle(ws,m);
       } else if(p.role==='connector'&&m.type==='live'&&typeof m.threadId==='string') {
-        for(const [phone,q]of peers)if(q.role==='phone'&&q.watch?.machineId===p.machineId&&q.watch?.threadId===m.threadId)send(phone,{...m,machineId:p.machineId});
+        for(const [phone,q]of peers)if(q.role==='phone'&&q.watch?.machineId===p.machine?.id&&q.watch?.threadId===m.threadId)send(phone,{...m,machineId:p.machine?.id});
       } else if(p.role==='connector'&&m.type==='changed') {
-        for(const [phone,q]of peers)if(q.role==='phone')send(phone,{type:'changed',machineId:p.machineId,threadId:m.threadId||null,generation:m.generation});
+        for(const [phone,q]of peers)if(q.role==='phone')send(phone,{type:'changed',machineId:p.machine?.id,threadId:m.threadId||null,generation:m.generation});
       }
     });
     ws.on('close',()=>{

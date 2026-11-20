@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {mkdir, readdir, readFile, rename, stat, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {BridgeError, type Json} from '../shared/types.js';
+import {checkProjectPath} from './project.js';
 
 /**
  * A Claude Code project is a folder. Its settings are Claude Code's own files, so the terminal,
@@ -24,7 +25,8 @@ export function projectKey(folder: string) {
 }
 
 const missing = (error: unknown) => ['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException)?.code || '');
-async function optional(path: string) {
+async function optional(path: string, allowedRoot?: string) {
+  await checkProjectPath(path, allowedRoot);
   try {return await readFile(path, 'utf8');} catch (error) {if (missing(error)) return null;throw readError(error);}
 }
 function readError(error: unknown) {
@@ -33,8 +35,10 @@ function readError(error: unknown) {
 }
 async function exists(path: string) {return stat(path).then(info => info.isFile(), () => false);}
 async function atomicWrite(path: string, content: string) {
+  await checkProjectPath(path);
   await mkdir(dirname(path), {recursive: true});
   const temp = `${path}.${process.pid}.tmp`;
+  await checkProjectPath(temp);
   await writeFile(temp, content, 'utf8');
   await rename(temp, path);
 }
@@ -74,7 +78,7 @@ function parseJson(text: string | null, label: string): Json {
 }
 
 /** Reads a folder's Claude Code settings. `memoryRoot` is the folder's directory under ~/.claude/projects, if known. */
-export async function readProjectSettings(folder: string, memoryRoot: string): Promise<ProjectSettings> {
+export async function readProjectSettings(folder: string, memoryRoot: string, allowedMemoryRoot?: string): Promise<ProjectSettings> {
   const claudeMd = await claudeMdPath(folder), mcpFile = join(folder, '.mcp.json');
   const [instructions, mcp] = await Promise.all([optional(claudeMd), optional(mcpFile)]);
   let mcpServers = '';
@@ -87,7 +91,8 @@ export async function readProjectSettings(folder: string, memoryRoot: string): P
   const memoryDir = memoryRoot ? join(memoryRoot, 'memory') : '';
   let memoryIndex = '', memoryFiles: string[] = [];
   if (memoryDir) {
-    memoryIndex = (await optional(join(memoryDir, 'MEMORY.md')).catch(() => null)) || '';
+    if (allowedMemoryRoot) await checkProjectPath(memoryDir, allowedMemoryRoot);
+    memoryIndex = (await optional(join(memoryDir, 'MEMORY.md'), allowedMemoryRoot).catch(() => null)) || '';
     if (memoryIndex.length > MAX_MEMORY_INDEX) memoryIndex = memoryIndex.slice(0, MAX_MEMORY_INDEX) + '\n…';
     memoryFiles = (await readdir(memoryDir).catch(() => [] as string[])).filter(name => name.endsWith('.md') && name !== 'MEMORY.md').sort().slice(0, MAX_MEMORY_FILES);
   }

@@ -92,6 +92,10 @@ npm run build
 
 首次启动会打开配置窗口。本地试用可选择“本机中继”，手机连接同一可信 Wi-Fi 后扫码；本机模式使用 HTTP，传输不加密。公网使用时，先按下文部署 HTTPS 中继，再选择“连接自己的中继”，填写 HTTPS 地址和共享 Token，启动连接器。项目会自动发现。
 
+### 借用 Windows 电脑
+
+访客包使用借用电脑上已安装并登录的 Codex 或 Claude Code。解压后双击「启动.cmd」，再从网页的「电脑」菜单选中带「借用」标记的电脑。项目、会话和登录副本保存在包内的 `guest` 目录，停止后可以继续使用。打包和注册步骤见 [访客包部署](DEPLOY.md#访客包部署)。
+
 ### 公网中继
 
 Linux 服务器需有 Docker Engine 和 Compose v2。使用源码目录，或从 [Releases](https://github.com/hzx829/codex-mobile-web/releases) 下载并解压中继包，将域名解析到服务器，确保 TCP 80/443/3341 可访问。在该目录执行：

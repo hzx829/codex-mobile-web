@@ -3,6 +3,7 @@ import {resolve,join,dirname} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {writeBundleLicenses} from './bundle-licenses.js';
+import {copyWindowsRuntime} from './windows-package-runtime.js';
 if(process.platform!=='win32')throw new Error('Windows 便携包请在 Windows 构建');
 const pkg=JSON.parse(await readFile('package.json','utf8'));
 // Compiled with the C# 5 compiler that ships with .NET Framework 4, so no SDK is needed to build the package.
@@ -26,16 +27,7 @@ for(const name of ['build','dist','scripts/windows'])await cp(resolve(name),join
 // The tray app replaces the .cmd launchers in the package; source checkouts keep using them.
 await buildTray(join(target,'Codex Mobile Web.exe'));
 for(const name of ['README.md','README.zh-CN.md','PRIVACY.md','LICENSE','QUICKSTART.md','DEPLOY.md','ACCEPTANCE.md','SOURCES.md'])await copyFile(name,join(target,name));
-await copyFile(process.execPath,join(target,'runtime','node.exe'));
-const licenseCache=resolve('.local','licenses',`node-${process.version}-LICENSE.txt`);
-let nodeLicense='';
-try {nodeLicense=await readFile(process.env.NODE_LICENSE_FILE||licenseCache,'utf8');}catch{}
-if(!nodeLicense)for(let attempt=0;attempt<2;attempt++) {
-  try {const response=await fetch(`https://raw.githubusercontent.com/nodejs/node/${process.version}/LICENSE`,{signal:AbortSignal.timeout(10000)});if(response.ok){nodeLicense=await response.text();break;}}catch{}
-}
-if(!nodeLicense.includes('Node.js is licensed for use as follows')||nodeLicense.length<10000)throw new Error('无法获取该版本 Node 的完整许可证，未生成 ZIP；可设置 NODE_LICENSE_FILE 指向同版本官方 LICENSE 后重试。');
-await mkdir(dirname(licenseCache),{recursive:true});await writeFile(licenseCache,nodeLicense);
-await writeFile(join(target,'runtime','NODE-LICENSE.txt'),nodeLicense);
+await copyWindowsRuntime(target);
 // Include licenses of installed packages used in the bundle without shipping credentials or research copies.
 await writeBundleLicenses(target);
 let revision='untracked';try{revision=execFileSync('git',['rev-parse','--short','HEAD'],{encoding:'utf8'}).trim();if(execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim())revision+=' (uncommitted changes)';}catch{}

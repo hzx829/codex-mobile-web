@@ -26,8 +26,10 @@
     "update:deploy": "tsx scripts/connector-deploy.ts",
     "test:native": "tsx scripts/native-check.ts && tsx scripts/ownership-check.ts",
     "test:portable": "tsx scripts/portable-check.ts",
+    "test:guest-package": "tsx scripts/guest-package-check.ts",
     "test:skill-setup": "tsx scripts/skill-setup-check.ts",
     "package:windows": "npm run build && tsx scripts/package-windows.ts",
+    "package:guest": "npm run build && tsx scripts/package-guest.ts",
     "package:relay": "npm run build && tsx scripts/package-relay.ts",
     "test:relay-package": "tsx scripts/relay-package-check.ts"
   },
