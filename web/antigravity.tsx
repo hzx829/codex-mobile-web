@@ -1,19 +1,20 @@
 import {useEffect,useRef,useState} from 'react';
 import {useComposerAttachments} from './composer-attachments';
 import {useVoiceInput} from './use-voice-input';
-import {VoiceButton,VoiceStatus} from './voice-controls';
-import type {VoiceProvider} from '../src/shared/voice';
+import {AddOptions,Composer,useAttachmentPickers} from './composer';
+import {SheetPanel} from './sheet';
+import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {uploadAttachments,type UploadProgress} from './file-upload';
-import {ATTACHMENT_ACCEPT,FileAttachments,ImageAttachments,ReadingStatus,UploadStatus} from './attachment-list';
 import {AntigravityMessages,antigravityIssueText} from './antigravity-messages';
 import {AntigravityModelPicker} from './antigravity-model-picker';
 import {connectionLost,ConversationStatus} from './conversation';
-import {SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight,workspaceName} from './chat-layout';
+import {ThreadHeader,useComposerHeight,workspaceName} from './chat-layout';
 import {IconButton} from './icon-button';
 import {Icon} from './icons';
 import {useStableEvent} from './use-event';
 import {operationId} from './client';
 import type {Json,RequestAction} from '../src/shared/types';
+const IMAGES_BLOCKED='请更新这台电脑上的连接器后再给 Antigravity 发送图片。';
 function saved(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
 function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
 type Props={
@@ -22,8 +23,8 @@ type Props={
   /** Without a conversation: the project (list id) a new conversation starts in, '' to choose one; `created` opens the new conversation. */
   newProject?:string|null;created?:(id:string)=>void;
   machineName:string;showFiles:()=>void;showImage:(url:string,title:string)=>void;copyText:(text:string)=>Promise<void>;clearPreviewError:()=>void;
-  /** Codex transcription or the phone keyboard, as chosen in the options. */
-  voiceMode:VoiceProvider;
+  /** Codex transcription or the phone keyboard, as chosen in the options; `chooseVoice` opens those options. */
+  voiceMode:VoiceProvider;chooseVoice:()=>void;
 };
 
 export function AntigravityPanel(props:Props){
@@ -35,11 +36,12 @@ export function AntigravityPanel(props:Props){
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false);
   const [draft,setDraft]=useState(()=>saved(`${key}:draft`)),[pending,setPending]=useState(()=>saved(`${key}:pending`));
   const [watchError,setWatchError]=useState('');
-  const lock=useRef(false),alive=useRef(true),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null),picker=useRef<HTMLInputElement>(null);
+  const lock=useRef(false),alive=useRef(true),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
   useComposerHeight(composer,draft,true);
   const request=useRef(call);request.current=call;
   const [model,setModel]=useState(()=>saved(`${key}:model`));
-  const [createImages,setCreateImages]=useState(false);
+  // Unknown (null) until the desktop's model list for the new conversation's project has been read.
+  const [createImages,setCreateImages]=useState<boolean|null>(null),[adding,setAdding]=useState(false);
   // An older connector drops images without saying so; it only advertises them once it can send them.
   const readModels=useStableEvent(async()=>{
     const result=await request.current('antigravity.models',creating?{project:target}:{conversationId});
@@ -50,8 +52,10 @@ export function AntigravityPanel(props:Props){
   function edit(text:string){setDraft(text);store(`${key}:draft`,text);}
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   // Photos are compressed into the message; other files are uploaded to the project when it is sent.
-  const attachments=useComposerAttachments({disabled:busy||Boolean(pending),notify:setError});
+  const imagesSupported=creating?createImages:view?Boolean(view.supportsImages):null;
+  const attachments=useComposerAttachments({disabled:busy||Boolean(pending),imagesBlocked:imagesSupported===false?IMAGES_BLOCKED:undefined,notify:setError,added:()=>setAdding(false)});
   const {images,files,setImages,setFiles}=attachments;
+  const pick=useAttachmentPickers(chosen=>void attachments.add(chosen));
   function sent(){edit('');setImages([]);setFiles([]);}
   const voice=useVoiceInput(props.voiceMode,key,connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
@@ -67,8 +71,7 @@ export function AntigravityPanel(props:Props){
     try{return {files:await uploadAttachments(request.current,{prefix:'antigravity.',scope},files,value=>{if(alive.current)setUploadProgress(value);})};}
     finally{if(alive.current)setUploadProgress(null);}
   }
-  const imagesSupported=creating?createImages:Boolean(view?.supportsImages);
-  const imagesBlocked=()=>{if(images.length&&!imagesSupported){setError('请更新这台电脑上的连接器后再给 Antigravity 发送图片。');return true;}return false;};
+  const imagesBlocked=()=>{if(images.length&&!imagesSupported){setError(IMAGES_BLOCKED);return true;}return false;};
   const followup=useStableEvent((text:string)=>{if(!pending){edit(draft?draft+'\n'+text:text);composer.current?.focus();}});
   const copy=useStableEvent((text:string)=>{void props.copyText(text).catch(()=>setError('复制失败，请长按选择文字'));});
   function remember(op:string){setPending(op);store(`${key}:pending`,op);}
@@ -197,7 +200,6 @@ export function AntigravityPanel(props:Props){
   const checkPending=<><button disabled={!connected||busy} onClick={()=>void check()}>核实操作结果</button><button disabled={busy} onClick={()=>{if(window.confirm('请先在聊天和电脑页面确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></>;
   const feedback=error||previewError,sending=Boolean(pending&&busy&&!view?.running);
   const canOperate=connected&&!busy&&!pending;
-  const attachmentCount=attachments.count;
   const chosen=projects?.find(item=>item.id===target);
   const projectName=(item:{path:string;name?:string})=>item.name||workspaceName(item.path);
   return <main className="thread-panel" inert={inert}>
@@ -220,26 +222,22 @@ export function AntigravityPanel(props:Props){
       {notice&&<div className="feedback" role="status">{notice}</div>}
       {pending&&!busy&&<div className="pending">{checkPending}</div>}
       {view?.running&&!antigravityStatus&&<div className="running-status"><i className="dot online"/>Antigravity 正在处理</div>}
-      <form className={`composer ${attachmentCount?'with-images':''}${attachments.drop.dragging?' dragging':''}`} onSubmit={event=>{event.preventDefault();void mutate('send');}} {...attachments.drop.handlers}>
-        <ImageAttachments images={images} disabled={busy||Boolean(pending)||attachments.loading} show={props.showImage} remove={index=>setImages(old=>old.filter((_,i)=>i!==index))}/>
-        <FileAttachments files={files} disabled={busy||Boolean(pending)||attachments.loading} remove={index=>setFiles(old=>old.filter((_,i)=>i!==index))}/>
-        <ReadingStatus loading={attachments.loading}/>
-        <UploadStatus progress={uploadProgress}/>
-        <VoiceStatus voice={voice}/>
-        <textarea ref={composer} aria-label="任务输入" placeholder={creating?'想让 Antigravity 做什么？':`在 ${props.machineName} 上继续…`} readOnly={Boolean(pending)} value={draft} maxLength={50_000} rows={1}
-          onPaste={attachments.paste} onChange={event=>edit(event.target.value)} onKeyDown={event=>submitOnDesktop(event,()=>void mutate('send'))}/>
-        <div className="composer-toolbar">
-          <IconButton icon="plus" label="添加图片或文件" className="composer-add" disabled={busy||Boolean(pending)||attachments.loading} onClick={()=>picker.current?.click()}/>
-          <input ref={picker} type="file" accept={ATTACHMENT_ACCEPT} multiple hidden onChange={event=>{const chosen=Array.from(event.target.files||[]);event.target.value='';void attachments.add(chosen);}}/>
-          {!creating&&<IconButton icon="file" label="查看项目文件" className="composer-add" disabled={!connected||!view} onClick={props.showFiles}/>}
-          <AntigravityModelPicker read={readModels} turn={creating?target:view?.turn||''} value={model} available={connected&&(creating?Boolean(target):Boolean(view?.supportsModelSelection))} disabled={!canOperate} onChange={selectModel}/>
-          <div className="composer-actions">
-            <VoiceButton voice={voice} mode={props.voiceMode} connected={connected} disabled={busy||Boolean(pending)} starting={()=>{setError('');setNotice('');}}/>
-            {view?.running?<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!canOperate} onClick={()=>void mutate('stop')}/>:
-              <SendMessageButton sending={sending} label="发送消息" disabled={!canOperate||attachments.loading||voiceBusy||!(creating?target:view?.canSend)||!draft.trim()&&!files.length}/>}
-          </div>
-        </div>
-      </form>
+      <Composer attachments={attachments} input={composer} draft={draft} edit={edit} maxLength={50_000} readOnly={Boolean(pending)} submit={()=>void mutate('send')}
+        placeholder={creating?'想让 Antigravity 做什么？':view?.running?'当前任务结束后可发送':`在 ${props.machineName} 上继续…`}
+        locked={busy||Boolean(pending)} showImage={props.showImage} uploadProgress={uploadProgress}
+        voice={voice} voiceMode={props.voiceMode} voiceDisabled={busy||Boolean(pending)} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
+        add={()=>setAdding(true)} addDisabled={busy||Boolean(pending)||attachments.loading}
+        model={<AntigravityModelPicker read={readModels} turn={creating?target:view?.turn||''} value={model} available={connected&&(creating?Boolean(target):Boolean(view?.supportsModelSelection))} disabled={!canOperate} onChange={selectModel}/>}
+        // The desktop cannot queue a message behind a running turn yet: only stopping is offered then.
+        running={view?.running?{stop:()=>void mutate('stop'),disabled:!canOperate,queue:false}:undefined}
+        send={{label:'发送消息',sending,disabled:!canOperate||attachments.loading||voiceBusy||!(creating?target:view?.canSend)||!draft.trim()&&!files.length}}/>
+      {pick.inputs}
     </footer>
+    {adding&&<SheetPanel title="添加与选项" close={()=>setAdding(false)}>
+      <AddOptions attachments={attachments} pick={pick} disabled={busy||Boolean(pending)} connected={connected} error={error}
+        imagesBlocked={imagesSupported===false?IMAGES_BLOCKED:undefined}
+        voiceLabel={voiceProviderLabel(props.voiceMode)} chooseVoice={()=>{setAdding(false);props.chooseVoice();}}
+        projectFiles={creating?undefined:()=>{setAdding(false);props.showFiles();}} refresh={creating?undefined:()=>{setAdding(false);void refresh();}}/>
+    </SheetPanel>}
   </main>;
 }

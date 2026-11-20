@@ -230,22 +230,19 @@ type ModelOption = {id: string; label: string; description?: string;
 
 验证：`tsc` 和全部测试通过，新增 [composer-attachments.test.ts](../../test/composer-attachments.test.ts)。用假的连接器和麦克风在浏览器里挂载 Claude Code 和 Antigravity 面板，核对了工具栏布局、录音变红、识别结果填入草稿、9.8 MiB 图片以 Base64 文字粘贴后被压缩、压缩期间发送和“＋”禁用、第二次粘贴被拒。还没有在真手机和真实连接器上验收。
 
-**第二步：抽共用组件。**
+**第二步：抽共用组件。** 已完成（2026-11-20）。待定事项 1、2、5 按本文建议实现，3、4 保持原样，仍待定。
 
-- 新建 `web/composer.tsx`（外壳、工具栏、状态行、“＋”面板），附件部分用第一步的 `useComposerAttachments`。
-- `ModelPicker` 支持可选的思考程度和极速，替换 Claude Code 的下拉框和 `AntigravityModelPicker`。
-- 新建 `PermissionPicker`，替换 Codex 的许可面板和 Claude Code 的下拉框。
-- 各面板传入能力描述：
+1. [composer.tsx](../../web/composer.tsx) 里的 `Composer` 是三个页面共用的输入框：附件、状态行、文字，工具栏左边“＋”和许可，中间模型，右边麦克风、停止、发送。运行中的按钮统一成 3.2 的规则：没有草稿只显示停止；有草稿时，支持排队的运行端显示停止和“完成后发送”，Antigravity 只显示停止，占位文字是“当前任务结束后可发送”。
+2. 三个页面的“＋”都打开“添加与选项”（`AddOptions`）：添加图片、添加文件、附件计数、语音输入，以及运行端支持的打开本机网页（Codex）、查看项目文件、刷新会话、选择项目（Codex 新会话）。图片和文件是两个选择器（`useAttachmentPickers`），文件选择器不会让手机弹出拍照。Claude Code 和 Antigravity 工具栏上的文件图标移进了这个面板。
+3. `ModelPicker` 增加 `tuning`：Codex 照旧显示思考程度和极速；Claude Code 和 Antigravity 是一张列表，第一项“沿用当前 · {当前模型}”，读取中、失败（可重试）、为空都有提示。Claude Code 的原生下拉框和原来的 Antigravity 浮层都换成了它，第一次打开时不再是空的（问题 7）。覆盖记多久没改：Codex 到切换会话为止，Claude Code 按电脑，Antigravity 按会话。
+4. [permission-picker.tsx](../../web/permission-picker.tsx) 是共用的许可按钮和浮层：第一项“沿用当前 · {当前档位}”，每档一行说明，高风险档橙色。Codex 的许可底部面板和 Claude Code 的原生下拉框都换成了它；Antigravity 没有许可按钮。Claude Code 的“全部允许”仍只在手机还没接管的会话里出现，用过一次后恢复。
+5. Claude Code 的“立即发送（打断）”和“追加”从输入框移到了排队消息上：运行中有草稿时点“完成后发送”进入队列，再在那条消息上点“立即发送”或“追加”。为此连接器的 `claude.steerQueued` 增加了 `mode: 'now'`，回执是 `sent_now`。旧连接器忽略这个参数，按追加处理，手机上提示“已追加到当前任务”，不会误报。
+6. Antigravity 的连接器说不能发图片时，添加图片就会被拦下并说明原因，不再等到发送时才报错。
+7. `SheetPanel`、`MenuItem` 移到 [sheet.tsx](../../web/sheet.tsx)，底部面板渲染到 `body`，Claude Code 和 Antigravity 面板里也能用。`model-picker.css` 改由 `main.tsx` 引入，组件可以在测试里直接加载。
 
-```ts
-type ComposerCapabilities = {
-  images: boolean; files: boolean; voice: boolean; projectFiles: boolean; localWeb: boolean;
-  permissions?: PermissionOption[]; models?: ModelOption[];
-  delivery: {queue: boolean; steer: boolean; interrupt: boolean};
-};
-```
+和原计划不同的地方：能力没有做成一个 `ComposerCapabilities` 对象，而是用可选的属性表达，没传就不显示：`permission` 和 `model` 两个位置、`running.queue`、`AddOptions` 的各个回调、`QueuedMessages` 的 `onNow`。3.7 的统一审批卡和 3.9 的字数上限常量没有在这一步做。
 
-- 扩充现有测试：`attachments`、`file-upload`、`voice`、`model-selection`、`queue`；为共用组件加按能力显示和隐藏的测试。
+验证：`tsc` 和全部 225 个测试通过，新增 [composer.test.ts](../../test/composer.test.ts)（运行中按钮、许可按钮、“＋”面板、两个浮层、排队消息的“立即发送”），`claude-runtime.test.ts` 增加了排队消息立即发送。用假的中继和麦克风在浏览器里打开完整的网页，三个页面都看过：工具栏、运行中有无草稿时的按钮、许可浮层和橙色高风险档、三个“＋”面板、从“＋”打开语音设置、Claude Code 模型列表的读取中状态和选择、排队消息“立即发送”发出 `mode: 'now'`、Antigravity 录音变红并填入草稿、电脑宽度下浮层贴着按钮。还没有在真手机和真实连接器上验收。
 
 **第三步：需要连接器配合的部分。** 每项先用真实运行端在测试会话里核实，再开放给用户。
 
@@ -254,11 +251,13 @@ type ComposerCapabilities = {
 
 ## 5 待定事项
 
-1. “＋”统一成打开面板（本文建议），还是统一成直接选文件？
-2. 图片和文件保留两个入口（本文建议），还是合成一个？
-3. 模型和许可的覆盖记多久：只到这条草稿（本文建议），还是按电脑记住？
+第二步按建议实现了 1、2、5；不同意的话可以再改。3、4 仍待定。
+
+1. ~~“＋”统一成打开面板（本文建议），还是统一成直接选文件？~~ 已统一成打开面板。
+2. ~~图片和文件保留两个入口（本文建议），还是合成一个？~~ 已保留两个入口。
+3. 模型和许可的覆盖记多久：只到这条草稿（本文建议），还是按电脑记住？Claude Code 若改成只到这条草稿，要先核实连接器重启后恢复的会话还用不用原来的模型；不用的话，要让连接器记住会话的模型。
 4. 高风险许可（不提示审批、全部允许）发送一次后要不要自动恢复？Claude Code 现在会恢复，Codex 不会。
-5. Claude Code 的“立即发送（打断）”放到排队消息上（本文建议），还是做成发送按钮长按？
+5. ~~Claude Code 的“立即发送（打断）”放到排队消息上（本文建议），还是做成发送按钮长按？~~ 已放到排队消息上。
 
 ## 6 验收
 

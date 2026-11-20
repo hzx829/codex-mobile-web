@@ -2,7 +2,7 @@ import {IconButton} from './icon-button';
 import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import type {VoiceState} from './voice-input';
 
-type Voice={state:VoiceState;start:()=>void;stop:()=>void;cancel:()=>void};
+export type Voice={state:VoiceState;start:()=>void;stop:()=>void;cancel:()=>void};
 
 /** The composer's microphone, beside the send button; red while recording, tap again to stop and transcribe. */
 export function VoiceButton({voice,mode,connected,disabled,starting}:{voice:Voice;mode:VoiceProvider;connected:boolean;disabled:boolean;starting:()=>void}){

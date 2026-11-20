@@ -375,7 +375,10 @@ export class ClaudeCodeBridge {
     }
     if (action === 'claude.steerQueued' || action === 'claude.withdrawQueued' || action === 'claude.cancelQueued') {
       const queuedId = textRequired(p.queuedId, '排队消息', 100), queue = this.queue;
-      return this.mutate(p, {action, id, queuedId}, async () => {
+      // A queued message joins the running turn ('steer') or interrupts its reply ('now').
+      const delivery = action === 'claude.steerQueued' ? sendMode(p.mode ?? 'steer') : undefined;
+      if (delivery === 'queue') throw new BridgeError('invalid', '发送方式无效');
+      return this.mutate(p, {action, id, queuedId, ...(delivery === 'now' ? {delivery} : {})}, async () => {
         if (!queue) throw new BridgeError('unavailable', '连接器未启用操作记录');
         if (action !== 'claude.steerQueued') {
           const message = queue.cancelQueued(id, queuedId);
@@ -394,13 +397,14 @@ export class ClaudeCodeBridge {
         try {
           if (guestWorkspace()) await projectDirectory(session.cwd);
           queue.sending(queuedId);
-          try {this.runtime.send(session, message.payload.text, message.payload.images || [], 'next');}
+          try {this.runtime.send(session, message.payload.text, message.payload.images || [], delivery === 'now' ? 'now' : 'next');}
           catch (error) {
             const failure = error instanceof BridgeError ? error : new BridgeError('unexpected', '追加结果待核实，不会自动重发', true);
             queue.finishQueued(queuedId, {}, failure);throw failure;
           }
-          queue.finishQueued(queuedId, {conversationId: id, submitted: true, kind: 'steer_accepted'});
-          return {queuedId, kind: 'steer_accepted'};
+          const kind = delivery === 'now' ? 'sent_now' : 'steer_accepted';
+          queue.finishQueued(queuedId, {conversationId: id, submitted: true, kind});
+          return {queuedId, kind};
         } finally {this.sending.delete(id);this.queueChanged(id);}
       });
     }

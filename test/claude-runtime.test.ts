@@ -142,12 +142,17 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
     assert.equal((await bridge.handle('claude.archive', {conversationId: id, opId: opId()})).state, 'failed', 'queued messages block archiving');
     await bridge.handle('claude.send', {conversationId: id, text: '顺便', mode: 'steer', model: 'sonnet', opId: opId()});
     await bridge.handle('claude.send', {conversationId: id, text: '马上', mode: 'now', opId: opId()});
+    // A queued message can also interrupt the reply, from the queue.
+    const jumpOp = opId();
+    await bridge.handle('claude.send', {conversationId: id, text: '插队', opId: jumpOp});
+    await assert.rejects(bridge.handle('claude.steerQueued', {conversationId: id, queuedId: jumpOp, mode: 'queue', opId: opId()}), /发送方式无效/);
+    assert.equal((await bridge.handle('claude.steerQueued', {conversationId: id, queuedId: jumpOp, mode: 'now', opId: opId()})).kind, 'sent_now');
     await assert.rejects(bridge.handle('claude.send', {conversationId: id, text: 'x', mode: 'later', opId: opId()}), /发送方式无效/, 'unknown send modes are refused');
     assert.equal((await bridge.handle('claude.stop', {conversationId: id, opId: opId()})).state, 'accepted');
     await until(() => read(id), value => !value.running && !value.queuedMessages.length);
     const messages = fake.calls.filter(call => call.type === 'message');
-    assert.deepEqual(messages.slice(-4).map(call => [call.text, call.priority, call.images]),
-      [['slow', undefined, 0], ['顺便', 'next', 0], ['马上', 'now', 0], ['之后再做', undefined, 1]], 'the queued message goes out after the turn, with its image');
+    assert.deepEqual(messages.slice(-5).map(call => [call.text, call.priority, call.images]),
+      [['slow', undefined, 0], ['顺便', 'next', 0], ['马上', 'now', 0], ['插队', 'now', 0], ['之后再做', undefined, 1]], 'the queued message goes out after the turn, with its image');
     assert.equal((await bridge.handle('claude.operation', {opId: queuedOp})).submitted, true);
     assert.ok(fake.calls.some(call => call.type === 'model' && call.model === 'sonnet'));
     assert.ok(fake.calls.some(call => call.type === 'interrupt'));

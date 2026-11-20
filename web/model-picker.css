@@ -22,3 +22,9 @@
 .model-picker-options > button > span { flex: 1; }
 .model-picker-options > button[aria-pressed="true"] { color: #2563eb; background: #eff5ff; }
 @media (hover: hover) { .model-picker-options > button:hover, .model-picker-controls > button:not(:disabled):hover, .model-picker-model:not(:disabled):hover { background: var(--panel); } }
+/* A plain list: models only (Claude Code, Antigravity) or permission levels. */
+.model-picker-options.plain { margin-top: 0; padding-top: 0; border-top: 0; }
+.model-picker-options small { display: block; margin-top: 1px; color: var(--fg-3); font-size: 12px; line-height: 1.4; }
+.model-picker-options > button.elevated { color: var(--warn); }
+.model-picker-options > button.elevated[aria-pressed="true"] { color: var(--warn); background: #fff4e5; }
+.model-picker > p { margin: 6px 10px 2px; color: var(--fg-3); font-size: 12px; }

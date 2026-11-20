@@ -6,8 +6,8 @@ import {optimisticDelivered,optimisticMessage,OPTIMISTIC_ACCEPTED_MS,type Optimi
 import {useVoiceInput} from './use-voice-input';
 import type {MenuPoint} from './popover';
 import type {ThreadActions} from './antigravity-sidebar';
-import type {VoiceProvider} from '../src/shared/voice';
-import {SendMessageButton,ThreadHeader,submitOnDesktop,useComposerHeight,workspaceName} from './chat-layout';
+import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
+import {ThreadHeader,useComposerHeight,workspaceName} from './chat-layout';
 import {IconButton} from './icon-button';
 import {QueuedMessages} from './queued-messages';
 import {Icon} from './icons';
@@ -15,9 +15,11 @@ import {useStableEvent} from './use-event';
 import {operationId} from './client';
 import {GuestProjectForm} from './claude-projects';
 import {useComposerAttachments} from './composer-attachments';
-import {VoiceButton,VoiceStatus} from './voice-controls';
+import {AddOptions,Composer,useAttachmentPickers} from './composer';
+import {ModelMenu} from './model-picker';
+import {PermissionMenu,type PermissionOption} from './permission-picker';
+import {SheetPanel} from './sheet';
 import {uploadAttachments,type UploadProgress} from './file-upload';
-import {ATTACHMENT_ACCEPT,FileAttachments,ImageAttachments,ReadingStatus,UploadStatus} from './attachment-list';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import type {Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
 
@@ -32,6 +34,8 @@ type Props={
   copyText:(text:string)=>Promise<void>;clearPreviewError:()=>void;
   /** Codex-style extras: a turn's file changes, voice input and the session menu (rename, copy, archive). */
   showDiff:(turn:TurnView)=>void;voiceMode:VoiceProvider;actions?:(thread:Json)=>ThreadActions;
+  /** Opens the voice input settings, shared with the other apps. */
+  chooseVoice:()=>void;
 };
 type Request={id:string;kind:'permission'|'question'|'plan';tool:string;title:string;detail:string;canRemember:boolean;rememberScope?:'session'|'project'|'user';questions?:{question:string;header:string;multiSelect:boolean;options:{label:string;description:string}[]}[]};
 const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
@@ -39,9 +43,14 @@ const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:Tu
 function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
 type Place={id:string;path:string};
 const OTHER='__other';
-const MODES:[string,string][]=[['','沿用当前设置'],['default','按需审批'],['acceptEdits','自动接受编辑'],['plan','只做计划'],['bypassPermissions','全部允许（慎用）']];
+const MODES:PermissionOption[]=[
+  {id:'default',label:'按需审批',description:'按 Claude Code 的规则，需要时请你审批'},
+  {id:'acceptEdits',label:'自动接受编辑',description:'文件修改自动接受，命令仍需审批'},
+  {id:'plan',label:'只做计划',description:'只读分析并给出计划，你确认后才执行'},
+  {id:'bypassPermissions',label:'全部允许',description:'不再请求任何审批（慎用）；只用于下一条消息',elevated:true},
+];
 /** A session without a mode of its own runs in Claude Code's default mode. */
-const modeLabel=(mode:string)=>MODES.find(m=>m[0]===mode)?.[1]||mode;
+const modeLabel=(mode:string)=>MODES.find(m=>m.id===mode)?.label||mode;
 /** Where "remember" saves the rule, as the connector reports it; older connectors do not say. */
 const REMEMBER={session:'本会话允许',project:'本项目始终允许',user:'始终允许'} as const;
 function load(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
@@ -57,9 +66,9 @@ export function ClaudeCodePanel(props:Props){
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   const [model,setModel]=useState(()=>load(`claude:${machine}:model`)),[mode,setMode]=useState('');
   const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null),[menuPoint,setMenuPoint]=useState<MenuPoint|null>(null),[statusPoint,setStatusPoint]=useState<MenuPoint|null>(null);
-  const [models,setModels]=useState<Json[]|null>(null),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]);
+  const [models,setModels]=useState<Json[]|null>(null),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]);
   const request=useRef(call);request.current=call;
-  const alive=useRef(true),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null),picker=useRef<HTMLInputElement>(null);
+  const alive=useRef(true),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
   useComposerHeight(composer,draft,true);
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   function edit(text:string){setDraft(text);store(`${scope}:draft`,text);}
@@ -148,14 +157,14 @@ export function ClaudeCodePanel(props:Props){
   const queued:QueuedMessage[]=view?.queuedMessages||[];
   // As in Codex: behind a running turn or waiting messages, a plain send waits on the computer until the turn ends.
   const queueNext=!creating&&(running||queued.length>0);
-  /** 'queue': after the running turn; 'steer': into it once its current tool calls finish; 'now': at once. */
   function cleared(){edit('');setImages([]);setFiles([]);}
   /** Uploads the documents into the project on the computer, then the message refers to them. */
   function upload(scope:Json){
     const selected=files;
     return selected.length?async()=>({files:await uploadAttachments(request.current,{prefix:'claude.',scope},selected,value=>{if(alive.current)setUploadProgress(value);})}):undefined;
   }
-  async function send(delivery:'queue'|'steer'|'now'='queue'){
+  /** Behind a running turn the message waits on the computer; from the queue it can join the turn or interrupt it. */
+  async function send(){
     if(attachments.loading||voiceBusy)return;
     const text=draft.trim();
     if(!text&&!images.length&&!files.length)return;
@@ -169,9 +178,9 @@ export function ClaudeCodePanel(props:Props){
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
     stick.current=true;
     // Queued messages appear in the queue; everything else appears in the conversation now.
-    const message=queueNext&&delivery==='queue'?null:{...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,files.map(file=>file.name)),baseline:userIds(view)};
+    const message=queueNext?null:{...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,files.map(file=>file.name)),baseline:userIds(view)};
     if(message)setOutgoing(message);
-    const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(delivery!=='queue'?{mode:delivery}:{}),...(external?{confirmIdle:true}:{})},
+    const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(external?{confirmIdle:true}:{})},
       result=>{cleared();if(selectedMode==='bypassPermissions')setMode('');
         setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='sent_now'?'已立即发送':'');},upload({conversationId}));
     if(message)setOutgoing(old=>old!==message?old:accepted?{...message,acceptedAt:Date.now()}:null);
@@ -196,8 +205,9 @@ export function ClaudeCodePanel(props:Props){
   }
   async function openModels(){
     if(models||!connected)return;
+    setModelsError('');
     try{const result=await request.current('claude.models',{cwd:view?.cwd||startPath||undefined});if(alive.current)setModels(result.models||[]);}
-    catch(e){failed(e);}
+    catch(e:any){if(alive.current)setModelsError(e?.message||'模型列表读取失败');}
   }
   function chooseModel(value:string){setModel(value);store(`claude:${machine}:model`,value);}
 
@@ -215,13 +225,15 @@ export function ClaudeCodePanel(props:Props){
   const status=!connected?connectionLost:watchError||(pending&&busy?'正在等待电脑确认…':'');
   const canWrite=connected&&!busy&&!pending&&(creating?(!guest||Boolean(startPath)):Boolean(view));
   // Photos are compressed into the message; other files are uploaded to the project when it is sent.
-  const attachments=useComposerAttachments({disabled:!canWrite,notify:setError});
+  const attachments=useComposerAttachments({disabled:!canWrite,notify:setError,added:()=>setAdding(false)});
   const {images,files,setImages,setFiles}=attachments,canSend=canWrite&&!attachments.loading&&!voiceBusy;
+  const pick=useAttachmentPickers(chosen=>void attachments.add(chosen));
   const drafted=Boolean(draft.trim()||images.length||files.length);
   const attachmentCount=attachments.count;
   const title=creating?'新的 Claude Code 会话':view?.title||'正在打开…';
   const project=creating?(startPath?workspaceName(startPath):'选择项目'):view?.cwd?workspaceName(view.cwd):'Claude Code';
-  const modelLabel=(models||[]).find(item=>item.id===model)?.label||model;
+  const modelLabel=model?(models||[]).find(item=>item.id===model)?.label||model:view?.model||'默认模型';
+  const controlledRun=running&&Boolean(view?.controlled);
   return <main className="thread-panel" inert={inert}>
     <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}>
       {!creating&&<>
@@ -259,42 +271,31 @@ export function ClaudeCodePanel(props:Props){
       {notice&&<div className="feedback" role="status">{notice}</div>}
       {pending&&!busy&&<div className="pending"><button onClick={()=>void check()} disabled={!connected}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先在会话和电脑上确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
       {running&&view?.controlled&&<div className="running-status"><i className="dot online"/>Claude Code 正在处理</div>}
-      {!creating&&<QueuedMessages messages={queued} disabled={!connected||busy||Boolean(pending)} canSteer={running&&Boolean(view?.controlled)} withdrawBlocked={voiceBusy||attachments.loading}
+      {!creating&&<QueuedMessages messages={queued} disabled={!connected||busy||Boolean(pending)} canSteer={controlledRun} withdrawBlocked={voiceBusy||attachments.loading}
         attachmentsFull={message=>attachmentCount+message.imageCount>MAX_IMAGES||images.reduce((sum,url)=>sum+imageBytes(url),0)+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
         onSteer={queuedId=>void mutate('claude.steerQueued',{conversationId,queuedId},()=>setNotice('已追加到当前任务'))}
+        onNow={queuedId=>void mutate('claude.steerQueued',{conversationId,queuedId,mode:'now'},result=>setNotice(result.kind==='sent_now'?'已立即发送':'已追加到当前任务'))}
         onWithdraw={withdrawQueued} onCancel={queuedId=>void mutate('claude.cancelQueued',{conversationId,queuedId},()=>setNotice('已删除排队消息'))}/>}
-      <form className={`composer ${attachmentCount?'with-images':''}${attachments.drop.dragging?' dragging':''}`} onSubmit={e=>{e.preventDefault();void send();}} {...attachments.drop.handlers}>
-        <ImageAttachments images={images} disabled={busy||attachments.loading} show={showImage} remove={index=>setImages(old=>old.filter((_,i)=>i!==index))}/>
-        <FileAttachments files={files} disabled={busy||attachments.loading} remove={index=>setFiles(old=>old.filter((_,i)=>i!==index))}/>
-        <ReadingStatus loading={attachments.loading}/>
-        <UploadStatus progress={uploadProgress}/>
-        <VoiceStatus voice={voice}/>
-        <textarea ref={composer} aria-label="任务输入" readOnly={Boolean(pending)} value={draft} maxLength={100_000} rows={1} onPaste={attachments.paste}
-          placeholder={creating?'想让 Claude Code 做什么？':queueNext?'当前任务完成后发送…':`在 ${machineName} 上继续…`}
-          onChange={e=>edit(e.target.value)} onKeyDown={e=>submitOnDesktop(e,()=>void send())}/>
-        <div className="composer-toolbar">
-          <IconButton icon="plus" label="添加图片或文件" className="composer-add" disabled={!canWrite||attachments.loading} onClick={()=>picker.current?.click()}/>
-          {!creating&&<IconButton icon="file" label="查看项目文件" className="composer-add" disabled={!connected||!view} onClick={showFiles}/>}
-          <input ref={picker} type="file" accept={ATTACHMENT_ACCEPT} multiple hidden onChange={e=>{const chosen=Array.from(e.target.files||[]);e.target.value='';void attachments.add(chosen);}}/>
-          <select className="claude-select" aria-label="模型" value={model} disabled={!connected||busy} onFocus={()=>void openModels()} onPointerDown={()=>void openModels()} onChange={e=>chooseModel(e.target.value)}>
-            <option value="">{view?.model?`模型：${view.model}`:'默认模型'}</option>
-            {model&&!(models||[]).some(item=>item.id===model)&&<option value={model}>{modelLabel}</option>}
-            {(models||[]).map(item=><option key={item.id} value={item.id} title={item.description}>{item.label}</option>)}
-          </select>
-          <select className="claude-select" aria-label="权限模式" value={selectedMode} disabled={!connected||busy} onChange={e=>setMode(e.target.value)}>
-            {MODES.filter(([value])=>value!=='bypassPermissions'||creating||!view?.controlled).map(([value,label])=><option key={value} value={value}>{value===''?`权限：${modeLabel(view?.permissionMode||'default')}`:label}</option>)}
-          </select>
-          <div className="composer-actions">
-            <VoiceButton voice={voice} mode={props.voiceMode} connected={connected} disabled={busy} starting={()=>{setError('');setNotice('');}}/>
-            {running&&view?.controlled&&(drafted?<>
-              <IconButton icon="now" label="立即发送（可转后台的工作转入后台，否则打断当前回复）" className="round" disabled={!canSend} onClick={()=>void send('now')}/>
-              <IconButton icon="steer" label="追加到当前任务（当前工具调用结束后读到）" className="round" disabled={!canSend} onClick={()=>void send('steer')}/>
-            </>:<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={!connected||busy||Boolean(pending)} onClick={()=>void mutate('claude.stop',{conversationId})}/>)}
-            {!(running&&view?.controlled&&!drafted)&&<SendMessageButton sending={Boolean(pending&&busy)} label={queueNext?'完成后发送':'发送消息'} disabled={!canSend||!drafted||creating&&!startPath}/>}
-          </div>
-        </div>
-      </form>
+      <Composer attachments={attachments} input={composer} draft={draft} edit={edit} maxLength={100_000} readOnly={Boolean(pending)} submit={()=>void send()}
+        placeholder={creating?'想让 Claude Code 做什么？':queueNext?'当前任务完成后发送…':`在 ${machineName} 上继续…`}
+        locked={busy} showImage={showImage} uploadProgress={uploadProgress}
+        voice={voice} voiceMode={props.voiceMode} voiceDisabled={busy} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
+        add={()=>setAdding(true)} addDisabled={!canWrite||attachments.loading}
+        permission={<PermissionMenu options={MODES.filter(option=>option.id!=='bypassPermissions'||creating||!view?.controlled)} value={selectedMode}
+          current={{id:view?.permissionMode||'default',label:modeLabel(view?.permissionMode||'default')}} disabled={!connected||busy} onChange={setMode}/>}
+        model={<ModelMenu label={modelLabel} title="选择 Claude Code 模型" tuning={false} disabled={!connected||busy} opened={()=>void openModels()}
+          models={(models||[]).map(item=>({model:item.id,displayName:item.label,description:item.description}))} value={{model,effort:''}} current={{model:view?.model}}
+          currentLabel={view?.model||'默认模型'} onChange={selection=>chooseModel(selection.model)}
+          status={modelsError?<p role="alert">{modelsError} <button type="button" onClick={()=>void openModels()}>重试</button></p>:!models?<p role="status">正在读取模型…</p>:!models.length&&<p role="status">没有可选模型</p>}/>}
+        running={controlledRun?{stop:()=>void mutate('claude.stop',{conversationId}),disabled:!connected||busy||Boolean(pending),queue:true}:undefined}
+        send={{label:queueNext?'完成后发送':'发送消息',sending:Boolean(pending&&busy),disabled:!canSend||!drafted||creating&&!startPath}}/>
+      {pick.inputs}
     </footer>
+    {adding&&<SheetPanel title="添加与选项" close={()=>setAdding(false)}>
+      <AddOptions attachments={attachments} pick={pick} disabled={!canWrite} connected={connected} error={error}
+        voiceLabel={voiceProviderLabel(props.voiceMode)} chooseVoice={()=>{setAdding(false);props.chooseVoice();}}
+        projectFiles={creating?undefined:()=>{setAdding(false);showFiles();}} refresh={creating?undefined:()=>{setAdding(false);void refresh();}}/>
+    </SheetPanel>}
     {menuPoint&&view&&<ThreadMenu thread={{id:conversationId,title:view.title,status:running?{type:'active'}:undefined}} point={menuPoint} preference={{}} sections={[]} archived={false} compact connected={connected}
       close={()=>setMenuPoint(null)} copy={()=>copyText(conversationId)} {...(props.actions?.({id:conversationId,title:view.title})||{})}/>}
     {statusPoint&&view&&<ThreadStatusPanel point={statusPoint} view={{...view,source:'connector'} as unknown as SessionView} threadId={conversationId} cwd={view.cwd} connected={connected} close={()=>setStatusPoint(null)}

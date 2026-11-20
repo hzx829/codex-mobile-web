@@ -30,5 +30,6 @@ export function UploadStatus({progress}:{progress:UploadProgress|null}){
   return <div className="upload-progress" role="status"><span>正在上传 {progress.index}/{progress.count} · {Math.floor(progress.loaded/progress.size*100)}% · {progress.name}</span>
     <progress value={progress.loaded} max={progress.size} aria-label={`正在上传 ${progress.name}`}/></div>;
 }
-/** One picker for photos and documents; the phone offers its photo library and files. */
-export const ATTACHMENT_ACCEPT='image/png,image/jpeg,image/webp,application/*,text/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.xml,.zip';
+export const IMAGE_ACCEPT='image/png,image/jpeg,image/webp';
+/** Document types only, so phones do not offer the camera for this picker. */
+export const DOCUMENT_ACCEPT='application/*,text/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.xml,.zip';
