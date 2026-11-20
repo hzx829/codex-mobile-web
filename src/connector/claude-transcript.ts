@@ -1,3 +1,4 @@
+import {isAbsolute, relative} from 'node:path';
 import type {MessageItem, TurnView} from '../shared/types.js';
 
 /** A message as returned by the Agent SDK's getSessionMessages. */
@@ -62,14 +63,83 @@ function commandText(text: string): {text: string; kind: 'user' | 'status' | 'sk
 }
 
 const interrupted = /^\[Request interrupted by user[^\]]*\]$/;
+const ARTIFACT_URL = /https:\/\/claude\.ai\/artifact\/[A-Za-z0-9_-]{8,64}/g;
+const artifactUrl = (value: string) => /^https:\/\/claude\.ai\/artifact\/[A-Za-z0-9_-]{8,64}$/.test(value) ? value : '';
+/** Artifact publishes and opens, and writes to an Artifact's data, change what its page shows; reads and listings do not. */
+function changesArtifact(block: Block) {
+  const input = block.input || {}, action = str(input.action);
+  if (block.name === 'Artifact') return !action || action === 'publish' || action === 'open';
+  if (block.name === 'ArtifactData') return Boolean(artifactUrl(str(input.url))) && !['get', 'list', 'query'].includes(action);
+  return false;
+}
 
 /**
  * Groups a Claude Code transcript into Codex-style turns: a turn starts with each prompt the user typed;
  * tool results returned to the model stay inside the tool call they answer.
  */
-export function claudeTurns(messages: ClaudeMessage[], running = false): TurnView[] {
+/**
+ * File edits as unified diffs, by tool call. The SDK's messages leave out what each edit changed;
+ * the raw transcript keeps it (`toolUseResult.structuredPatch`, or the content of a created file).
+ */
+export function claudePatches(transcript: string, cwd = ''): Map<string, string> {
+  const patches = new Map<string, string>();
+  for (const line of transcript.split('\n')) {
+    if (!line.includes('"toolUseResult"') || !line.includes('"filePath"')) continue;
+    let entry: any;
+    try {entry = JSON.parse(line);} catch {continue;}
+    const result = entry?.toolUseResult, content = entry?.message?.content;
+    if (!result || typeof result.filePath !== 'string' || !Array.isArray(content)) continue;
+    const id = content.find((block: Block) => block?.type === 'tool_result' && block.tool_use_id)?.tool_use_id;
+    if (!id) continue;
+    const near = cwd && isAbsolute(result.filePath) ? relative(cwd, result.filePath) : '';
+    const path = (near && !near.startsWith('..') && !isAbsolute(near) ? near : result.filePath).split('\\').join('/').replace(/^\/+/, '');
+    const header = `diff --git a/${path} b/${path}\n`;
+    let text = '';
+    if (result.type === 'create' && typeof result.content === 'string') {
+      const lines = result.content.replace(/\r?\n$/, '').split(/\r?\n/);
+      text = `${header}new file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((value: string) => '+' + value).join('\n')}\n`;
+    } else if (Array.isArray(result.structuredPatch) && result.structuredPatch.length) {
+      const hunks = result.structuredPatch.filter((hunk: any) => Array.isArray(hunk?.lines)).map((hunk: any) =>
+        `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join('\n')}\n`);
+      if (hunks.length) text = `${header}--- a/${path}\n+++ b/${path}\n${hunks.join('')}`;
+    }
+    if (text && text.length <= 200_000) patches.set(String(id), text);
+  }
+  return patches;
+}
+const MAX_TURN_DIFF = 600_000;
+
+/**
+ * Artifact names, by page URL, from every Artifact call in the raw transcript. The SDK's messages follow only the
+ * current branch, so the call that created a page and named it (`title`) can be missing from them.
+ */
+export function claudeArtifactTitles(transcript: string): Map<string, string> {
+  const calls = new Map<string, Record<string, unknown>>(), titles = new Map<string, string>();
+  for (const line of transcript.split('\n')) {
+    if (!line.includes('claude.ai/artifact/')) continue;
+    let entry: any;
+    try {entry = JSON.parse(line);} catch {continue;}
+    for (const block of blocks(entry?.message)) {
+      if (block.type === 'tool_use' && block.name === 'Artifact' && block.id && str(block.input?.title).trim()) calls.set(block.id, block.input!);
+      if (block.type !== 'tool_result' || !block.tool_use_id || block.is_error) continue;
+      const input = calls.get(block.tool_use_id);
+      if (!input) continue;
+      const typeUrl = str(input.type_url);
+      const url = artifactUrl(str(input.url)) || [...resultText(block.content).matchAll(ARTIFACT_URL)].map(match => match[0]).find(found => found !== typeUrl);
+      if (url) titles.set(url, str(input.title).trim().slice(0, 200));
+    }
+  }
+  return titles;
+}
+
+/** `titles`: names known from elsewhere (the raw transcript, a saved snapshot), used where the messages give none. */
+export function claudeTurns(messages: ClaudeMessage[], running = false, patches?: Map<string, string>, titles?: Map<string, string>): TurnView[] {
   const turns: TurnView[] = [];
   const tools = new Map<string, MessageItem>();
+  // claude.ai Artifacts a turn created or changed, shown under the turn like Codex's file-change card.
+  const pageCalls = new Map<string, {turn: TurnView; input: Record<string, unknown>}>();
+  const pageTitles = new Map<string, string>(titles);
+  const toolTurns = new Map<string, TurnView>();
   let turn: TurnView | undefined;
   const current = (id: string) => {
     if (!turn) {turn = {id, status: 'completed', items: [], canFork: false};turns.push(turn);}
@@ -77,10 +147,43 @@ export function claudeTurns(messages: ClaudeMessage[], running = false): TurnVie
   };
   for (const entry of messages) {
     if (entry.parent_tool_use_id) continue; // Subagent internals are summarised by their Task call.
+    take(entry);
+    // An entry belongs to the turn open after it; a fork copies the transcript up to the turn's last entry.
+    if (turn) turn.anchor = entry.uuid;
+  }
+  for (const item of turns) item.canFork = Boolean(item.anchor) && item.status !== 'inProgress';
+  const last = turns.at(-1);
+  if (last && running && last.status === 'completed') {last.status = 'inProgress';last.canFork = false;}
+  // A page named after it first appeared takes that name everywhere.
+  for (const item of turns) for (const page of item.pages || []) page.title = pageTitles.get(page.url) || page.title;
+  // Pages published in earlier turns are repeated on the newest one, latest first, so the session's pages stay in reach.
+  if (last) {
+    const shown = new Set((last.pages || []).map(page => page.url)), earlier: {url: string; title: string; earlier: true}[] = [];
+    for (const item of turns.slice(0, -1).reverse()) for (const page of item.pages || []) {
+      if (shown.has(page.url)) continue;
+      shown.add(page.url);
+      earlier.push({url: page.url, title: page.title, earlier: true});
+    }
+    if (earlier.length) last.pages = [...(last.pages || []), ...earlier];
+  }
+  return turns;
+
+  function addPage(turn: TurnView, input: Record<string, unknown>, result: string) {
+    const typeUrl = str(input.type_url);
+    const url = artifactUrl(str(input.url)) || [...result.matchAll(ARTIFACT_URL)].map(match => match[0]).find(found => found !== typeUrl);
+    if (!url) return;
+    if (str(input.title)) pageTitles.set(url, str(input.title).slice(0, 200));
+    const pages = turn.pages ??= [];
+    const page = pages.find(item => item.url === url);
+    if (!page) pages.push({url, title: pageTitles.get(url) || ''});
+    else if (pageTitles.has(url)) page.title = pageTitles.get(url)!;
+  }
+
+  function take(entry: ClaudeMessage) {
     const list = blocks(entry.message);
     if (entry.type === 'system') {
       current(entry.uuid).items.push({id: entry.uuid, type: 'contextCompaction', role: 'activity', text: '整理上下文'});
-      continue;
+      return;
     }
     if (entry.type === 'user') {
       const texts: string[] = [], images: string[] = [];
@@ -91,6 +194,10 @@ export function claudeTurns(messages: ClaudeMessage[], running = false): TurnVie
           const output = clip(resultText(block.content).trim());
           if (tool && output) tool.text = tool.text ? `${tool.text}\n${output}` : output;
           if (tool && block.is_error) tool.text = `${tool.text}\n（失败）`;
+          const patch = patches?.get(block.tool_use_id), owner = toolTurns.get(block.tool_use_id);
+          if (patch && owner && !block.is_error && (owner.diff?.length || 0) + patch.length <= MAX_TURN_DIFF) owner.diff = (owner.diff || '') + patch;
+          const call = pageCalls.get(block.tool_use_id);
+          if (call && !block.is_error) addPage(call.turn, call.input, resultText(block.content));
         } else if (block.type === 'text' && block.text?.trim()) {
           if (interrupted.test(block.text.trim())) {stopped = true;continue;}
           const command = commandText(block.text);
@@ -108,9 +215,9 @@ export function claudeTurns(messages: ClaudeMessage[], running = false): TurnVie
         current(entry.uuid).items.push({id: entry.uuid, type: 'userMessage', role: 'user', text: texts.join('\n\n'), ...(images.length ? {images} : {})});
       }
       if (status) current(entry.uuid).items.push({id: entry.uuid + ':out', type: 'status', role: 'status', text: status});
-      continue;
+      return;
     }
-    if (entry.type !== 'assistant') continue;
+    if (entry.type !== 'assistant') return;
     const target = current(entry.uuid);
     list.forEach((block, index) => {
       const id = `${entry.uuid}:${index}`;
@@ -125,11 +232,9 @@ export function claudeTurns(messages: ClaudeMessage[], running = false): TurnVie
         const item: MessageItem = {id, role: 'activity', ...toolActivity(block)};
         if (!item.files) delete item.files;
         target.items.push(item);
-        if (block.id) tools.set(block.id, item);
+        if (block.id) {tools.set(block.id, item);toolTurns.set(block.id, target);}
+        if (block.id && changesArtifact(block)) pageCalls.set(block.id, {turn: target, input: block.input || {}});
       }
     });
   }
-  const last = turns.at(-1);
-  if (last && running && last.status === 'completed') last.status = 'inProgress';
-  return turns;
 }

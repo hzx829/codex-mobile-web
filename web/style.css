@@ -215,6 +215,7 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .diff-card-counts { display: inline-flex; gap: 6px; font: 12px var(--mono); flex-shrink: 0; }
 .diff-add { color: var(--success); }
 .diff-del { color: var(--danger); }
+.diff-card-note { color: var(--fg-3); font-size: 12px; flex-shrink: 0; }
 .diff-card-open { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; color: var(--fg-3); font-size: 12px; flex-shrink: 0; }
 .diff-card-open svg { transform: rotate(-90deg); }
 .inline-link { border: 0; padding: 0; background: none; font: inherit; display: inline; border-radius: 0; }

@@ -117,6 +117,9 @@ test('Claude Code projects are folders: list, settings and new sessions', async 
       listSessions: async () => catalog,
       getSessionInfo: async id => catalog.find(s => s.sessionId === id),
       getSessionMessages: async () => [],
+      forkSession: async () => {throw new Error('unused');},
+      renameSession: async () => {},
+      archiveSession: async () => {},
     };
     // The site's sessions live in a folder whose name the connector does not have to guess.
     const transcripts = join(root, 'config', 'projects', 'odd-name');

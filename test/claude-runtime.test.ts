@@ -91,7 +91,7 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
     assert.deepEqual(await bridge.handle('claude.create', create), created, 'retrying an operation never starts a second session');
     assert.equal(fake.calls.filter(call => call.type === 'start').length, 1);
     assert.equal(fake.calls[0].options.model, 'opus');assert.equal(fake.calls[0].options.permissionMode, 'acceptEdits');
-    assert.equal(fake.calls[0].options.env, undefined, 'by default the SDK keeps its own entrypoint and environment');
+    assert.equal(fake.calls[0].options.env.CLAUDE_CODE_ENTRYPOINT, 'codex-mobile-web', 'an entrypoint the terminal resume list shows');
     assert.equal(fake.calls[0].options.cwd, cwd);
     assert.deepEqual(fake.calls[0].options.systemPrompt, {type: 'preset', preset: 'claude_code'});
     assert.equal(fake.calls[1].images, 1);
@@ -179,9 +179,12 @@ test('Claude Code executable and messages', () => {
   assert.equal(findClaude({PATH: 'C:\\a;C:\\b', USERPROFILE: 'C:\\Users\\me'}, path => path === join('C:\\b', 'claude.exe'), 'win32'), join('C:\\b', 'claude.exe'));
   assert.equal(findClaude({PATH: '', USERPROFILE: 'C:\\Users\\me'}, path => path === join('C:\\Users\\me', '.local', 'bin', 'claude.exe'), 'win32'), join('C:\\Users\\me', '.local', 'bin', 'claude.exe'));
   assert.equal(findClaude({PATH: ''}, () => false, 'win32'), undefined);
-  assert.deepEqual(claudeEnv('cli', {PATH: 'x', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts'}), {PATH: 'x', CLAUDE_CODE_ENTRYPOINT: 'cli'});
-  assert.equal(claudeEnv(false, {PATH: 'x'}), undefined, 'turning it off leaves the SDK default');
-  assert.equal(claudeEnv(undefined, {PATH: 'x'}), undefined, 'off by default');
+  assert.deepEqual(claudeEnv('custom', {PATH: 'x', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts'}), {PATH: 'x', CLAUDE_CODE_ENTRYPOINT: 'custom'});
+  assert.deepEqual(claudeEnv(undefined, {PATH: 'x'}), {PATH: 'x', CLAUDE_CODE_ENTRYPOINT: 'codex-mobile-web'}, 'not sdk-ts, which the terminal hides');
+  const inherited = {PATH: 'x', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_CODE_CHILD_SESSION: '1',
+    CLAUDE_CODE_SESSION_ID: 'parent', CLAUDE_CODE_HOST_SESSION_ID: 'local_x', CLAUDE_PID: '1', CLAUDE_CODE_MESSAGING_TOKEN: 't'};
+  assert.deepEqual(claudeEnv(undefined, inherited), {PATH: 'x', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_ENTRYPOINT: 'codex-mobile-web'},
+    'a connector started inside a Claude Code session does not make its sessions its children');
   const message = userMessage('看图', ['data:image/png;base64,AAAA'], 'later');
   assert.deepEqual(message.message.content, [{type: 'image', source: {type: 'base64', media_type: 'image/png', data: 'AAAA'}}, {type: 'text', text: '看图'}]);
   assert.equal(message.priority, 'later');assert.deepEqual(message.origin, {kind: 'human'});

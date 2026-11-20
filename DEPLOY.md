@@ -54,6 +54,24 @@ curl --fail https://codex.your-domain.com/health
 
 电脑需要保持开机和联网。电脑离线时服务器仍能显示网页，但无法代替电脑执行 Codex。原来的 Wi-Fi 模式仍可通过配置窗口切回。
 
+## 访客包部署
+
+先升级中继和网页端，再在 Windows 构建访客包。
+
+```powershell
+npm run package:guest -- --name "借用电脑" --relay https://codex.your-domain.com
+```
+
+把生成的 `guest-*.zip` 交给电脑主人。保留同名的 `.relay.json`，将其中的记录追加到中继配置的 `connectorTokens` 数组。Compose 部署把数组写入 `.env` 的环境变量，保留已有记录。
+
+```dotenv
+BRIDGE_CONNECTOR_TOKENS='[{"machineId":"guest-…","token":"…"}]'
+```
+
+Compose 部署运行 `docker compose -f compose.yaml -f compose.https.yaml up -d --build` 应用配置。直接运行 Node 的中继可使用 `BRIDGE_CONNECTOR_TOKENS`，也可用打包参数 `--relay-config <路径>` 追加到已有的中继 JSON 配置，再重启中继。手机继续使用原有的主 Token。
+
+电脑主人解压后双击「启动.cmd」。网页的「电脑」菜单会在电脑名旁显示「借用」。停止连接用「停止.cmd」，清空该包里的项目、会话和登录副本用「清除访客数据.cmd」。要撤销访客包，从中继配置删除对应的 Token 并重新应用配置。
+
 ## 日常操作
 
 下列命令都在解压后的部署目录运行：

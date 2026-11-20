@@ -51,6 +51,10 @@ export function serviceHome(service: Service, project = ''): Route {
   return field ? {...home, project: keepsProject ? project : '', [field]: ''} : home;
 }
 
+export function supportedRoute(route: Route, available: readonly Service[] = SERVICE_IDS): Route {
+  return !available.length || available.includes(serviceOf(route)) ? route : serviceHome(available[0]);
+}
+
 export function withConversation(route: Route, id: string): Route {
   const field = spec(serviceOf(route)).field;
   return field ? {...route, [field]: id} : route;

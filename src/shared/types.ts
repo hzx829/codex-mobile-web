@@ -1,13 +1,17 @@
 export type Json = Record<string, any>;
 export type AntigravityAction = `antigravity.${'list' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'operation' | 'file.read' | 'file.download'}`;
-export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation' | 'project.get' | 'project.save'}`;
+export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation' | 'project.get' | 'project.save' | 'fork' | 'rename' | 'archive' | 'edit' | 'artifact.snapshot' | 'artifact.download' | 'artifact.login'}`;
 export type AntigravityModel = {id:string; label:string};
 export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; text:string};
 export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'};
-export type RequestAction = AntigravityAction | ClaudeAction | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
+export const bridgeServices = ['codex', 'antigravity', 'claude'] as const;
+export type BridgeService = typeof bridgeServices[number];
+export type Machine = {id: string; name: string; guest?: boolean; services?: BridgeService[]};
+export type RequestAction = AntigravityAction | ClaudeAction | 'project.create' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
-export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string }
+/** `anchor`: the last transcript entry of the turn, where a Claude Code fork ends. `pages`: claude.ai Artifacts the turn published; on the newest turn also those of earlier turns (`earlier`). */
+export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string; anchor?: string; pages?: {url: string; title: string; earlier?: boolean}[] }
 export interface TurnCursor { before: string; native?: string }
 export const turnFinished=(status:unknown)=>status==='completed'||status==='interrupted'||status==='failed';
 export interface ContextUsage { usedTokens: number; windowTokens: number | null }

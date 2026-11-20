@@ -27,6 +27,12 @@ export async function nativeProjects(config:Json,home=process.env.CODEX_HOME||jo
   return projectCatalog(state,config);
 }
 
+export function indexedProjectPaths(home=process.env.CODEX_HOME||join(homedir(),'.codex')): string[] {
+  const db=new DatabaseSync(join(home,'state_5.sqlite'),{readOnly:true});
+  try {return db.prepare('SELECT DISTINCT cwd FROM threads WHERE cwd IS NOT NULL ORDER BY cwd').all().map(row=>String(row.cwd));}
+  finally {db.close();}
+}
+
 export function indexedSessions(options:{cwd?:string;archived:boolean;search?:string;cursor?:string},home=process.env.CODEX_HOME||join(homedir(),'.codex')) {
   const offset=options.cursor?Number(/^db:(\d+)$/.exec(options.cursor)?.[1]):0;
   if(!Number.isSafeInteger(offset)||offset<0)throw new BridgeError('invalid','会话分页标识无效');

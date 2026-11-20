@@ -3,7 +3,7 @@
 ## 完成的部分
 
 - 从 ff65339 之前的提交恢复了 Agent SDK 运行时：`src/connector/claude-code.ts`、`claude-runtime.ts`、`claude-transcript.ts`、`web/claude-code.tsx` 和两个测试文件，并重新接回连接器、中继、手机路由和侧栏的"新聊天"按钮。依赖 `@anthropic-ai/claude-agent-sdk` 装的是 0.3.328。
-- 新增可选配置 `claudeEntrypoint`（字符串），用来设置 `CLAUDE_CODE_ENTRYPOINT`。**默认不设置**，保持 SDK 自己的 `sdk-ts`，原因见下文。
+- 新增可选配置 `claudeEntrypoint`（字符串），用来设置 `CLAUDE_CODE_ENTRYPOINT`。默认值后来改为 `codex-mobile-web`，见文末“终端 `/resume` 列表”。
 
 ## 真机实测（claude.exe 2.1.x，`~/.local/bin`）
 
@@ -31,3 +31,26 @@
 
 - `npm run check`：205/205 通过，native 和 ownership 检查也通过；`npm run build` 通过。
 - 已知偶发失败：完整套件跑了 5 次，有 1 次 `phone drives Claude Code sessions…` 在第一次 `claude.send` 时返回 `failed`。单独跑 3 次、完整套件再跑 3 次都通过。这个测试和代码都是从历史提交原样恢复的，测试里的运行时空闲超时只有 200ms，机器忙的时候会话可能先被释放掉。
+
+## 终端 `/resume` 列表（2026-11-19 补充）
+
+问题：web 建的会话在终端 `claude --resume` / `/resume` 的列表里看不到（按 ID 接续一直可以）。
+
+实测（claude.exe 2.1.328，在空目录里用不同的 `CLAUDE_CODE_ENTRYPOINT` 各建一个会话，再在伪终端里打开选择器）：
+
+| entrypoint | 终端列表 |
+|---|---|
+| `sdk-ts`（SDK 默认） | 隐藏 |
+| `cli`（非交互下被改写成 `sdk-cli`） | 隐藏 |
+| `claude-desktop`、`claude-vscode`、`local-agent`、`mcp` | 显示 |
+| `codex-mobile-web`（claude.exe 不认识的名字，原样写入） | 显示 |
+
+`CLAUDE_CODE_CHILD_SESSION`、`CLAUDECODE` 不影响列表。
+
+另一个发现：连接器如果是在某个 Claude Code 会话里启动的（例如桌面应用里跑部署脚本），会继承 `CLAUDE_CODE_ENTRYPOINT=claude-desktop`、`CLAUDE_CODE_CHILD_SESSION=1`、`CLAUDE_CODE_HOST_SESSION_ID` 等变量，手机会话就被记成那个会话的子会话。所以列表能不能看到，取决于连接器是怎么启动的。
+
+改法：
+
+- 默认 entrypoint 设为 `codex-mobile-web`。claude.exe 不认识它，不会像借用 `claude-desktop` / `claude-vscode` 那样触发宿主专属行为；审批回调 `canUseTool` 照常触发（与 `sdk-ts` 对照实测）。
+- 启动 claude.exe 时去掉父会话写给子进程的变量（`CLAUDECODE`、`CLAUDE_CODE_CHILD_SESSION`、`CLAUDE_CODE_SESSION_ID`、`CLAUDE_CODE_HOST_SESSION_ID`、`CLAUDE_CODE_MESSAGING_*`、`CLAUDE_PID` 等），其余环境（包括用户自己设的 `CLAUDE_CODE_*`）保留。
+- 已经用 `sdk-ts` 写下的旧会话不改写，仍然只能按 ID 接续。

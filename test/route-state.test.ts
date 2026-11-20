@@ -1,6 +1,16 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {home,initialLocation,parseLocation,rememberLocation} from '../web/route-state.js';
+import {serviceHome, supportedRoute} from '../web/services.js';
+
+test('borrowed computers fall back to an available app', () => {
+  const route = serviceHome('antigravity', 'project');
+  assert.equal(supportedRoute(route), route);
+  assert.deepEqual(supportedRoute(route, ['claude']), serviceHome('claude'));
+  assert.deepEqual(supportedRoute(route, ['codex', 'claude']), home);
+  const claude = serviceHome('claude', 'demo');
+  assert.equal(supportedRoute(claude, ['codex', 'claude']), claude);
+});
 
 test('a reload restores the current machine, project and thread from history',()=>{
   const route={project:'C:/work',thread:'thread-2',newChat:false};

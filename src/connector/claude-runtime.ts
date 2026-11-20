@@ -30,14 +30,29 @@ export function findClaude(env: NodeJS.ProcessEnv = process.env, exists = exists
 }
 
 /**
- * Environment for the Claude Code process. By default the SDK labels sessions `sdk-ts`.
- * Note: claude.exe rewrites `cli` to `sdk-cli` in non-interactive (SDK) mode, and the
- * desktop Code tab hides both, so `cli` cannot make phone sessions visible there.
- * Pass `false` (the default) to keep the SDK's own value.
+ * The entrypoint phone sessions are recorded with. The terminal's `claude --resume` list hides
+ * `sdk-*` sessions (the SDK's default `sdk-ts`, and `cli`, which claude.exe rewrites to `sdk-cli`
+ * in SDK mode). A name claude.exe does not know is kept as is, listed, and changes no behaviour,
+ * unlike borrowing `claude-desktop` or `claude-vscode`.
  */
-export function claudeEnv(entrypoint: string | false = false, base: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> | undefined {
-  if (!entrypoint) return undefined;
-  return {...base, CLAUDE_CODE_ENTRYPOINT: entrypoint};
+export const DEFAULT_ENTRYPOINT = 'codex-mobile-web';
+
+/**
+ * Variables a parent Claude Code session sets for its own children. A connector started from inside
+ * a Claude Code session (the desktop app, a terminal) inherits them, and its sessions would then be
+ * recorded as that host's child sessions with its entrypoint.
+ */
+const HOST_SESSION_VARS = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_HOST_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS', 'CLAUDE_CODE_SESSION_KIND',
+  'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_DESKTOP_APP_VERSION',
+  'CLAUDE_CODE_CHILD_NOTES_DIR', 'CLAUDE_PID', 'CLAUDE_AGENT_SDK_VERSION'];
+
+/** Environment for the Claude Code process: the connector's own, without a parent session's markers. */
+export function claudeEnv(entrypoint = DEFAULT_ENTRYPOINT, base: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {...base};
+  for (const name of HOST_SESSION_VARS) delete env[name];
+  env.CLAUDE_CODE_ENTRYPOINT = entrypoint || DEFAULT_ENTRYPOINT;
+  return env;
 }
 
 /** An async queue the SDK reads user messages from, so one Claude Code process serves many turns. */
@@ -72,6 +87,8 @@ export class LiveSession {
   closed = false;
   interrupting = false;
   hint = '';
+  /** Context window size, read once from Claude Code. */
+  window?: number | null;
   constructor(public cwd: string, public query: Query, public inbox: Inbox, public model: string, public permissionMode: PermissionMode) {}
   get pending() {return [...this.requests.values()].map(request => request.view);}
 }
@@ -111,7 +128,7 @@ export class ClaudeRuntime extends EventEmitter {
   private live = new Map<string, LiveSession>();
   private models?: {at: number; list: Json[]};
   constructor(private load: () => Promise<QueryFn>, private executable = () => findClaude(), private idleMs = 5 * 60_000,
-    private entrypoint: string | false = false) {super();}
+    private entrypoint = DEFAULT_ENTRYPOINT) {super();}
 
   get(id: string) {return this.live.get(id);}
   get busy() {return [...this.live.values()].some(session => session.running || session.requests.size || session.inbox.size);}
@@ -127,7 +144,8 @@ export class ClaudeRuntime extends EventEmitter {
   }
 
   /** Project settings (CLAUDE.md, .mcp.json, .claude/settings.json, memory) come from the folder, as in the terminal. */
-  async start(options: {cwd: string; resume?: string; model?: string; permissionMode?: PermissionMode}): Promise<LiveSession> {
+  /** `resumeAt`: continue from this transcript entry, dropping what came after it (an edited message). */
+  async start(options: {cwd: string; resume?: string; resumeAt?: string; model?: string; permissionMode?: PermissionMode}): Promise<LiveSession> {
     if (options.resume) {const existing = this.live.get(options.resume);if (existing) return existing;}
     const query = await this.load();
     const inbox = new Inbox();
@@ -137,10 +155,10 @@ export class ClaudeRuntime extends EventEmitter {
     const hint = executable ? '' : '没有找到电脑上的 claude 程序；请安装 Claude Code，或在连接器配置中设置 claudeBin。';
     let q: Query;
     try {q = query({prompt: inbox, options: {
-      cwd: options.cwd, ...(options.resume ? {resume: options.resume} : {}), ...(options.model ? {model: options.model} : {}),
+      cwd: options.cwd, ...(options.resume ? {resume: options.resume} : {}), ...(options.resume && options.resumeAt ? {resumeSessionAt: options.resumeAt} : {}), ...(options.model ? {model: options.model} : {}),
       permissionMode: mode, ...(mode === 'bypassPermissions' ? {allowDangerouslySkipPermissions: true} : {}),
       ...(executable ? {pathToClaudeCodeExecutable: executable} : {}),
-      ...(this.entrypoint ? {env: claudeEnv(this.entrypoint)} : {}),
+      env: claudeEnv(this.entrypoint),
       systemPrompt: {type: 'preset', preset: 'claude_code'},
       canUseTool: (tool, input, context) => this.ask(session, tool, input, context),
       stderr: () => {}, // Native diagnostics can contain credentials; never forward them.
@@ -209,6 +227,25 @@ export class ClaudeRuntime extends EventEmitter {
   }
 
   /** Ends the process so another client (terminal, IDE) may resume the session. */
+  /** Ends an idle session's process now, so it can be started again from an earlier point. */
+  async shutdown(session: LiveSession) {
+    if (session.running || session.requests.size || session.inbox.size) throw new BridgeError('active', 'Claude Code 正在处理这条会话，请等它结束');
+    session.inbox.close();
+    try {session.query.close();} catch {}
+    this.closeSession(session);
+  }
+
+  /** Context window use of a session this connector runs, as Claude Code reports it. */
+  async contextWindow(session: LiveSession): Promise<number | null> {
+    if (session.closed) return null;
+    if (session.window !== undefined) return session.window;
+    try {
+      const usage = await Promise.race([session.query.getContextUsage(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))]);
+      session.window = Number(usage.maxTokens) || null;
+    } catch {session.window = null;}
+    return session.window;
+  }
+
   release(session: LiveSession) {
     if (session.running || session.requests.size || session.inbox.size) return;
     session.inbox.close();
@@ -293,7 +330,7 @@ export class ClaudeRuntime extends EventEmitter {
       if (!source) {
         inbox = new Inbox();
         const executable = this.executable();
-        probe = (await this.load())({prompt: inbox, options: {cwd, ...(executable ? {pathToClaudeCodeExecutable: executable} : {}), stderr: () => {}}});
+        probe = (await this.load())({prompt: inbox, options: {cwd, env: claudeEnv(this.entrypoint), ...(executable ? {pathToClaudeCodeExecutable: executable} : {}), stderr: () => {}}});
         source = probe;
       }
       const list = (await source.supportedModels()).map(model => ({id: model.value, label: model.displayName, description: model.description}));
