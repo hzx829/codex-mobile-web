@@ -2,7 +2,7 @@
 
 测试环境：Windows Antigravity App 2.33.0.0，`language_server.exe` 的 SHA-256 以 `EB6D986DFC5A859C` 开头，codex-mobile-web `81295f9`。这些接口没有公开文档，Antigravity 升级后要重新核对。
 
-目的：确认手机端能不能新建、查看、改名、删除 Antigravity 项目。结论是可以，桌面 Hub 自己就有一套项目接口，不需要直接改 `~/.gemini/config/projects/*.json`。目前手机端还没有接入。
+目的：确认手机端能不能新建、查看、改名、删除 Antigravity 项目。结论是可以，桌面 Hub 自己就有一套项目接口，不需要直接改 `~/.gemini/config/projects/*.json`。目前手机端还没有接入。Codex 的对应记录见 [Codex 项目接口实测](../codex/PROJECT-API.md)。
 
 ## 调用方式
 
