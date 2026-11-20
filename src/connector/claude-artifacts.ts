@@ -1,6 +1,6 @@
 import {spawn, type ChildProcess} from 'node:child_process';
 import {existsSync} from 'node:fs';
-import {mkdir, readFile, rm, writeFile} from 'node:fs/promises';
+import {mkdir, readdir, readFile, rm, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {WebSocket} from 'ws';
@@ -27,6 +27,7 @@ export function artifactSlug(value: unknown) {
 }
 const FRAME_HOST = /\.frame\.claudeusercontent\.com$/;
 const LOGIN_URL = 'https://claude.ai/login';
+const DEFAULT_TITLE = 'claude.ai 页面';
 const MAX_RESOURCE = 8 * 1024 * 1024, MAX_TOTAL = 40 * 1024 * 1024;
 
 export function findBrowser(env = process.env, exists = existsSync): string | undefined {
@@ -314,6 +315,21 @@ export class ArtifactViewer {
     return Promise.race([job, waiting]).finally(() => clearTimeout(timer));
   }
 
+  /** Page names from snapshots already saved on this computer, for pages the transcript does not name. */
+  async savedTitles(urls: string[]): Promise<Map<string, string>> {
+    const titles = new Map<string, string>();
+    await Promise.all([...new Set(urls)].map(async url => {
+      let dir: string;
+      try {dir = this.snapshots(artifactSlug(url));} catch {return;}
+      const names = await readdir(dir).catch(() => [] as string[]);
+      for (const name of names.filter(name => name.endsWith('.json'))) {
+        const title = await readFile(join(dir, name), 'utf8').then(text => String(JSON.parse(text).title || '').trim(), () => '');
+        if (title && title !== DEFAULT_TITLE) {titles.set(url, title.slice(0, 200));return;}
+      }
+    }));
+    return titles;
+  }
+
   async download(p: Json) {
     const slug = artifactSlug(`https://claude.ai/artifact/${typeof p.slug === 'string' ? p.slug : ''}`);
     const name = typeof p.name === 'string' && /^\d{3,4}-(?:dark|light)\.html$/.test(p.name) ? p.name : '';
@@ -390,7 +406,7 @@ export class ArtifactViewer {
         ? await this.serializeFrame(cdp, {sessionId: frame.sessionId, frameId: frame.frameId, url: frame.url}, frame.tree, children, 0, {total: 0})
         : await this.serializeTarget(cdp, frame.sessionId, children, 0);
       const titleRaw = await this.evaluate(cdp, page.sessionId, 'document.title').catch(() => '');
-      return {html, title: String(titleRaw || '').replace(/\s*[–-]\s*Claude\s*$/, '').trim() || 'claude.ai 页面'};
+      return {html, title: String(titleRaw || '').replace(/\s*[–-]\s*Claude\s*$/, '').trim() || DEFAULT_TITLE};
     } finally {
       off();
       await cdp.send('Target.closeTarget', {targetId: page.targetId}).catch(() => {});

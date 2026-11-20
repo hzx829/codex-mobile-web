@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp, mkdir, writeFile, utimes} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
+import {claudeArtifactTitles, claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
 import {ClaudeCodeBridge} from '../src/connector/claude-code.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 import {Ledger} from '../src/connector/ledger.js';
@@ -210,4 +210,24 @@ test('editing a message resumes the session from the turn before it, with diffs 
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
     await removeTestTemp(root);
   }
+});
+
+test('claude.ai pages are named from the raw transcript and repeated on the newest turn', () => {
+  const page = 'https://claude.ai/artifact/FR2QT5upk4yhRE2SLNe2oM', type = 'https://claude.ai/artifact/GZLZthZ2sQjn7T16skfdeF';
+  const user = (uuid: string, content: unknown) => ({type: 'user', uuid, message: {role: 'user', content}});
+  const call = (uuid: string, id: string, input: Record<string, unknown>) => ({type: 'assistant', uuid, message: {role: 'assistant', content: [{type: 'tool_use', id, name: 'Artifact', input}]}});
+  const result = (uuid: string, id: string, text: string) => user(uuid, [{type: 'tool_result', tool_use_id: id, content: text}]);
+  // The call that created and named the page sits on a branch the SDK's messages no longer follow.
+  const created = [user('a', '做个看板'), call('b', 't1', {action: 'publish', type_url: type, title: '持仓决策看板'}), result('c', 't1', `Created a new Artifact at ${page} from the Artifact type ${type}`)];
+  const branch = [user('d', '改一下'), call('e', 't2', {action: 'open', url: page}), result('f', 't2', 'Opened.'), user('g', '提交')];
+  const raw = [...created, ...branch].map(line => JSON.stringify(line)).join('\n');
+  const titles = claudeArtifactTitles(raw);
+  assert.deepEqual([...titles], [[page, '持仓决策看板']]);
+  const turns = claudeTurns(branch.map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles);
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns[0].pages, [{url: page, title: '持仓决策看板'}]);
+  assert.deepEqual(turns[1].pages, [{url: page, title: '持仓决策看板', earlier: true}]);
+  // A page the newest turn already shows is not repeated, and a turn with no pages anywhere gets none.
+  assert.deepEqual(claudeTurns(branch.slice(0, 3).map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles).at(-1)?.pages, [{url: page, title: '持仓决策看板'}]);
+  assert.equal(claudeTurns([{type: 'user', uuid: 'u', message: {content: 'hi'}}]).at(-1)?.pages, undefined);
 });

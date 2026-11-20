@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {mkdtemp} from 'node:fs/promises';
+import {mkdir, mkdtemp, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {ArtifactViewer, artifactSlug, findBrowser} from '../src/connector/claude-artifacts.js';
@@ -75,4 +75,18 @@ test('a rendered Artifact frame becomes a static page without scripts', {skip: !
     await viewer.close();server.close();
     await removeTestTemp(root);
   }
+});
+
+test('saved snapshots name pages the transcript leaves unnamed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-artifact-titles-'));
+  try {
+    const saved = join(dir, 'claude-artifacts', 'FR2QT5upk4yhRE2SLNe2oM');
+    await mkdir(saved, {recursive: true});
+    await writeFile(join(saved, '400-light.json'), JSON.stringify({title: '持仓决策看板', at: 1}));
+    await mkdir(join(dir, 'claude-artifacts', 'PLsEyfjXbDUM1iasW7rjLR'), {recursive: true});
+    await writeFile(join(dir, 'claude-artifacts', 'PLsEyfjXbDUM1iasW7rjLR', '400-light.json'), JSON.stringify({title: 'claude.ai 页面', at: 1}));
+    const titles = await new ArtifactViewer(dir, () => undefined).savedTitles([
+      'https://claude.ai/artifact/FR2QT5upk4yhRE2SLNe2oM', 'https://claude.ai/artifact/PLsEyfjXbDUM1iasW7rjLR', 'https://claude.ai/artifact/S4skLPbN9WeoFmuiTfaEFy', 'not a link']);
+    assert.deepEqual([...titles], [['https://claude.ai/artifact/FR2QT5upk4yhRE2SLNe2oM', '持仓决策看板']]);
+  } finally {await removeTestTemp(dir);}
 });

@@ -3,12 +3,12 @@ import {createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-import {BridgeError, MAX_FRAME, textRequired, type Json} from '../shared/types.js';
+import {BridgeError, MAX_FRAME, textRequired, type Json, type TurnView} from '../shared/types.js';
 import {checkProjectPath, downloadProjectFile, guestWorkspace, projectDirectory, readProjectFile, workspaceProjects} from './project.js';
 import {validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
 import {ClaudeRuntime, PERMISSION_MODES, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
-import {claudePatches, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
+import {claudeArtifactTitles, claudePatches, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
 
@@ -152,7 +152,8 @@ export class ClaudeCodeBridge {
     const running = live ? live.running : external;
     // Edits keep their diffs only in the raw transcript; read it alongside the SDK's messages.
     const raw = current.exists ? await this.transcript(id).then(path => readFile(path, 'utf8'), () => '') : '';
-    const turns = claudeTurns(messages, running, claudePatches(raw, info?.cwd || live?.cwd || ''));
+    const turns = claudeTurns(messages, running, claudePatches(raw, info?.cwd || live?.cwd || ''), claudeArtifactTitles(raw));
+    await this.nameSavedPages(turns);
     const usage = (messages.findLast(entry => entry.type === 'assistant' && (entry.message as Json | undefined)?.usage)?.message as Json | undefined)?.usage;
     const usedTokens = usage ? ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens'].reduce((sum, key) => sum + (Number(usage[key]) || 0), 0) : 0;
     const contextUsage = usedTokens ? {usedTokens, windowTokens: live ? await this.runtime.contextWindow(live) : null} : null;
@@ -172,6 +173,14 @@ export class ClaudeCodeBridge {
       turns: recent.reverse(), truncated: recent.length < turns.length, contextUsage,
       notice: external ? '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。' : '',
     };
+  }
+
+  /** Pages the transcript leaves unnamed take the name of a snapshot already saved on this computer. */
+  private async nameSavedPages(turns: TurnView[]) {
+    const unnamed = turns.flatMap(turn => turn.pages || []).filter(page => !page.title);
+    if (!unnamed.length || !this.artifacts) return;
+    const titles = await this.artifacts.savedTitles(unnamed.map(page => page.url)).catch(() => new Map<string, string>());
+    for (const page of unnamed) page.title = titles.get(page.url) || '';
   }
 
   /** The folder's directory under ~/.claude/projects (its memory lives there): where its sessions are, or Claude Code's key for it. */

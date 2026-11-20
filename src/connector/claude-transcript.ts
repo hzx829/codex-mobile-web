@@ -109,12 +109,36 @@ export function claudePatches(transcript: string, cwd = ''): Map<string, string>
 }
 const MAX_TURN_DIFF = 600_000;
 
-export function claudeTurns(messages: ClaudeMessage[], running = false, patches?: Map<string, string>): TurnView[] {
+/**
+ * Artifact names, by page URL, from every Artifact call in the raw transcript. The SDK's messages follow only the
+ * current branch, so the call that created a page and named it (`title`) can be missing from them.
+ */
+export function claudeArtifactTitles(transcript: string): Map<string, string> {
+  const calls = new Map<string, Record<string, unknown>>(), titles = new Map<string, string>();
+  for (const line of transcript.split('\n')) {
+    if (!line.includes('claude.ai/artifact/')) continue;
+    let entry: any;
+    try {entry = JSON.parse(line);} catch {continue;}
+    for (const block of blocks(entry?.message)) {
+      if (block.type === 'tool_use' && block.name === 'Artifact' && block.id && str(block.input?.title).trim()) calls.set(block.id, block.input!);
+      if (block.type !== 'tool_result' || !block.tool_use_id || block.is_error) continue;
+      const input = calls.get(block.tool_use_id);
+      if (!input) continue;
+      const typeUrl = str(input.type_url);
+      const url = artifactUrl(str(input.url)) || [...resultText(block.content).matchAll(ARTIFACT_URL)].map(match => match[0]).find(found => found !== typeUrl);
+      if (url) titles.set(url, str(input.title).trim().slice(0, 200));
+    }
+  }
+  return titles;
+}
+
+/** `titles`: names known from elsewhere (the raw transcript, a saved snapshot), used where the messages give none. */
+export function claudeTurns(messages: ClaudeMessage[], running = false, patches?: Map<string, string>, titles?: Map<string, string>): TurnView[] {
   const turns: TurnView[] = [];
   const tools = new Map<string, MessageItem>();
   // claude.ai Artifacts a turn created or changed, shown under the turn like Codex's file-change card.
   const pageCalls = new Map<string, {turn: TurnView; input: Record<string, unknown>}>();
-  const pageTitles = new Map<string, string>();
+  const pageTitles = new Map<string, string>(titles);
   const toolTurns = new Map<string, TurnView>();
   let turn: TurnView | undefined;
   const current = (id: string) => {
@@ -130,6 +154,18 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
   for (const item of turns) item.canFork = Boolean(item.anchor) && item.status !== 'inProgress';
   const last = turns.at(-1);
   if (last && running && last.status === 'completed') {last.status = 'inProgress';last.canFork = false;}
+  // A page named after it first appeared takes that name everywhere.
+  for (const item of turns) for (const page of item.pages || []) page.title = pageTitles.get(page.url) || page.title;
+  // Pages published in earlier turns are repeated on the newest one, latest first, so the session's pages stay in reach.
+  if (last) {
+    const shown = new Set((last.pages || []).map(page => page.url)), earlier: {url: string; title: string; earlier: true}[] = [];
+    for (const item of turns.slice(0, -1).reverse()) for (const page of item.pages || []) {
+      if (shown.has(page.url)) continue;
+      shown.add(page.url);
+      earlier.push({url: page.url, title: page.title, earlier: true});
+    }
+    if (earlier.length) last.pages = [...(last.pages || []), ...earlier];
+  }
   return turns;
 
   function addPage(turn: TurnView, input: Record<string, unknown>, result: string) {
