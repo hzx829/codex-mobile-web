@@ -6,7 +6,7 @@
 
 手机只在各应用首页显示 **Codex / ChatGPT / Antigravity** 三个按钮，切换保留当前电脑，并在当前浏览器标签页按电脑恢复各应用上次打开的会话。旧版 ChatGPT 导航状态继续有效。更新时需同时使用新网页和新连接器，Antigravity 使用现有中继及 Token。
 
-当前实现从桌面 SQLite 摘要索引列出已有对话，从 `brain/<会话 ID>/.system_generated/logs/transcript.jsonl` 读取已记录的文字和工具名称。打开的会话用长轮询接收变化；最近 1 MiB 内最多展示 100 项。写入端验证本机 TLS 连接的进程归属后，通过 Hub 提交文字或请求停止此会话当前任务。遇到不确定的回执可回查，不自动重发。安装路径当前按 Windows 默认用户安装位置验证。以下的原生进度订阅、新建会话及审批属于后续实施项。真机的收发、停止与时延由人按第 4 节验收。[前端切换](../../web/service-switch.tsx) · [连接器](../../src/connector/antigravity.ts)
+当前实现从桌面 SQLite 摘要索引列出已有对话，从 `brain/<会话 ID>/.system_generated/logs/transcript_full.jsonl` 读取已记录的文字和工具名称（`transcript.jsonl` 会把长步骤截成 `<truncated N bytes>`，仅在没有完整日志时使用）。打开的会话用长轮询接收变化；最近 4 MiB 内最多展示 100 项。写入端验证本机 TLS 连接的进程归属后，通过 Hub 提交文字或请求停止此会话当前任务。遇到不确定的回执可回查，不自动重发。安装路径当前按 Windows 默认用户安装位置验证。新建会话先调 `StartCascade`（`workspaceUris`、`source=CASCADE_CLIENT`、`trajectoryType=CASCADE`，并按 `~/.gemini/config/projects/*.json` 的同一文件夹带上 `projectEnvConfig.projectId`，否则桌面不会把它归到项目下），再用同项目最近一条用户消息的 `userConfig` 发送首条消息；首条消息确定失败时删除空会话，回执不明时直接打开新会话供核实。以下的原生进度订阅及审批属于后续实施项。真机的收发、停止与时延由人按第 4 节验收。[前端切换](../../web/service-switch.tsx) · [连接器](../../src/connector/antigravity.ts)
 
 输入框中的模型按钮读取桌面 Hub 的 `GetCascadeModelConfigData`。手机按电脑和会话记住所选档位。发送前再次核对可选列表，并从 `GetTrajectoryTurns` 取原会话最近一条用户消息的配置，替换 `cascadeConfig.plannerConfig.planModel`。选择“沿用对话设置”可清除手机覆盖。连续工具调用复用 Codex 的折叠运行记录，展开可看各次调用；用户消息和助手回复保留在原位置。
 

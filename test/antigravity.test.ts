@@ -166,3 +166,55 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   assert.equal(writes.length,3);
   await assert.rejects(bridge.handle('antigravity.read',{conversationId:'../outside'}),/ID 无效/);
 });
+
+test('Antigravity reads the untruncated transcript and starts new conversations under their desktop project', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'cmw-antigravity-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir,'conversation_summaries.db'));
+  t.after(async()=>{db.close();ledger.close();await rm(dir,{recursive:true,force:true});});
+  const id = randomUUID(), logs = join(dir,'brain',id,'.system_generated','logs'), projects = join(dir,'projects');
+  await mkdir(logs,{recursive:true});await mkdir(projects);
+  const line = (step:object) => JSON.stringify(step)+'\n', long = '长'.repeat(5000);
+  await writeFile(join(logs,'transcript.jsonl'),line({type:'PLANNER_RESPONSE',step_index:1,content:'cut <truncated 10482 bytes>',truncated_fields:['content']}));
+  await writeFile(join(logs,'transcript_full.jsonl'),line({type:'PLANNER_RESPONSE',step_index:1,content:long}));
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const project = pathToFileURL(dir).href, insert = db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)');
+  const other = randomUUID();
+  insert.run(other,'Elsewhere','CASCADE_RUN_STATUS_IDLE','2026-11-19T00:00:00.000Z',2,0,'t',0,JSON.stringify(['file:///elsewhere']));
+  insert.run(id,'Here','CASCADE_RUN_STATUS_IDLE','2026-11-18T00:00:00.000Z',2,-1,'t',0,JSON.stringify([project]));
+  await writeFile(join(projects,'p.json'),JSON.stringify({id:'project-1',name:'工作区',projectResources:{resources:[{gitFolder:{folderUri:project+'/'}}]}}));
+  const config = {plannerConfig:{planModel:'MODEL_A',modelName:'old',tools:['read_file']}};
+  const created = randomUUID(), writes:{method:string;body:any}[] = [];
+  let failSend:BridgeError|null = null;
+  const bridge = new AntigravityBridge(dir,ledger,async (_dir,method,body)=>{
+    if(method==='GetCascadeModelConfigData')return {clientModelConfigs:[{label:'B',modelOrAlias:{model:'MODEL_B'}}]};
+    if(method==='GetTrajectoryTurns'){
+      // The conversation in the same project is preferred, and its user step of -1 is read as the first step.
+      assert.deepEqual(body,{cascadeId:id,stepIndices:[0]});
+      return {turns:[{firstStep:{userInput:{userConfig:config}}}]};
+    }
+    writes.push({method,body});
+    if(method==='StartCascade')return {cascadeId:created};
+    if(method==='SendUserCascadeMessage'&&failSend)throw failSend;
+    return {};
+  },projects);
+  const view = await bridge.handle('antigravity.read',{conversationId:id});
+  assert.deepEqual(view.messages,[{id:'1',role:'assistant',text:long}]);
+  assert.deepEqual((await bridge.handle('antigravity.list',{})).projects.find((item:{id:string})=>item.id===project),{id:project,path:dir,name:'工作区'});
+  assert.deepEqual(await bridge.handle('antigravity.models',{project}),{models:[{id:'MODEL_B',label:'B'}],current:'MODEL_A'});
+  const makeOp = () => `${Date.now()}:${randomUUID()}`, op = makeOp();
+  const result = await bridge.handle('antigravity.create',{project,text:'开始',opId:op,model:'MODEL_B'});
+  assert.deepEqual(result,{state:'accepted',conversationId:created,submitted:true});
+  assert.deepEqual(writes,[
+    {method:'StartCascade',body:{workspaceUris:[project],source:'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',trajectoryType:'CORTEX_TRAJECTORY_TYPE_CASCADE',projectEnvConfig:{projectId:'project-1'}}},
+    {method:'SendUserCascadeMessage',body:{cascadeId:created,items:[{text:'开始'}],clientMessageId:op.split(':')[1],cascadeConfig:{plannerConfig:{planModel:'MODEL_B',tools:['read_file']}}}},
+  ]);
+  assert.equal((await bridge.handle('antigravity.create',{project,text:'开始',opId:op,model:'MODEL_B'})).conversationId,created);
+  assert.equal(writes.length,2,'a repeated operation is not sent again');
+  failSend = new BridgeError('unavailable','down');
+  assert.equal((await bridge.handle('antigravity.create',{project,text:'again',opId:makeOp()})).state,'failed');
+  assert.deepEqual(writes.at(-1),{method:'DeleteCascadeTrajectory',body:{cascadeId:created}},'an empty conversation is removed when its message certainly failed');
+  failSend = new BridgeError('uncertain','lost',true);
+  assert.deepEqual(await bridge.handle('antigravity.create',{project,text:'again',opId:makeOp()}),{state:'accepted',conversationId:created,submitted:false,uncertain:true});
+  assert.notEqual(writes.at(-1)!.method,'DeleteCascadeTrajectory');
+  await assert.rejects(bridge.handle('antigravity.create',{project:'https://example.com/x',text:'x',opId:makeOp()}),/这台电脑上的项目/);
+});

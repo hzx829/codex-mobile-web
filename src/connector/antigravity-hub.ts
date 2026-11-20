@@ -8,7 +8,7 @@ import {BridgeError, type Json} from '../shared/types.js';
 
 const exec = promisify(execFile);
 type Endpoint = {pid: number; httpsPort: number; csrfToken: string};
-export type HubMethod = 'SendUserCascadeMessage' | 'CancelCascadeInvocation' | 'GetCascadeModelConfigData' | 'GetTrajectoryTurns';
+export type HubMethod = 'StartCascade' | 'SendUserCascadeMessage' | 'CancelCascadeInvocation' | 'DeleteCascadeTrajectory' | 'GetCascadeModelConfigData' | 'GetTrajectoryTurns';
 
 async function desktopEndpoint(dir: string): Promise<Endpoint> {
   const records = new Map<string, Endpoint>();

@@ -554,7 +554,8 @@ function App(){
   if(service==='antigravity'||service==='claude'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
     const open=(next:string)=>{setClaudeNewCwd(null);if(next!==id){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
-    const creatingClaude=service==='claude'&&!id&&claudeNewCwd!==null;
+    const creatingClaude=service==='claude'&&!id&&claudeNewCwd!==null,creatingAntigravity=service==='antigravity'&&!id&&claudeNewCwd!==null;
+    const created=(next:string)=>{setClaudeNewCwd(null);refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);};
     const forked=(next:string)=>{refreshRemoteList(value=>value+1);open(next);};
     async function claudeChange(action:RequestAction,payload:Json){
       const result=await call(action,{...payload,opId:operationId()});
@@ -566,22 +567,22 @@ function App(){
       archive:async()=>{await claudeChange('claude.archive',{conversationId:thread.id});if(thread.id===id)open('');},
       duplicate:async()=>{forked((await claudeChange('claude.fork',{conversationId:thread.id})).conversationId);},
     });
-    return <div className={`shell ${id||creatingClaude?'has-session':''}`}>
+    return <div className={`shell ${id||creatingClaude||creatingAntigravity?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
         listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='claude'&&route.project?
           <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
-        onNew={service==='claude'?project=>setClaudeNewCwd(project):undefined}
+        onNew={project=>setClaudeNewCwd(project)}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
-        machine={machine} guest={guest} newCwd={id?null:claudeNewCwd} created={next=>{setClaudeNewCwd(null);refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);}} forked={forked}
+        machine={machine} guest={guest} newCwd={id?null:claudeNewCwd} created={created} forked={forked}
         showDiff={turn=>{if(turn.diff)showPreview({kind:'diff',threadId:`claude:${id}`,turnId:turn.id,text:turn.diff});}} voiceMode={voiceMode} actions={claudeActions}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
-        id?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
-        machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
+        id||creatingAntigravity?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
+        machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open} newProject={id?null:claudeNewCwd} created={created}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}
       {sheet==='home'&&<SheetPanel title="选项" close={()=>setSheet(null)}>

@@ -65,7 +65,7 @@ if(available.includes('claude')){
 }
 if(!guest){
   const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
-  bridges.push({prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']});
+  bridges.push({prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.create','antigravity.send','antigravity.stop']});
 }
 const useCodex=available.includes('codex');
 const services=new ServiceRouter(bridges,request=>{
