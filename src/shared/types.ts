@@ -7,8 +7,8 @@ export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean
 export type RequestAction = AntigravityAction | ClaudeAction | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[] }
-/** `anchor`: the last transcript entry of the turn, where a Claude Code fork ends. `pages`: claude.ai Artifacts the turn published. */
-export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string; anchor?: string; pages?: {url: string; title: string}[] }
+/** `anchor`: the last transcript entry of the turn, where a Claude Code fork ends. `pages`: claude.ai Artifacts the turn published; on the newest turn also those of earlier turns (`earlier`). */
+export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string; anchor?: string; pages?: {url: string; title: string; earlier?: boolean}[] }
 export interface TurnCursor { before: string; native?: string }
 export const turnFinished=(status:unknown)=>status==='completed'||status==='interrupted'||status==='failed';
 export interface ContextUsage { usedTokens: number; windowTokens: number | null }
