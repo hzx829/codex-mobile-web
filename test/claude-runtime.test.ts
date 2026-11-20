@@ -9,6 +9,9 @@ import {ClaudeCodeBridge} from '../src/connector/claude-code.js';
 import {ClaudeRuntime, claudeEnv, findClaude, userMessage, type QueryFn} from '../src/connector/claude-runtime.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
+import {readFile} from 'node:fs/promises';
+import {uploadAttachments} from '../web/file-upload.js';
+import {fileReference} from '../web/preview-target.js';
 
 const opId = () => `${Date.now()}:${randomUUID()}`;
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -203,4 +206,45 @@ test('Claude Code executable and messages', () => {
   const message = userMessage('看图', ['data:image/png;base64,AAAA'], 'later');
   assert.deepEqual(message.message.content, [{type: 'image', source: {type: 'base64', media_type: 'image/png', data: 'AAAA'}}, {type: 'text', text: '看图'}]);
   assert.equal(message.priority, 'later');assert.deepEqual(message.origin, {kind: 'human'});
+});
+
+test('documents upload into the project and reach Claude Code as links, only in the scope they were uploaded for', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-files-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const config = join(root, 'config'), cwd = join(root, 'repo');
+    await mkdir(join(config, 'projects', 'work'), {recursive: true});await mkdir(cwd);
+    process.env.CLAUDE_CONFIG_DIR = config;
+    const fake = fakeClaude(join(config, 'projects'));
+    bridge = new ClaudeCodeBridge(ledger, config, undefined, Date.now, new ClaudeRuntime(async () => fake.query, () => undefined, 200));
+    const call = (action: any, payload: any) => bridge!.handle(action, payload);
+    const doc = (text: string) => ({id: randomUUID(), name: '需求.md', size: Buffer.byteLength(text), file: new File([text], '需求.md')});
+    const linked = (text: string) => [...text.matchAll(/\]\(<([^>]+)>\)/g)].map(match => fileReference(match[1]).path);
+    const messages = () => fake.calls.filter(item => item.type === 'message');
+
+    // Before the session exists the files belong to its project; with files the typed text may be empty.
+    const first = await uploadAttachments(call, {prefix: 'claude.', scope: {cwd}}, [doc('第一版')]);
+    const created = await bridge.handle('claude.create', {cwd, text: '', files: first, opId: opId()});
+    assert.equal(created.state, 'accepted', JSON.stringify(created));
+    const id = created.conversationId;
+    await until(() => messages().length, count => count === 1);
+    assert.equal(await readFile(linked(messages()[0].text)[0], 'utf8'), '第一版');
+    await until(() => bridge!.handle('claude.read', {conversationId: id}), value => !value.running);
+
+    const elsewhere = await bridge.handle('claude.send', {conversationId: id, text: '再看', files: first, opId: opId()});
+    assert.equal(elsewhere.state, 'failed');assert.match(elsewhere.error.message, /当前会话/);
+    const own = await uploadAttachments(call, {prefix: 'claude.', scope: {conversationId: id}}, [doc('第二版')]);
+    assert.equal((await bridge.handle('claude.send', {conversationId: id, text: '再看', files: own, opId: opId()})).state, 'accepted');
+    await until(() => messages().length, count => count === 2);
+    assert.match(messages()[1].text, /^再看\n\n附件/);
+    assert.equal(await readFile(linked(messages()[1].text)[0], 'utf8'), '第二版');
+    await until(() => bridge!.handle('claude.read', {conversationId: id}), value => !value.running);
+  } finally {
+    bridge?.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    ledger.close();
+    await removeTestTemp(root);
+  }
 });

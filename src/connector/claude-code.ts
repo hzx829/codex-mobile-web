@@ -7,6 +7,8 @@ import {BridgeError, MAX_FRAME, textRequired, type Json, type TurnView} from '..
 import {checkProjectPath, downloadProjectFile, guestWorkspace, projectDirectory, readProjectFile, workspaceProjects} from './project.js';
 import {imageBytes, validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
+import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
+import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
 import {ClaudeRuntime, PERMISSION_MODES, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
 import {claudeArtifactTitles, claudePatches, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
@@ -54,12 +56,14 @@ function permissionMode(value: unknown): PermissionMode | undefined {
 }
 const optionalModel = (value: unknown) => value === undefined || value === null || value === '' ? undefined : textRequired(value, '模型', 200);
 function message(p: Json) {
-  const images = p.images === undefined ? [] : validateImages(p.images);
+  const images = p.images === undefined ? [] : validateImages(p.images), files = requestFiles(p.files);
   const text = typeof p.text === 'string' ? p.text.trim() : '';
   if (text.length > 100_000 || text.includes('\0')) throw new BridgeError('invalid', '消息过长或包含无效字符');
-  if (!text && !images.length) throw new BridgeError('invalid', '请输入消息或添加图片');
-  return {text, images};
+  if (!text && !images.length && !files.length) throw new BridgeError('invalid', '请输入消息或添加附件');
+  if (images.length + files.length > MAX_ATTACHMENTS) throw new BridgeError('invalid', `图片和文件合计最多添加 ${MAX_ATTACHMENTS} 个`);
+  return {text, images, files};
 }
+const newScope = (cwd: string) => `claude-new:${cwd}`, sessionScope = (id: string) => `claude:${id}`;
 /** Ledger payloads keep the request identity, not the image bytes. */
 const fingerprint = (images: string[]) => images.map(url => createHash('sha256').update(url).digest('hex'));
 
@@ -255,6 +259,12 @@ export class ClaudeCodeBridge {
     if (!this.ledger) throw new BridgeError('unavailable', '连接器未启用操作记录');
     return this.ledger.run(textRequired(p.opId, '操作标识', 100), payload, run);
   }
+  /** The message text Claude receives: with links to the files uploaded into the project. */
+  private async attach(scope: string, text: string, files: FileAttachment[]) {
+    if (!files.length) return text;
+    if (!this.ledger) throw new BridgeError('unavailable', '连接器未启用操作记录');
+    return withAttachmentLinks(this.ledger, scope, text, files);
+  }
 
   async handle(action: string, p: Json): Promise<Json> {
     if (action === 'claude.list') {
@@ -300,11 +310,25 @@ export class ClaudeCodeBridge {
     if (action === 'claude.create') {
       const cwd = await projectDirectory(textRequired(p.cwd, '项目目录', 4096));
       const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode);
-      return this.mutate(p, {action, cwd, text: input.text, images: fingerprint(input.images), model, mode}, async () => {
+      const files = input.files.length ? {files: attachmentIds(input.files)} : {};
+      return this.mutate(p, {action, cwd, text: input.text, images: fingerprint(input.images), ...files, model, mode}, async () => {
+        const text = await this.attach(newScope(cwd), input.text, input.files);
         const session = await this.runtime.start({cwd, model, permissionMode: mode});
-        this.runtime.send(session, input.text, input.images);
+        this.runtime.send(session, text, input.images);
         return {conversationId: await this.runtime.waitForId(session)};
       });
+    }
+    if (action === 'claude.file.uploadStart' || action === 'claude.file.uploadChunk') {
+      if (!this.ledger) throw new BridgeError('unavailable', '连接器未启用操作记录');
+      const stage = action === 'claude.file.uploadChunk' ? 'chunk' : 'start';
+      // Before a conversation exists, its files belong to the project it will start in.
+      if (p.conversationId === undefined) {
+        const cwd = await projectDirectory(textRequired(p.cwd, '项目目录', 4096));
+        return scopedUpload(this.ledger, stage, newScope(cwd), async () => cwd, p);
+      }
+      const id = textRequired(p.conversationId, '会话', 36);
+      if (!sessionId.test(id)) throw new BridgeError('invalid', 'Claude Code 会话 ID 无效');
+      return scopedUpload(this.ledger, stage, sessionScope(id), async () => projectDirectory((await this.info(id)).cwd || ''), p);
     }
     const id = textRequired(p.conversationId, '会话', 36);
     if (!sessionId.test(id)) throw new BridgeError('invalid', 'Claude Code 会话 ID 无效');
@@ -319,15 +343,17 @@ export class ClaudeCodeBridge {
     }
     if (action === 'claude.send') {
       const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode), delivery = sendMode(p.mode);
-      return this.mutate(p, {action, id, text: input.text, images: fingerprint(input.images), model, mode, delivery, confirmIdle: p.confirmIdle === true}, async () => {
+      const files = input.files.length ? {files: attachmentIds(input.files)} : {};
+      return this.mutate(p, {action, id, text: input.text, images: fingerprint(input.images), ...files, model, mode, delivery, confirmIdle: p.confirmIdle === true}, async () => {
         if (this.sending.has(id)) throw new BridgeError('busy', '这条会话已有一条消息正在提交，请稍后再试');
         this.sending.add(id);
         try {
+          const text = await this.attach(sessionScope(id), input.text, input.files);
           let session = this.runtime.get(id);
           // Behind a running turn, or behind messages already waiting, a plain send waits its turn on this computer.
           if (delivery === 'queue' && this.queue && (session?.running || session?.requests.size || this.queue.queued(id).length)) {
             await this.info(id);
-            this.queue.enqueue(textRequired(p.opId, '操作标识', 100), id, {text: input.text, images: input.images, model, permissionMode: mode});
+            this.queue.enqueue(textRequired(p.opId, '操作标识', 100), id, {text, images: input.images, model, permissionMode: mode});
             this.queueChanged(id);
             return {conversationId: id, kind: 'queued'};
           }
@@ -342,7 +368,7 @@ export class ClaudeCodeBridge {
             await this.runtime.configure(session, model, mode);
           }
           const running = session.running;
-          this.runtime.send(session, input.text, input.images, delivery === 'steer' ? 'next' : delivery === 'now' ? 'now' : undefined);
+          this.runtime.send(session, text, input.images, delivery === 'steer' ? 'next' : delivery === 'now' ? 'now' : undefined);
           return {submitted: true, kind: running ? delivery === 'now' ? 'sent_now' : 'steer_accepted' : 'turn_accepted'};
         } finally {this.sending.delete(id);}
       });

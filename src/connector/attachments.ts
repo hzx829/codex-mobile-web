@@ -1,7 +1,7 @@
 import {mkdir,realpath,open} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {BridgeError} from '../shared/types.js';
-import {fileAttachment,UPLOAD_CHUNK_BYTES,type FileAttachment} from '../shared/attachments.js';
+import {fileAttachment,uploadId,MAX_ATTACHMENTS,UPLOAD_CHUNK_BYTES,type FileAttachment} from '../shared/attachments.js';
 import {assertInsideWorkspace, checkProjectPath, projectDirectory} from './project.js';
 import type {Ledger,UploadRecord} from './ledger.js';
 
@@ -66,6 +66,34 @@ export async function appendUpload(ledger:Ledger,threadId:string,id:string,offse
     while(written<bytes.length){const result=await handle.write(bytes,written,bytes.length-written,start+written);if(!result.bytesWritten)throw new BridgeError('upload_failed','附件写入失败，请重试');written+=result.bytesWritten;}
     return {id,offset:Math.max(size,end)};
   }finally{await handle.close();}
+}
+const uploading=new Map<string,Promise<unknown>>();
+/** Runs the steps of one upload in order: a retried chunk may arrive while the previous copy is still being written. */
+function uploadStep<T>(id:string,run:()=>Promise<T>):Promise<T> {
+  const next=(uploading.get(id)??Promise.resolve()).catch(()=>{}).then(run),settled=next.catch(()=>{});
+  uploading.set(id,settled);
+  void settled.then(()=>{if(uploading.get(id)===settled)uploading.delete(id);});
+  return next;
+}
+/**
+ * Upload for Claude Code and Antigravity, stored like Codex's in the project's `.codex-mobile-attachments`.
+ * `scope` names the conversation (or the project a new one starts in); only that scope can attach the file.
+ */
+export function scopedUpload(ledger:Ledger,stage:'start'|'chunk',scope:string,cwd:()=>Promise<string>,p:any) {
+  const id=uploadId(p?.id);
+  return uploadStep(id,async()=>stage==='chunk'?appendUpload(ledger,scope,id,p.offset,p.data):startUpload(ledger,scope,await cwd(),p));
+}
+/** Files as ledger identity: what was attached, not where it is stored. */
+export const attachmentIds=(files:FileAttachment[])=>files.map(file=>file.id);
+/** Validated `files` of a request; none when absent. */
+export function requestFiles(value:unknown):FileAttachment[] {
+  if(value===undefined)return [];
+  if(!Array.isArray(value)||value.length>MAX_ATTACHMENTS)throw new BridgeError('invalid',`最多添加 ${MAX_ATTACHMENTS} 个文件`);
+  return value.map(fileAttachment);
+}
+/** The message with links to its uploaded files appended, as Codex receives them. */
+export async function withAttachmentLinks(ledger:Ledger,scope:string,text:string,files:FileAttachment[]) {
+  return [text,await attachmentLinks(ledger,scope,files)].filter(Boolean).join('\n\n');
 }
 export async function attachmentLinks(ledger:Ledger,threadId:string,files:FileAttachment[]):Promise<string> {
   if(!files.length)return '';

@@ -13,7 +13,7 @@ import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 type Peer={role:'phone'|'connector';machine?:Machine;alive:boolean;watch?:{machineId:string;threadId:string}};
 // Text frames compress well; file bytes and preview traffic are already dense or large.
 const COMPRESS_LIMIT=2*1024*1024;
-const DENSE_ACTIONS=new Set(['file.download','file.uploadChunk','voice.transcribe']);
+const DENSE_ACTIONS=new Set(['file.download','file.uploadChunk','claude.file.uploadChunk','antigravity.file.uploadChunk','voice.transcribe']);
 const compress=promisify(gzip);
 export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3341,connectorTokens:ConnectorToken[] = []) {
   if(connectorTokens.some(entry=>entry.token===token))throw new Error('连接器专用 Token 不能与主 Token 相同');
@@ -108,7 +108,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       if(p.role==='phone'&&m.type==='request') {
         if(typeof m.id!=='string'||m.id.length>100||typeof m.action!=='string'||!m.payload||typeof m.payload!=='object'){ws.close(4400);return;}
         if(m.action==='session.read'&&m.payload.watch===true&&!m.payload.cursor&&typeof m.payload.threadId==='string'&&typeof m.machineId==='string')p.watch={machineId:m.machineId,threadId:m.payload.threadId};
-        if(m.action==='voice.transcribe'||m.action==='file.uploadChunk'||(m.action==='turn.send'||m.action==='claude.send'||m.action==='claude.create')&&(m.payload.images?.length||m.payload.files?.length))send(ws,{type:'received',id:m.id});
+        if(m.action==='voice.transcribe'||m.action.endsWith('file.uploadChunk')||(m.action==='turn.send'||m.action==='claude.send'||m.action==='claude.create'||m.action==='antigravity.send'||m.action==='antigravity.create')&&(m.payload.images?.length||m.payload.files?.length))send(ws,{type:'received',id:m.id});
         if(m.action==='preview.start'||m.action==='preview.stop')try{
           m.payload.threadId=textRequired(m.payload.threadId,'会话');
           if(m.action==='preview.stop')m.payload.sessionId=textRequired(m.payload.sessionId,'预览会话');

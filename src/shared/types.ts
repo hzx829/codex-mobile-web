@@ -1,6 +1,6 @@
 export type Json = Record<string, any>;
-export type AntigravityAction = `antigravity.${'list' | 'create' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'operation' | 'file.read' | 'file.download'}`;
-export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation' | 'project.get' | 'project.save' | 'fork' | 'rename' | 'archive' | 'edit' | 'steerQueued' | 'withdrawQueued' | 'cancelQueued' | 'artifact.snapshot' | 'artifact.download' | 'artifact.login'}`;
+export type AntigravityAction = `antigravity.${'list' | 'create' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'operation' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk'}`;
+export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation' | 'project.get' | 'project.save' | 'fork' | 'rename' | 'archive' | 'edit' | 'steerQueued' | 'withdrawQueued' | 'cancelQueued' | 'artifact.snapshot' | 'artifact.download' | 'artifact.login'}`;
 export type AntigravityModel = {id:string; label:string};
 export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; text:string};
 export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'};

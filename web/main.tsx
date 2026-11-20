@@ -1,4 +1,5 @@
 import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,useState,type ReactNode,type ClipboardEvent} from 'react';
+import {useFileDrop} from './file-drop';
 import {createRoot} from 'react-dom/client';
 import {Client,operationId} from './client';
 import {AntigravityPanel} from './antigravity';
@@ -463,6 +464,7 @@ function App(){
     try{const data=pastedImage(e.clipboardData.getData('text/plain'));if(data){e.preventDefault();void attach([],data);}}
     catch(error){e.preventDefault();fail(error);}
   }
+  const fileDrop=useFileDrop(files=>void attach(files),busy||imageLoading);
   function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');const next=id?supportedRoute(serviceHome(service),machines.find(item=>item.id===id)?.services):home;history.replaceState({cmwRoute:next,cmwMachine:id},'',location.pathname);rememberLocation(next,id);setMachine(id);setRoute(next);}
   function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);void clearCache();changeMachine('');}
   async function copyText(text:string){
@@ -583,6 +585,7 @@ function App(){
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         id||creatingAntigravity?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open} newProject={id?null:claudeNewCwd} created={created}
+        showImage={(url,title)=>showPreview({kind:'image',url,title})}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}
       {sheet==='home'&&<SheetPanel title="选项" close={()=>setSheet(null)}>
@@ -634,7 +637,7 @@ function App(){
         {!newChat&&view?.queuedMessages&&<QueuedMessages messages={view.queuedMessages} disabled={!connected||busy||Boolean(pending)} canSteer={canOperate&&Boolean(view.activeTurnId)} withdrawBlocked={imageLoading||voiceBusy}
           attachmentsFull={message=>attachmentCount+message.imageCount+(message.fileNames?.length||0)>MAX_ATTACHMENTS||selectedImageBytes+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
           onSteer={queuedId=>void mutate('turn.steerQueued',{...target(),queuedId})} onWithdraw={queuedId=>void mutate('turn.withdrawQueued',{threadId:selected,queuedId})} onCancel={queuedId=>void mutate('turn.cancelQueued',{threadId:selected,queuedId})}/>}
-        <form className={`composer ${attachmentCount?'with-images':''}`} onSubmit={e=>{e.preventDefault();void submit();}}>
+        <form className={`composer ${attachmentCount?'with-images':''}${fileDrop.dragging?' dragging':''}`} onSubmit={e=>{e.preventDefault();void submit();}} {...fileDrop.handlers}>
           {images.length>0&&<div className="image-strip"><span className="attachment-count" role="status">图片 {images.length}/{MAX_IMAGES}</span><div className="attachment-thumbnails">{images.map((url,i)=><div className="attachment-thumb" key={i}><button type="button" aria-label={`查看第 ${i+1} 张图片，共 ${images.length} 张`} onClick={()=>showPreview({kind:'image',url,title:`待发送图片 ${i+1}/${images.length}`})}><img src={url} alt={`待发送图片 ${i+1}`} decoding="async"/></button><button className="attachment-remove" type="button" disabled={busy||imageLoading} aria-label={`移除第 ${i+1} 张图片`} onClick={()=>setImages(old=>old.filter(value=>value!==url))}><Icon name="close" size={14}/></button></div>)}</div></div>}
           {files.length>0&&<div className="file-attachments">{files.map((file,i)=><div className="file-attachment" key={i}><Icon name="file" size={18}/><span title={file.name}>{file.name}<small>{file.size>=1024*1024?`${(file.size/1024/1024).toFixed(1)} MiB`:`${Math.max(1,Math.ceil(file.size/1024))} KiB`}</small></span><IconButton icon="close" label={`移除 ${file.name}`} disabled={busy||imageLoading} onClick={()=>setFiles(old=>old.filter((_,index)=>index!==i))}/></div>)}</div>}
           {imageLoading&&<span className="attachment-count" role="status">正在处理附件，大图会自动压缩…</span>}
