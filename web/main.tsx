@@ -30,6 +30,7 @@ import {useComposerAttachments} from './composer-attachments';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
 import {MenuItem,SheetPanel} from './sheet';
 import {PermissionButton,PermissionPicker,type PermissionOption} from './permission-picker';
+import {UpdateBanner} from './update-banner';
 import {MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import {MAX_ATTACHMENTS,validateAttachments} from '../src/shared/attachments';
 import {uploadAttachments,type UploadProgress} from './file-upload';
@@ -663,6 +664,7 @@ function App(){
   </div>;
 }
 // The app shell is cached by a service worker for instant reopening; see public/sw.js.
+// UpdateBanner moves an open page to a new release once the worker has it.
 if(import.meta.env.PROD&&'serviceWorker' in navigator)window.addEventListener('load',()=>{navigator.serviceWorker.register('/sw.js').catch(()=>{});});
 // The stored cache is read first (bounded by a short timeout) so the first paint can show it.
-void loadCache().finally(()=>createRoot(document.getElementById('root')!).render(<App/>));
+void loadCache().finally(()=>createRoot(document.getElementById('root')!).render(<><App/><UpdateBanner/></>));

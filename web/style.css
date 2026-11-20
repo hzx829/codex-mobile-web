@@ -277,6 +277,10 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .pending button { font-size: 12px; padding: 6px 12px; border: 1px solid var(--line-strong); background: #fff; border-radius: 999px; }
 .banner { margin: 0 max(20px, calc((100% - 720px)/2)) 6px; background: var(--panel); border-radius: 12px; color: var(--fg-2); font-size: 12.5px; line-height: 1.7; padding: 9px 14px; }
 .banner button { font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; padding: 4px 6px; }
+/* A new release is ready while the page is in use (update-banner.tsx). */
+.update-banner { position: fixed; z-index: 30; top: max(10px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; max-width: calc(100% - 32px); padding: 4px 4px 4px 16px; border-radius: 999px; background: var(--fg); color: #fff; font-size: 13.5px; white-space: nowrap; box-shadow: 0 4px 16px #00000029; animation: fade-in .15s ease; }
+.update-banner > button:not(.icon-button) { margin-left: 8px; padding: 5px 14px; border-radius: 999px; background: #fff; color: var(--fg); font-size: 13px; font-weight: 500; }
+.update-banner .icon-button { width: 30px; min-width: 30px; height: 30px; padding: 6px; border-radius: 50%; color: #ffffffb3; }
 .request-stack { max-height: 28dvh; min-height: 0; overflow: auto; }
 .request { border: 1px solid var(--line-strong); background: #fff; border-radius: 18px; padding: 14px 16px; margin-bottom: 10px; font-size: 13px; box-shadow: 0 4px 18px #0000000a; }
 .request strong { font-size: 14px; font-weight: 600; display: block; margin-bottom: 8px; }

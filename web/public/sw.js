@@ -1,6 +1,8 @@
 // App shell cache: the page and its versioned static files, never conversations or requests.
 // The cached page opens at once; a fresh copy is fetched in the background and only
 // replaces it once every file it references is cached, so the shell stays consistent.
+// Open pages are then told which files the cached page uses, so an outdated page can
+// reload into it (web/app-update.ts) instead of waiting for the next time it is opened.
 const CACHE='cmw-shell-v1';
 const SHELL='/';
 const MANIFEST='/__shell-assets';
@@ -12,7 +14,12 @@ self.addEventListener('activate',event=>{
   event.waitUntil((async()=>{
     for(const key of await caches.keys())if(key!==CACHE)await caches.delete(key);
     await self.clients.claim();
+    await announce();
   })());
+});
+// Pages ask after opening and whenever they come back to the screen.
+self.addEventListener('message',event=>{
+  if(event.data?.type==='check')event.waitUntil(refresh().then(announce));
 });
 
 async function readManifest(cache){
@@ -54,11 +61,20 @@ async function refreshShell(){
     if(path.startsWith('/assets/')&&!keep.has(path))await cache.delete(request);
   }
 }
-function backgroundRefresh(event){
-  if(refreshing||Date.now()-checked<30_000)return;
-  checked=Date.now();
-  refreshing=refreshShell().catch(()=>{}).finally(()=>{refreshing=null;});
-  event.waitUntil(refreshing);
+/** Refreshes at most every 30 s; a caller during a refresh waits for it. Never rejects. */
+function refresh(){
+  if(!refreshing&&Date.now()-checked>=30_000){
+    checked=Date.now();
+    refreshing=refreshShell().catch(()=>{}).finally(()=>{refreshing=null;});
+  }
+  return refreshing||Promise.resolve();
+}
+/** Tells every open page which files the cached page uses. */
+async function announce(){
+  try{
+    const {current}=await readManifest(await caches.open(CACHE));
+    for(const client of await self.clients.matchAll({type:'window'}))client.postMessage({type:'shell',current});
+  }catch{}
 }
 
 self.addEventListener('fetch',event=>{
@@ -69,9 +85,9 @@ self.addEventListener('fetch',event=>{
   if(request.mode==='navigate'&&url.pathname===SHELL){
     event.respondWith((async()=>{
       const cached=await caches.match(SHELL);
-      if(cached){backgroundRefresh(event);return cached;}
+      if(cached){event.waitUntil(refresh().then(announce));return cached;}
       const response=await fetch(request);
-      backgroundRefresh(event);
+      event.waitUntil(refresh().then(announce));
       return response;
     })());
     return;
