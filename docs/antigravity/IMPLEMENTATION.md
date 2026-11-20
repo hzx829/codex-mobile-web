@@ -12,6 +12,8 @@
 
 回复使用 Codex 的 Markdown 排版。点击 `file:///` 链接时，手机向当前电脑和 Antigravity 会话请求文件。相对路径按会话唯一工作区解析。PDF 使用同一阅读器，PPTX 可保存到设备。HTML 在中继独立预览端口运行，连接器按需提供选中的页面及其目录下的图片、样式、字体和脚本。手机可直接打开带相对图片的演示文稿。人工验收可在同一条会话中分别点 PDF 和 HTML，检查 PDF 页码、演示图片与翻页，再返回列表切换应用。
 
+手机端还不能新建、改名或删除 Antigravity 项目。桌面 Hub 有对应接口（`CreateProject`、`UpdateProject`、`DeleteProject` 等），已实测参数和行为；其中删除项目会连带删除项目里的对话。见 [项目接口实测](PROJECT-API.md)。
+
 ## 1 · 先接上一条原生对话
 
 从 `%LOCALAPPDATA%\Programs\antigravity\resources\bin\language_server.exe` 和桌面 App 建立版本基线。本次静态核对的 `language_server.exe` SHA-256 以 `65CDB8D132FC6105` 开头。安装包内 `third_party/jetski/language_server_pb/language_server.proto`、`cortex_pb/cortex.proto`、`reactive_component_pb/reactive_component.proto` 的嵌入描述符可用于复核服务、请求字段、响应及流方向；记录结果时只需版本、方法与字段，不需要真实对话内容。
