@@ -1,0 +1,73 @@
+import {useEffect,useRef,useState,type ReactNode} from 'react';
+import {ChatSearch,HomeHeader,workspaceName} from './chat-layout';
+import {Icon} from './icons';
+import {IconButton} from './icon-button';
+import {relativeTime,ThreadRow} from './thread-menu';
+import {SessionListLoader} from './session-list-loader';
+import {useStableEvent} from './use-event';
+import type {Json,RequestAction} from '../src/shared/types';
+
+type Project={id:string;path:string;name?:string};
+type Thread={id:string;title:string;updatedAt:number;running:boolean};
+type Page={data:Thread[];hasMore:boolean;projects?:Project[];notice?:string};
+type Props={
+  /** List action and wording of the app this sidebar shows; defaults to Antigravity. */
+  listAction?:RequestAction;appName?:string;
+  /** Starts a new conversation in the shown project (its list id); omitted for apps that cannot create one. */
+  onNew?:(project:string)=>void;
+  selected:string;project:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;switcher:ReactNode;action?:ReactNode;
+  call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseProject:(id:string)=>void;chooseComputer:()=>void;more:()=>void;
+};
+export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',onNew,selected,project,machineName,connected,relayOnline,inert,revision,switcher,action,call,open,chooseProject,chooseComputer,more}:Props){
+  const [search,setSearch]=useState(''),[query,setQuery]=useState(''),[projects,setProjects]=useState<Project[]>([]);
+  const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean}|null>(null);
+  const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
+  const loader=useRef(new SessionListLoader());
+  const key=JSON.stringify([project,query]),current=page?.key===key?page:null;
+  const items=current?.items||[];
+  const visible=query?items.filter(item=>item.title.toLowerCase().includes(query.toLowerCase())):items;
+  const load=useStableEvent((more=false)=>{
+    if(!connected)return;
+    const offset=more?current?.offset||0:0;
+    void loader.current.load(key,():Promise<Page>=>call(listAction,{project,search:query,offset}),{
+      start:()=>{setBusy(true);setError('');setNotice('');},
+      result:result=>{
+        if(result.projects)setProjects(result.projects);
+        setNotice(result.notice||'');
+        setPage({key,items:offset?[...new Map([...items,...result.data].map(item=>[item.id,item])).values()]:result.data,
+          offset:offset+result.data.length,hasMore:result.hasMore});
+      },
+      error:failure=>setError((failure as {message?:string})?.message||'读取会话失败'),
+      finish:()=>setBusy(false),
+    });
+  });
+  useEffect(()=>{const timer=setTimeout(()=>setQuery(search.trim()),250);return()=>clearTimeout(timer);},[search]);
+  useEffect(()=>{
+    if(connected)load();else setBusy(false);
+    const activeLoader=loader.current;
+    return()=>activeLoader.invalidate();
+  },[connected,key,revision,load]);
+  const heading=query?'搜索结果':project?'聊天':'最近';
+  const currentProject=projects.find(item=>item.id===project);
+  const projectLabel=currentProject?.path;
+  return <aside className="home-panel" inert={inert}>
+    <HomeHeader project={project?currentProject?.name||(projectLabel?workspaceName(projectLabel):'项目'):''} machineName={machineName} connected={connected} relayOnline={relayOnline}
+      back={()=>{setSearch('');setQuery('');chooseProject('');}} chooseComputer={chooseComputer} more={more}/>
+    {!project&&!query&&switcher}
+    <div className="home-content">
+      {action}
+      {!project&&!query&&projects.length>0&&<section className="project-section"><h2>项目</h2>{projects.map(item=>
+        <button className="project-row" key={item.id} title={item.path} onClick={()=>chooseProject(item.id)}><Icon name="folder"/><span>{item.name||workspaceName(item.path)}</span></button>)}</section>}
+      <section className="recent-section"><h2>{heading}</h2>
+        <nav aria-label={heading}>{visible.map(item=><ThreadRow key={item.id} thread={{...item,status:item.running?{type:'active'}:undefined}} selected={selected===item.id}
+          time={relativeTime(item.updatedAt)} open={()=>open(item.id)}/>)}</nav>
+        {busy&&!visible.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:
+          !visible.length&&!error&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':query?'没有找到匹配的会话。':`还没有 ${appName} 会话。`}</p>}
+        {error&&<p className="error" role="alert">{error} {connected&&<button type="button" onClick={()=>load()}>重试</button>}</p>}
+        {notice&&<p className="muted">{notice}</p>}
+        {current?.hasMore&&<button className="more-link" disabled={!connected||busy} onClick={()=>load(true)}>{busy?'正在加载…':'加载更多'}</button>}
+      </section>
+    </div>
+    <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/>{onNew&&<IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected} onClick={()=>onNew(project)}/>}</div></div>
+  </aside>;
+}

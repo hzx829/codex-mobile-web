@@ -18,14 +18,14 @@ export function limitLabel(limit:UsageLimit){
 }
 export function ContextIndicator({usage}:{usage:ContextUsage|null|undefined}){
   const used=usage?.windowTokens?100-remainingPercent(usage.usedTokens,usage.windowTokens):null;
-  return <svg className="context-indicator" width="23" height="23" viewBox="0 0 24 24" aria-hidden="true"><circle className="context-track" cx="12" cy="12" r="9" fill="none" strokeWidth="2.5"/>{used!==null?<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2.5" pathLength="100" strokeDasharray={`${used} 100`} transform="rotate(-90 12 12)" strokeLinecap="round"/>:<circle cx="12" cy="12" r="1.5" fill="currentColor"/>}</svg>;
+  return <svg className="context-indicator" width="19" height="19" viewBox="0 0 24 24" aria-hidden="true"><circle className="context-track" cx="12" cy="12" r="9" fill="none" strokeWidth="2.5"/>{used!==null?<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2.5" pathLength="100" strokeDasharray={`${used} 100`} transform="rotate(-90 12 12)" strokeLinecap="round"/>:<circle cx="12" cy="12" r="1.5" fill="currentColor"/>}</svg>;
 }
 export function StatusDetails({view,threadId,cwd,connected,status,loading,error,copy}:{view:SessionView|null;threadId:string;cwd:string;connected:boolean;status:ThreadStatus|null;loading:boolean;error:string;copy:()=>void}){
   return <>
     <p className="thread-status-connection">{!connected?'连接已断开':!view?'正在同步会话':view.source==='history'?'历史会话 · 只读':'远程会话已连接'}</p>
     {!connected&&view&&<p className="muted">以下为上次接收的状态。</p>}
     <dl className="thread-status-details">
-      <dt>对话线程<button type="button" className="icon-button" aria-label="复制对话线程 ID" onClick={copy}><Icon name="copy" size={21}/></button></dt>
+      <dt>对话线程<button type="button" className="icon-button" aria-label="复制对话线程 ID" onClick={copy}><Icon name="copy" size={17}/></button></dt>
       <dd><input className="status-thread-id" aria-label="对话线程 ID" readOnly value={threadId} onFocus={e=>e.target.select()}/></dd>
       <dt>目录</dt><dd className="status-directory">{cwd||'暂不可用'}</dd>
       <dt>上下文</dt><dd>{contextSummary(view?.contextUsage)}</dd>

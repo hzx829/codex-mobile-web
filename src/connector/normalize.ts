@@ -41,26 +41,28 @@ export function codexRetryText(message:unknown,info:unknown,active=true) {
   const action=progress||connectionError(info)?'重连':'重试';
   return `Codex ${active?'正在':'曾'}${action}${progress?` ${progress[1]}/${progress[2]}`:''}${active?'…':''}`;
 }
+/** One raw turn as the phone shows it. `index` only names turns that have no ID. */
+export function normalizeTurn(t:Json,index=0):TurnView {
+  const id=t.turnId||t.id;
+  const items:MessageItem[]=[];
+  const rawItems:Json[]=t.items||[];
+  for(const [index,item] of rawItems.entries()) {
+    if(item.type!=='error'){items.push(normalizeItem(item));continue;}
+    if(item.willRetry!==true)continue;
+    const retry={id:item.id,type:'retry',role:'status',text:codexRetryText(item.message,item.errorInfo,t.status==='inProgress'&&index===rawItems.length-1)};
+    if(items.at(-1)?.type==='retry')items[items.length-1]={...retry,id:items.at(-1)!.id};
+    else items.push(retry);
+  }
+  if(t.params?.input?.length&&!items.some(i=>i.role==='user'))items.unshift(normalizeItem({id:id+':input',type:'userMessage',content:t.params.input}));
+  const error=t.error||rawItems.findLast(item=>item.type==='error'&&item.willRetry===false);
+  const errorText=connectionError(error?.codexErrorInfo??error?.errorInfo)?'Codex 的连接中断，本轮未完成。':t.error?.message;
+  return {id:id||`historical-${index}`,status:t.status,items,canFork:Boolean(id)&&turnFinished(t.status),diff:bounded(t.diff)||undefined,error:bounded(errorText)||undefined};
+}
 export function normalizeSession(raw:Json,source:SessionView['source'],requests:Json[],limit=20,before?:string):SessionView {
   const all=source==='desktop'?desktopTurns(raw):raw.turns||[];
   const active=all.filter((t:Json)=>t.status==='inProgress').at(-1);
   const page=turnPage(all,limit,before);
-  const turns:TurnView[]=page.turns.map((t:Json,index:number)=>{
-    const id=t.turnId||t.id;
-    const items:MessageItem[]=[];
-    const rawItems:Json[]=t.items||[];
-    for(const [index,item] of rawItems.entries()) {
-      if(item.type!=='error'){items.push(normalizeItem(item));continue;}
-      if(item.willRetry!==true)continue;
-      const retry={id:item.id,type:'retry',role:'status',text:codexRetryText(item.message,item.errorInfo,t.status==='inProgress'&&index===rawItems.length-1)};
-      if(items.at(-1)?.type==='retry')items[items.length-1]={...retry,id:items.at(-1)!.id};
-      else items.push(retry);
-    }
-    if(t.params?.input?.length&&!items.some(i=>i.role==='user'))items.unshift(normalizeItem({id:id+':input',type:'userMessage',content:t.params.input}));
-    const error=t.error||rawItems.findLast(item=>item.type==='error'&&item.willRetry===false);
-    const errorText=connectionError(error?.codexErrorInfo??error?.errorInfo)?'Codex 的连接中断，本轮未完成。':t.error?.message;
-    return {id:id||`historical-${index}`,status:t.status,items,canFork:Boolean(id)&&turnFinished(t.status),diff:bounded(t.diff)||undefined,error:bounded(errorText)||undefined};
-  });
+  const turns:TurnView[]=page.turns.map(normalizeTurn);
   const runtimeActive=raw.threadRuntimeStatus?.type==='active'||raw.status?.type==='active';
   const unresolvedActive=runtimeActive&&!active||Boolean(active&&!active.turnId&&!active.id);
   return {id:raw.id,sessionId:typeof raw.sessionId==='string'&&raw.sessionId?raw.sessionId:raw.id,title:raw.title||raw.name||raw.preview?.slice(0,80)||'新会话',cwd:raw.cwd||'',model:raw.latestModel||raw.model||'',provider:raw.modelProvider||'',effort:raw.latestReasoningEffort||raw.reasoningEffort||'',approvalPolicy:raw.approvalPolicy||raw.threadSettings?.approvalPolicy||'',source,

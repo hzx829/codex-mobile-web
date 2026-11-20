@@ -4,16 +4,22 @@ import type {Json} from '../src/shared/types';
 import type {ThreadPreference} from './thread-preferences';
 import {Popover,type MenuPoint} from './popover';
 
-export function ThreadRow({thread,selected,disabled,preference={},time,open,menu}:{thread:Json;selected:boolean;disabled:boolean;preference?:ThreadPreference;time:string;open:()=>void;menu:(point:MenuPoint)=>void}){
+export function relativeTime(value:number){
+  if(!value)return '';
+  const minutes=Math.floor(Math.max(0,Date.now()-(value<1e12?value*1000:value))/60_000);
+  return minutes<1?'刚刚':minutes<60?`${minutes}分钟`:minutes<1440?`${Math.floor(minutes/60)}小时`:`${Math.floor(minutes/1440)}天`;
+}
+
+export function ThreadRow({thread,selected,disabled=false,preference={},time,open,menu}:{thread:Json;selected:boolean;disabled?:boolean;preference?:ThreadPreference;time:string;open:()=>void;menu?:(point:MenuPoint)=>void}){
   const timer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),start=useRef<MenuPoint|null>(null),held=useRef(false);
   const cancel=()=>{clearTimeout(timer.current);start.current=null;};
   useEffect(()=>cancel,[]);
-  return <button className={`session-row${selected?' selected':''}${preference.unread?' unread':''}`} disabled={disabled} aria-haspopup="dialog" onClick={()=>{if(!held.current)open();}}
-    onContextMenu={e=>{e.preventDefault();cancel();if(!held.current){held.current=true;menu({x:e.clientX,y:e.clientY});}}}
-    onPointerDown={e=>{held.current=false;cancel();if(e.pointerType==='mouse'||!e.isPrimary)return;const point={x:e.clientX,y:e.clientY};start.current=point;timer.current=setTimeout(()=>{held.current=true;menu(point);},500);}}
+  return <button className={`session-row${selected?' selected':''}${preference.unread?' unread':''}`} disabled={disabled} aria-haspopup={menu?'dialog':undefined} aria-current={selected||undefined} onClick={()=>{if(!held.current)open();}}
+    onContextMenu={menu?e=>{e.preventDefault();cancel();if(!held.current){held.current=true;menu({x:e.clientX,y:e.clientY});}}:undefined}
+    onPointerDown={menu?e=>{held.current=false;cancel();if(e.pointerType==='mouse'||!e.isPrimary)return;const point={x:e.clientX,y:e.clientY};start.current=point;timer.current=setTimeout(()=>{held.current=true;menu(point);},500);}:undefined}
     onPointerMove={e=>{if(start.current&&Math.hypot(e.clientX-start.current.x,e.clientY-start.current.y)>10)cancel();}}
     onPointerUp={cancel} onPointerCancel={cancel} onPointerLeave={cancel}
-    onKeyDown={e=>{if(e.key==='Enter'||e.key===' ')held.current=false;if(e.key==='ContextMenu'||e.key==='F10'&&e.shiftKey){e.preventDefault();const rect=e.currentTarget.getBoundingClientRect();menu({x:rect.left+16,y:rect.bottom});}}}>
+    onKeyDown={menu?e=>{if(e.key==='Enter'||e.key===' ')held.current=false;if(e.key==='ContextMenu'||e.key==='F10'&&e.shiftKey){e.preventDefault();const rect=e.currentTarget.getBoundingClientRect();menu({x:rect.left+16,y:rect.bottom});}}:undefined}>
     <span className="session-name">{thread.status?.type==='active'&&<i className="dot online"/>}{preference.unread&&<i className="dot unread-dot"/>}{thread.title}</span>
     <span className="session-meta">{preference.pinned&&<Icon name="pin" size={14}/>}<time>{time}</time></span>
   </button>;

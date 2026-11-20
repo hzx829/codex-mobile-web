@@ -9,21 +9,29 @@ import { MAX_FRAME, BridgeError, type Json } from '../shared/types.js';
 import { Ledger } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
-import { ChatGPTBridge } from './chatgpt.js';
 import { AntigravityBridge } from './antigravity.js';
+import { ServiceRouter } from './services.js';
+import { ClaudeCodeBridge, sdkQuery } from './claude-code.js';
+import { ClaudeRuntime } from './claude-runtime.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
 if(config.codexHome)process.env.CODEX_HOME=config.codexHome;
 if(config.profile)process.env.CODEX_PROFILE=config.profile;
+if(config.claudeBin)process.env.CLAUDE_CODE_BIN=config.claudeBin;
 mkdirSync(config.dataDir,{recursive:true});
 const ledger=new Ledger(join(config.dataDir,'operations.sqlite'));
 const control=new Control(ledger);
 const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
-const chatgpt=new ChatGPTBridge(config.dataDir,config.chatgptPort||3342);
-await control.start();
+// claudeEntrypoint: optional CLAUDE_CODE_ENTRYPOINT for Claude Code; unset keeps the SDK's 'sdk-ts'. See docs/claude-local/M1-RESULTS.md.
+const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:false));
+const services=new ServiceRouter([
+  {prefix:'claude',handle:(action,payload)=>claudeCode.handle(action,payload),mutations:['claude.create','claude.send','claude.stop','claude.respond','claude.project.save'],
+    prepareReload:()=>{if(claudeCode.busy)throw new BridgeError('active','Claude Code 任务仍在运行，请稍后更新');},close:()=>claudeCode.close()},
+  {prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.send','antigravity.stop']},
+],request=>control.handle(request as any),()=>control.updating);
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
 let proxyBackpressure:NodeJS.Timeout|undefined;
 const dirtyIds=new Set<string|null>();
@@ -46,19 +54,15 @@ function connect() {
   ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname()}));
   ws.on('message',async data=>{
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
-    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;console.log('电脑已连接中继');return;}
+    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');console.log('电脑已连接中继');return;}
     if(!ready)return;
     if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
     if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
     if(m.type!=='request')return;
     try{
-      if(m.action==='runtime.reload')chatgpt.prepareReload();
-      if(control.updating&&(m.action==='antigravity.send'||m.action==='antigravity.stop'))throw new BridgeError('maintenance','连接器正在更新，请稍后重试');
       const result=m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
-        :typeof m.action==='string'&&m.action.startsWith('chatgpt.')?await chatgpt.handle(m.action,m.payload)
-        :typeof m.action==='string'&&m.action.startsWith('antigravity.')?await antigravity.handle(m.action,m.payload)
-        :await control.handle(m as any);
+        :await services.handle({id:String(m.id),action:m.action,payload:m.payload&&typeof m.payload==='object'?m.payload:{}});
       if(socket===ws)send({type:'response',id:m.id,result});
     }
     catch(e){const err=e instanceof BridgeError?e:new BridgeError('computer_error','电脑处理失败，请查看本机状态');if(socket===ws)send({type:'response',id:m.id,error:{code:err.code,message:err.message,uncertain:err.uncertain}});}
@@ -72,9 +76,25 @@ function connect() {
     retry=setTimeout(connect,backoff+Math.random()*500);backoff=Math.min(15_000,backoff*2);
   });
 }
+// Structural changes ask phones to read again; bursts within this window share one notice.
+const CHANGE_DELAY=60;
+// Running-turn content is pushed; frames within this window are merged into one.
+const LIVE_DELAY=40;
+const liveIds=new Set<string>();let liveTimer:NodeJS.Timeout|undefined;
+function scheduleLive(id:string){
+  liveIds.add(id);if(liveTimer)return;
+  liveTimer=setTimeout(()=>{
+    liveTimer=undefined;const ids=[...liveIds];liveIds.clear();
+    for(const threadId of ids){try{const frame=control.liveFrame(threadId);if(frame)send({type:'live',...frame});}catch{}}
+  },LIVE_DELAY);
+}
+control.on('stream',(id:string)=>scheduleLive(id));
 control.on('change',(id:string|null)=>{
+  if(id)scheduleLive(id);
   dirtyIds.add(id);if(dirty)return;
-  dirty=setTimeout(()=>{dirty=undefined;try{for(const threadId of dirtyIds)send({type:'changed',threadId,generation:control.generation});}catch{}dirtyIds.clear();},200);
+  dirty=setTimeout(()=>{dirty=undefined;try{for(const threadId of dirtyIds)send({type:'changed',threadId,generation:control.generation});}catch{}dirtyIds.clear();},CHANGE_DELAY);
 });
 connect();
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);void browserPreview.stop();chatgpt.close();socket?.close();control.close();process.exit(0);});
+// Keep the relay connection independent of Codex startup and recovery.
+void control.start().catch(error=>console.error('Codex 暂不可用，连接器会在后台重试：',error instanceof Error?error.message:error));
+for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();services.close();socket?.close();control.close();process.exit(0);});

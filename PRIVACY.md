@@ -41,7 +41,9 @@ The voice choice is saved as `voice-provider` in browser `localStorage`. Audio s
 | Location | Stored data | Retention |
 | --- | --- | --- |
 | Browser `localStorage` | Token (`connection`), preview URLs per computer/thread (`browser-preview-url:*`; the unused legacy `browser-preview-url` may remain), text drafts (`draft:*`), local pins/sections/unread marks and saved thread titles/paths (`thread-preferences:*`), pending operations (`operation:*`) that may include submitted text | No time-based expiry. Success clears related pending data/drafts where applicable. Disconnect clears the Token, not local thread preferences, drafts or pending records |
-| Browser memory | Loaded conversations, file previews, download chunks and assembled files, preview pages, image and file attachments and UI state | Closing the file panel cancels reception and releases its download URL; no app-managed persistent message-history or download cache. Reload requires reselecting attachments. This does not guarantee secure erasure from browser/OS memory |
+| Browser IndexedDB (`codex-mobile-web`) | Recently opened conversations (up to 10 threads, the latest 20 turns each, message text and activity output without images), recent session lists (titles, paths, update times) and project paths per computer | Shown immediately on reopen and marked as not live until refreshed. Least recently opened threads are dropped first. Disconnect clears it |
+| Browser Cache Storage (`cmw-shell-v1`) | The page and its versioned script and style files, kept by the service worker so the app opens without waiting for the network | Replaced when a newer page is fetched; holds no conversations, requests or Tokens |
+| Browser memory | Loaded conversations, file previews, download chunks and assembled files, preview pages, image and file attachments and UI state | Closing the file panel cancels reception and releases its download URL; no download cache. Reload requires reselecting attachments. This does not guarantee secure erasure from browser/OS memory |
 | Files saved on the phone/device | Files explicitly saved through the browser download link | Managed by the browser/OS; retained until the user deletes them. Disconnecting or clearing bridge storage does not delete saved files |
 | Preview browser cookies | Short-lived session cookie for the preview port and any cookies set by the proxied app | The session cookie stops granting access when the preview ends; the browser may retain cookies until cleared |
 | Connector `.local/config.json` | Relay address, Token, machine identity, selected local paths | Until changed/deleted; the app does not encrypt this file |
@@ -117,7 +119,9 @@ Antigravity 面板沿用共享 Token。中继可读取转发的桌面对话标�
 | 位置 | 保存内容 | 保留方式 |
 | --- | --- | --- |
 | 浏览器 `localStorage` | Token（`connection`）、按电脑/thread 保存的预览地址（`browser-preview-url:*`；可能留有不再读取的旧键 `browser-preview-url`）、文字草稿（`draft:*`）、按电脑保存的置顶/分区/未读标记及会话标题/路径快照（`thread-preferences:*`）、可能含已提交文字的待核实记录（`operation:*`） | 无定时过期；成功后按情况清理对应记录/草稿。“断开连接”清除 Token，不清除本地会话偏好、草稿和待核实记录 |
-| 浏览器内存 | 已加载会话、文件预览、下载分块及组装后的文件、预览网页、图片与文件附件与界面状态 | 关闭文件面板取消接收并释放下载链接；应用没有持久化消息历史或下载缓存，刷新后附件需重选；不保证浏览器/系统内存被安全擦除 |
+| 浏览器 IndexedDB（`codex-mobile-web`） | 最近打开的会话（最多 10 个，每个最近 20 轮，含消息文字和活动输出，不含图片）、按电脑保存的最近会话列表（标题、路径、更新时间）和项目路径 | 重新打开时立即显示，刷新完成前标记为非实时；最久未打开的会话先被淘汰；“断开连接”时清除 |
+| 浏览器 Cache Storage（`cmw-shell-v1`） | 由 service worker 保存的页面及带版本号的脚本和样式，用于不等网络即可打开 | 取得新版页面后替换；不保存会话、请求或 Token |
+| 浏览器内存 | 已加载会话、文件预览、下载分块及组装后的文件、预览网页、图片与文件附件与界面状态 | 关闭文件面板取消接收并释放下载链接；没有下载缓存，刷新后附件需重选；不保证浏览器/系统内存被安全擦除 |
 | 手机/设备上已保存的文件 | 使用者通过浏览器下载链接主动保存的文件 | 由浏览器/系统管理，使用者删除前保留；断开连接或清理中继应用存储不会删除已保存文件 |
 | 预览网页 Cookie | 预览端口的短期会话 Cookie，以及被代理网页自行设置的 Cookie | 预览结束后会话 Cookie 不再授权访问；浏览器可能继续保存 Cookie，需自行清除 |
 | 连接器 `.local/config.json` | 中继地址、Token、电脑标识和选定的本地路径 | 修改/删除前保留，应用不加密此文件 |

@@ -4,12 +4,13 @@ import { AppServer, resolveCodex } from './app-server.js';
 import { resolve } from 'node:path';
 import { Desktop } from './desktop.js';
 import { Ledger } from './ledger.js';
-import { codexRetryText, desktopTurns, normalizeSession, turnPage } from './normalize.js';
+import { codexRetryText, desktopTurns, normalizeSession, normalizeTurn, turnPage } from './normalize.js';
+import { LiveDiff, RuntimeLive, type LiveFrame } from './live.js';
 import { approvalResult } from './approvals.js';
 import { projectDirectory, readProjectFile, downloadProjectFile } from './project.js';
 import { nativeProjects, indexedSessions } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
-import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor } from '../shared/types.js';
+import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor, type TurnView } from '../shared/types.js';
 import {imageBytes} from '../shared/images.js';
 import {validateAttachments,uploadId,fileAttachment} from '../shared/attachments.js';
 import {startUpload,appendUpload,attachmentLinks} from './attachments.js';
@@ -20,6 +21,34 @@ import {fastTier} from '../shared/models.js';
 import {transcribeVoice} from './voice.js';
 import {sessionSnapshot} from './session-snapshot.js';
 
+/** A phone keeps a thread watched by reading it; the poll renews well within this. */
+const WATCH_MS=30_000;
+
+/** Where the running turn of a desktop state lives, so patches can be attributed to it. */
+function liveLocation(state:Json):{key:string;turn:Json;path:(string|number)[];container:string[]}|null {
+  const history=state?.turnHistory?.history;
+  if(state?.turnHistory?.kind==='canonical'&&history?.entitiesByKey) {
+    const keys:string[]=history.islands?.flatMap((island:Json)=>island.entries?.map((e:Json)=>e.value||e.key)||[])||[];
+    const key=keys.at(-1),turn=key?history.entitiesByKey[key]:undefined;
+    return key&&turn?{key,turn,path:['turnHistory','history','entitiesByKey',key],container:['turnHistory']}:null;
+  }
+  const turns=state?.turns;if(!Array.isArray(turns)||!turns.length)return null;
+  const turn=turns.at(-1);
+  return {key:String(turn?.turnId||turn?.id||''),turn,path:['turns',turns.length-1],container:['turns']};
+}
+const startsWith=(path:unknown,prefix:(string|number)[])=>Array.isArray(path)&&path.length>=prefix.length&&prefix.every((key,index)=>path[index]===key);
+/** Everything the phone shows about a desktop thread except the running turn's items. States are never mutated, so this is cached per state. */
+const metas=new WeakMap<object,string>();
+function desktopMeta(state:Json){
+  let meta=metas.get(state);
+  if(meta===undefined){
+    const view=normalizeSession(state,'desktop',state.requests||[],1);
+    meta=JSON.stringify({...view,turns:view.turns.map(turn=>[turn.id,turn.status,turn.error,turn.items.map(item=>item.id)])});
+    metas.set(state,meta);
+  }
+  return meta;
+}
+
 function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   if(value===undefined||value===null||value==='')return undefined;
   if(value==='on-request'||value==='never')return value;
@@ -29,6 +58,8 @@ function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
 export class Control extends EventEmitter {
   bundleHash='';
   generation=randomUUID();
+  /** Whether the relay forwards live frames; an older relay only forwards change notices. */
+  livePush=true;
   private loaded=new Set<string>();
   private settings=new Map<string,Json>();
   private diffs=new Map<string,string>();
@@ -36,16 +67,22 @@ export class Control extends EventEmitter {
   private retries=new Map<string,{turnId:string;text:string}>();
   private contexts=new Map<string,ContextUsage|null>();
   private locks=new Map<string,Promise<unknown>>();
+  private live=new RuntimeLive();
+  private liveDiff=new LiveDiff();
+  private watchers=new Map<string,number>();
   private reloading=false;
   get updating(){return this.reloading;}
   private reloadLease?:NodeJS.Timeout;
   private queueTimer:NodeJS.Timeout;
   private draining=false;
   private closed=false;
+  private restartTimer?:NodeJS.Timeout;
+  private restartDelay=1000;
   constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions) {
     super();
     runtime.on('event',(e:Json)=>{
       const {threadId,turnId}=e.params||{};
+      const itemsOnly=this.live.apply(e),hadRetry=this.retries.has(threadId);
       if(e.method==='error'&&e.params.willRetry===true&&threadId&&turnId&&this.loaded.has(threadId)){
         this.retries.set(threadId,{turnId,text:codexRetryText(e.params.error?.message,e.params.error?.codexErrorInfo)});
       }
@@ -59,15 +96,35 @@ export class Control extends EventEmitter {
       if(e.method==='thread/compacted')this.contexts.delete(e.params.threadId);
       if(e.method==='thread/settings/updated')this.rememberSettings(e.params.threadId,e.params.threadSettings);
       if(e.method==='turn/completed')this.scheduleRelease(e.params.threadId);
-      this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
+      // A watching phone receives item content as live frames; anything else needs a fresh read.
+      if(itemsOnly&&this.loaded.has(threadId)&&this.watched(threadId)&&hadRetry===this.retries.has(threadId))this.emit('stream',threadId);
+      else this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
     });
-    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.generation=randomUUID();this.emit('change',null);});
-    desktop.on('change',(id:string)=>this.emit('change',id));
+    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.live.clear();this.liveDiff.clear();this.generation=randomUUID();this.emit('change',null);this.scheduleRestart();});
+    desktop.on('change',(id:string,detail?:Json)=>{
+      if(!this.loaded.has(id)&&this.watched(id)&&this.desktopItemsOnly(id,detail))this.emit('stream',id);
+      else this.emit('change',id);
+    });
     desktop.on('resync',(id:string)=>{this.emit('change',id);});
-    desktop.on('offline',()=>{this.generation=randomUUID();this.emit('change',null);});
+    desktop.on('offline',()=>{this.liveDiff.clear();this.generation=randomUUID();this.emit('change',null);});
     this.queueTimer=setInterval(()=>void this.drainQueue(),1000);this.queueTimer.unref();
   }
-  async start(){await this.runtime.start();await this.desktop.connect().catch(()=>{});}
+  /** Starts Codex; on failure keeps retrying in the background so other apps on this connector stay usable. */
+  async start(){
+    try{await this.runtime.start();this.restartDelay=1000;}
+    catch(error){this.scheduleRestart();throw error;}
+    finally{await this.desktop.connect().catch(()=>{});}
+  }
+  private scheduleRestart(){
+    if(this.closed||this.reloading||this.restartTimer)return;
+    const delay=this.restartDelay;this.restartDelay=Math.min(60_000,delay*2);
+    this.restartTimer=setTimeout(()=>{
+      this.restartTimer=undefined;
+      if(this.closed||this.reloading)return;
+      Promise.resolve().then(()=>this.runtime.start()).then(()=>{this.restartDelay=1000;this.emit('change',null);},()=>this.scheduleRestart());
+    },delay);
+    this.restartTimer.unref?.();
+  }
   async handle(req:BridgeRequest):Promise<any> {
     const p=req.payload||{};
     if(req.action==='operation.read')return this.ledger.read(textRequired(p.opId,'操作标识',100));
@@ -113,6 +170,7 @@ export class Control extends EventEmitter {
       const cursor:TurnCursor|undefined=p.cursor==null?undefined:{before:textRequired(p.cursor.before,'历史位置',200)};
       if(cursor&&p.cursor.native!=null)cursor.native=textRequired(p.cursor.native,'历史游标',4000);
       const view=await this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(1,Math.floor(Number(p.limit)||20))),cursor);
+      if(!cursor&&p.watch===true){this.watch(view.id);this.liveDiff.prime(view.id,this.generation,view.turns.at(-1));}
       return sessionSnapshot(view,cursor?undefined:p.known);
     }
     if(req.action==='session.status') {
@@ -132,8 +190,14 @@ export class Control extends EventEmitter {
   async read(id:string,limit=20,cursor?:TurnCursor):Promise<SessionView> {
     let view:SessionView,nativeCursor:string|undefined;
     if(this.loaded.has(id)) {
+      const requestedAt=this.live.mark();
       const {raw,hasMore,notice,resumeUnavailable,nextCursor}=await this.runtimeThread(id,limit,cursor);
       nativeCursor=nextCursor;
+      if(!cursor){
+        // thread/read only has completed items; overlay the running turn from notifications.
+        this.live.rememberBase(id,raw.turns?.at(-1),requestedAt);
+        raw.turns=this.live.merge(id,raw.turns||[]);
+      }
       for(const [key,value] of Object.entries(this.settings.get(id)||{}))if(raw[key]===undefined||raw[key]===null||raw[key]==='')raw[key]=value;
       view=normalizeSession(raw,'connector',[...this.runtime.requests.values()].filter(r=>r.params?.threadId===id),limit);
       view.contextUsage=this.contexts.get(id)||null;
@@ -243,6 +307,47 @@ export class Control extends EventEmitter {
         return indexed();
       }
     }
+  }
+  /** Called for each phone read with watch=true; frames stop when reads stop. */
+  watch(id:string){this.watchers.set(id,Date.now()+WATCH_MS);}
+  watched(id:unknown):id is string {
+    if(!this.livePush||typeof id!=='string')return false;
+    const until=this.watchers.get(id);if(!until)return false;
+    if(until>=Date.now())return true;
+    this.watchers.delete(id);this.liveDiff.forget(id);return false;
+  }
+  /** The frame that brings watching phones to the current running turn, if it changed. */
+  liveFrame(id:string):LiveFrame|null {
+    if(!this.watched(id))return null;
+    return this.liveDiff.frame(id,this.generation,this.liveTurn(id));
+  }
+  /** The running turn as the phone shows it, built without reading the thread; null when that is not possible. */
+  liveTurn(id:string):TurnView|null {
+    if(this.loaded.has(id)) {
+      const raw=this.live.turn(id);if(!raw)return null;
+      const turn=normalizeTurn(raw),diff=this.diffs.get(turn.id)||turn.diff;
+      return diff===turn.diff?turn:{...turn,diff};
+    }
+    const state=this.desktop.states.get(id)?.state;if(!state)return null;
+    const turn=desktopTurns(state).at(-1);
+    if(!turn||turn.status!=='inProgress'||turn.itemsPagination?.hasLoadedOldest===false)return null;
+    return normalizeTurn(turn);
+  }
+  /** True when desktop patches only changed the running turn's items, so a frame covers them. */
+  private desktopItemsOnly(id:string,detail?:Json):boolean {
+    const patches=detail?.patches,previous=detail?.previous,next=this.desktop.states.get(id)?.state;
+    if(!Array.isArray(patches)||!patches.length||!previous||!next)return false;
+    const before=liveLocation(previous),after=liveLocation(next);
+    if(!before||!after||before.key!==after.key)return false;
+    let other=false;
+    for(const patch of patches) {
+      if(startsWith(patch?.path,before.path))continue;
+      if(startsWith(patch?.path,before.container))return false;
+      other=true;
+    }
+    const a=before.turn,b=after.turn;
+    if(b.status!=='inProgress'||a.status!==b.status||(a.turnId||a.id)!==(b.turnId||b.id)||JSON.stringify(a.error??null)!==JSON.stringify(b.error??null))return false;
+    return !other||desktopMeta(previous)===desktopMeta(next);
   }
   private editedInput(raw:Json,turnId:string,itemId:string,text:string):{input:Json[];numTurns:number} {
     const turns:Json[]=raw.turnHistory?.kind==='canonical'?desktopTurns(raw):raw.turns||[];
@@ -566,7 +671,7 @@ export class Control extends EventEmitter {
       }
       if(p.prepareOnly===true){
         prepared=true;
-        this.reloadLease=setTimeout(()=>{this.reloading=false;this.reloadLease=undefined;this.emit('change',null);},60000);
+        this.reloadLease=setTimeout(()=>{this.reloading=false;this.reloadLease=undefined;if(!this.runtime.child)this.scheduleRestart();this.emit('change',null);},60000);
         this.reloadLease.unref();
         return {prepared:true,generation:this.generation,threadIds:ids,runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},leaseMs:60000};
       }
@@ -581,7 +686,7 @@ export class Control extends EventEmitter {
         throw new BridgeError('runtime_error','Codex 切换失败，已恢复原运行端；请修复适配后重试');
       }
       throw error;
-    }finally{if(!prepared)this.reloading=false;}
+    }finally{if(!prepared){this.reloading=false;if(!this.runtime.child)this.scheduleRestart();}}
   }
-  close(){this.closed=true;clearInterval(this.queueTimer);clearTimeout(this.reloadLease);this.desktop.close();this.runtime.close();this.ledger.close();}
+  close(){this.closed=true;clearTimeout(this.restartTimer);clearInterval(this.queueTimer);clearTimeout(this.reloadLease);this.desktop.close();this.runtime.close();this.ledger.close();}
 }

@@ -1,19 +1,25 @@
-export type Route={thread:string;project:string;newChat:boolean;chat?:string;antigravity?:string};
+import {SERVICES, SERVICE_IDS, isConversation, remoteFields} from './services';
+
+export type Route={thread:string;project:string;newChat:boolean;antigravity?:string;claude?:string};
 export const home:Route={thread:'',project:'',newChat:false};
 export type SavedLocation={route:Route;machine:string};
 
 export function parseLocation(value:unknown):SavedLocation|null{
   if(!value||typeof value!=='object')return null;
-  const state=value as {cmwRoute?:Partial<Route>;cmwMachine?:unknown};
+  const state=value as {cmwRoute?:Partial<Route>&{chat?:unknown};cmwMachine?:unknown};
   const route=state.cmwRoute;
   if(!route||typeof route.thread!=='string'||typeof route.project!=='string'||typeof route.newChat!=='boolean'||typeof state.cmwMachine!=='string')return null;
-  if(route.chat!==undefined && route.antigravity!==undefined)return null;
-  const field=route.antigravity!==undefined?'antigravity':'chat';
-  const id=route[field];
-  if(id!==undefined){
-    if(typeof id!=='string'||id!==''&&!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id))return null;
-    return {route:{...home,[field]:id},machine:state.cmwMachine};
+  const present=remoteFields().filter(field=>route[field]!==undefined);
+  if(present.length>1)return null;
+  const field=present[0];
+  if(field){
+    const id=route[field];
+    if(typeof id!=='string'||id!==''&&!isConversation(id))return null;
+    const service=SERVICE_IDS.find(item=>(SERVICES[item] as {field?:string}).field===field)!;
+    const keepsProject=(SERVICES[service] as {keepsProject?:boolean}).keepsProject;
+    return {route:{...home,project:keepsProject?route.project:'',[field]:id},machine:state.cmwMachine};
   }
+  if(route.chat!==undefined)return {route:home,machine:state.cmwMachine};
   return {route:{thread:route.thread,project:route.project,newChat:route.newChat},machine:state.cmwMachine};
 }
 

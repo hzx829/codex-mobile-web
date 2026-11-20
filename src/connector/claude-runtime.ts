@@ -1,0 +1,308 @@
+import {EventEmitter} from 'node:events';
+import {randomUUID} from 'node:crypto';
+import {existsSync} from 'node:fs';
+import {homedir} from 'node:os';
+import {delimiter, join} from 'node:path';
+import type {Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage} from '@anthropic-ai/claude-agent-sdk';
+import {BridgeError, type Json} from '../shared/types.js';
+
+export type QueryFn = (params: {prompt: AsyncIterable<SDKUserMessage>; options?: Options}) => Query;
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+export const PERMISSION_MODES: readonly PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+
+export type ClaudeQuestion = {question: string; header: string; multiSelect: boolean; options: {label: string; description: string}[]};
+/** What the phone sees for a pending approval; never includes the resolver or raw permission suggestions. */
+export type ClaudeRequestView = {
+  id: string; kind: 'permission' | 'question' | 'plan'; tool: string; title: string; detail: string;
+  canRemember: boolean; questions?: ClaudeQuestion[];
+};
+export type ClaudeResponse = {decision: 'allow' | 'allowSession' | 'deny'; answers?: Record<string, string>; message?: string};
+
+type Pending = {view: ClaudeRequestView; input: Record<string, unknown>; suggestions?: PermissionUpdate[]; resolve: (result: PermissionResult) => void};
+
+/** Finds the user's Claude Code so the connector does not depend on the SDK's bundled binary. */
+export function findClaude(env: NodeJS.ProcessEnv = process.env, exists = existsSync, platform = process.platform): string | undefined {
+  if (env.CLAUDE_CODE_BIN) return env.CLAUDE_CODE_BIN;
+  const name = platform === 'win32' ? 'claude.exe' : 'claude';
+  const home = env.USERPROFILE || env.HOME || homedir();
+  const candidates = [...(env.PATH || '').split(platform === 'win32' ? ';' : delimiter).filter(Boolean).map(dir => join(dir, name)), join(home, '.local', 'bin', name)];
+  return candidates.find(path => exists(path));
+}
+
+/**
+ * Environment for the Claude Code process. By default the SDK labels sessions `sdk-ts`.
+ * Note: claude.exe rewrites `cli` to `sdk-cli` in non-interactive (SDK) mode, and the
+ * desktop Code tab hides both, so `cli` cannot make phone sessions visible there.
+ * Pass `false` (the default) to keep the SDK's own value.
+ */
+export function claudeEnv(entrypoint: string | false = false, base: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> | undefined {
+  if (!entrypoint) return undefined;
+  return {...base, CLAUDE_CODE_ENTRYPOINT: entrypoint};
+}
+
+/** An async queue the SDK reads user messages from, so one Claude Code process serves many turns. */
+class Inbox implements AsyncIterable<SDKUserMessage> {
+  private items: SDKUserMessage[] = [];
+  private waiting?: (value: IteratorResult<SDKUserMessage>) => void;
+  closed = false;
+  push(message: SDKUserMessage) {
+    if (this.closed) throw new BridgeError('offline', 'Claude Code 会话已结束，请重新发送');
+    if (this.waiting) {const resolve = this.waiting;this.waiting = undefined;resolve({value: message, done: false});}
+    else this.items.push(message);
+  }
+  close() {this.closed = true;this.waiting?.({value: undefined, done: true});this.waiting = undefined;}
+  get size() {return this.items.length;}
+  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
+    return {next: () => {
+      const item = this.items.shift();
+      if (item) return Promise.resolve({value: item, done: false});
+      if (this.closed) return Promise.resolve({value: undefined, done: true});
+      return new Promise(resolve => {this.waiting = resolve;});
+    }};
+  }
+}
+
+export class LiveSession {
+  id = '';
+  version = 0;
+  running = false;
+  error = '';
+  requests = new Map<string, Pending>();
+  idleTimer?: NodeJS.Timeout;
+  closed = false;
+  interrupting = false;
+  hint = '';
+  constructor(public cwd: string, public query: Query, public inbox: Inbox, public model: string, public permissionMode: PermissionMode) {}
+  get pending() {return [...this.requests.values()].map(request => request.view);}
+}
+
+const str = (value: unknown) => typeof value === 'string' ? value : '';
+function inputSummary(tool: string, input: Record<string, unknown>) {
+  if (typeof input.command === 'string') return input.command;
+  const path = str(input.file_path) || str(input.notebook_path) || str(input.path);
+  if (path) return path;
+  if (typeof input.url === 'string') return input.url;
+  const text = JSON.stringify(input, null, 2);
+  return text.length > 2000 ? text.slice(0, 2000) + '\n…' : text || tool;
+}
+function questions(input: Record<string, unknown>): ClaudeQuestion[] | undefined {
+  if (!Array.isArray(input.questions)) return undefined;
+  const list = input.questions.flatMap((item: any) => typeof item?.question === 'string' && Array.isArray(item.options) ? [{
+    question: item.question, header: str(item.header), multiSelect: item.multiSelect === true,
+    options: item.options.flatMap((option: any) => typeof option?.label === 'string' ? [{label: option.label, description: str(option.description)}] : []),
+  }] : []);
+  return list.length ? list : undefined;
+}
+
+export function userMessage(text: string, images: string[], priority?: 'now' | 'next' | 'later'): SDKUserMessage {
+  const content: any[] = images.map(url => {
+    const [, mediaType, data] = /^data:(image\/[a-z]+);base64,(.*)$/s.exec(url) || [];
+    return {type: 'image', source: {type: 'base64', media_type: mediaType, data}};
+  });
+  if (text) content.push({type: 'text', text});
+  return {type: 'user', message: {role: 'user', content}, parent_tool_use_id: null, origin: {kind: 'human'}, ...(priority ? {priority} : {})} as SDKUserMessage;
+}
+
+/**
+ * Runs Claude Code sessions for the phone through the Agent SDK. One process per controlled session;
+ * it is released after a quiet period so the terminal or IDE can resume the same session.
+ */
+export class ClaudeRuntime extends EventEmitter {
+  private live = new Map<string, LiveSession>();
+  private models?: {at: number; list: Json[]};
+  constructor(private load: () => Promise<QueryFn>, private executable = () => findClaude(), private idleMs = 5 * 60_000,
+    private entrypoint: string | false = false) {super();}
+
+  get(id: string) {return this.live.get(id);}
+  get busy() {return [...this.live.values()].some(session => session.running || session.requests.size || session.inbox.size);}
+
+  private touch(session: LiveSession) {
+    session.version++;
+    clearTimeout(session.idleTimer);
+    if (!session.running && !session.requests.size && !session.inbox.size && !session.closed) {
+      session.idleTimer = setTimeout(() => this.release(session), this.idleMs);
+      session.idleTimer.unref?.();
+    }
+    this.emit('change', session.id);
+  }
+
+  /** Project settings (CLAUDE.md, .mcp.json, .claude/settings.json, memory) come from the folder, as in the terminal. */
+  async start(options: {cwd: string; resume?: string; model?: string; permissionMode?: PermissionMode}): Promise<LiveSession> {
+    if (options.resume) {const existing = this.live.get(options.resume);if (existing) return existing;}
+    const query = await this.load();
+    const inbox = new Inbox();
+    const mode = options.permissionMode || 'default';
+    let session!: LiveSession;
+    const executable = this.executable();
+    const hint = executable ? '' : '没有找到电脑上的 claude 程序；请安装 Claude Code，或在连接器配置中设置 claudeBin。';
+    let q: Query;
+    try {q = query({prompt: inbox, options: {
+      cwd: options.cwd, ...(options.resume ? {resume: options.resume} : {}), ...(options.model ? {model: options.model} : {}),
+      permissionMode: mode, ...(mode === 'bypassPermissions' ? {allowDangerouslySkipPermissions: true} : {}),
+      ...(executable ? {pathToClaudeCodeExecutable: executable} : {}),
+      ...(this.entrypoint ? {env: claudeEnv(this.entrypoint)} : {}),
+      systemPrompt: {type: 'preset', preset: 'claude_code'},
+      canUseTool: (tool, input, context) => this.ask(session, tool, input, context),
+      stderr: () => {}, // Native diagnostics can contain credentials; never forward them.
+    }});} catch (error) {
+      throw new BridgeError('unavailable', `Claude Code 无法启动：${(error as Error)?.message || '未知错误'}${hint ? '。' + hint : ''}`);
+    }
+    session = new LiveSession(options.cwd, q, inbox, options.model || '', mode);
+    session.hint = hint;
+    if (options.resume) {session.id = options.resume;this.live.set(options.resume, session);}
+    void this.consume(session);
+    return session;
+  }
+
+  /** Resolves once Claude Code reports the session ID of a newly created session. */
+  waitForId(session: LiveSession, timeout = 35_000): Promise<string> {
+    if (session.id) return Promise.resolve(session.id);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {cleanup();reject(new BridgeError('timeout', 'Claude Code 启动超时，请在电脑核实', true));}, timeout);
+      const done = () => {
+        if (session.id) {cleanup();resolve(session.id);}
+        else if (session.closed) {cleanup();reject(new BridgeError('runtime_error', session.error || 'Claude Code 未能启动，请检查电脑上的安装和登录'));}
+      };
+      const cleanup = () => {clearTimeout(timer);this.off('change', done);this.off('closed', done);};
+      this.on('change', done);this.on('closed', done);
+      done();
+    });
+  }
+
+  private async consume(session: LiveSession) {
+    try {
+      for await (const message of session.query as AsyncIterable<SDKMessage>) {
+        if (session.closed) break;
+        const m = message as Json;
+        if (m.session_id && !session.id) {session.id = m.session_id;this.live.set(session.id, session);}
+        if (m.type === 'system' && m.subtype === 'init') {
+          if (typeof m.model === 'string') session.model = m.model;
+          if (PERMISSION_MODES.includes(m.permissionMode)) session.permissionMode = m.permissionMode;
+        } else if (m.type === 'system' && m.subtype === 'session_state_changed') {
+          session.running = m.state !== 'idle' || session.inbox.size > 0;
+        } else if (m.type === 'result') {
+          session.running = session.inbox.size > 0;
+          session.error = m.subtype === 'success' || session.interrupting ? '' : (Array.isArray(m.errors) ? m.errors.join('\n') : '') || 'Claude Code 本轮出错';
+          session.interrupting = false;
+        } else if (m.type === 'assistant' || m.type === 'user' || m.type === 'stream_event') {
+          session.running = true;
+        } else continue;
+        this.touch(session);
+      }
+    } catch (error) {
+      session.error = `Claude Code 已退出${(error as Error)?.message ? '：' + (error as Error).message.slice(0, 500) : ''}${session.hint ? '。' + session.hint : ''}`;
+    } finally {
+      this.closeSession(session);
+    }
+  }
+
+  private closeSession(session: LiveSession) {
+    if (session.closed) return;
+    session.closed = true;session.running = false;
+    clearTimeout(session.idleTimer);
+    for (const request of session.requests.values()) request.resolve({behavior: 'deny', message: 'Claude Code 会话已结束'});
+    session.requests.clear();
+    session.inbox.close();
+    if (session.id && this.live.get(session.id) === session) this.live.delete(session.id);
+    session.version++;
+    this.emit('change', session.id);this.emit('closed', session.id);
+  }
+
+  /** Ends the process so another client (terminal, IDE) may resume the session. */
+  release(session: LiveSession) {
+    if (session.running || session.requests.size || session.inbox.size) return;
+    session.inbox.close();
+    setTimeout(() => {if (!session.closed) {try {session.query.close();} catch {}this.closeSession(session);}}, 10_000).unref?.();
+  }
+
+  private ask(session: LiveSession, tool: string, input: Record<string, unknown>, context: {signal: AbortSignal; suggestions?: PermissionUpdate[]; title?: string; description?: string; displayName?: string; decisionReason?: string}): Promise<PermissionResult> {
+    if (session.closed || context.signal.aborted) return Promise.resolve({behavior: 'deny', message: '已取消'});
+    const id = randomUUID();
+    const asked = tool === 'AskUserQuestion' ? questions(input) : undefined;
+    const kind: ClaudeRequestView['kind'] = asked ? 'question' : tool === 'ExitPlanMode' ? 'plan' : 'permission';
+    const view: ClaudeRequestView = {
+      id, kind, tool,
+      title: kind === 'question' ? 'Claude 有问题要问你' : kind === 'plan' ? 'Claude 已完成计划，是否开始执行？' : context.title || `Claude 想使用 ${context.displayName || tool}`,
+      detail: kind === 'plan' ? str(input.plan) : kind === 'question' ? '' : [context.description, inputSummary(tool, input), context.decisionReason].filter(Boolean).join('\n\n'),
+      canRemember: kind === 'permission' && Boolean(context.suggestions?.length), ...(asked ? {questions: asked} : {}),
+    };
+    return new Promise(resolve => {
+      const finish = (result: PermissionResult) => {
+        if (!session.requests.delete(id)) return;
+        context.signal.removeEventListener('abort', aborted);
+        resolve(result);this.touch(session);
+      };
+      const aborted = () => finish({behavior: 'deny', message: '已取消'});
+      session.requests.set(id, {view, input, suggestions: context.suggestions, resolve: finish});
+      context.signal.addEventListener('abort', aborted, {once: true});
+      this.touch(session);
+    });
+  }
+
+  respond(session: LiveSession, requestId: string, response: ClaudeResponse) {
+    const request = session.requests.get(requestId);
+    if (!request) throw new BridgeError('expired', '该请求已经处理或失效，请刷新');
+    if (response.decision === 'deny') {
+      request.resolve({behavior: 'deny', message: response.message?.slice(0, 2000) || '用户在手机上拒绝了这项操作'});
+      return;
+    }
+    if (request.view.kind === 'question') {
+      const answers: Record<string, string> = {};
+      for (const question of request.view.questions || []) {
+        const answer = response.answers?.[question.question];
+        if (typeof answer !== 'string' || !answer.trim()) throw new BridgeError('invalid', '请回答全部问题');
+        answers[question.question] = answer.slice(0, 2000);
+      }
+      request.resolve({behavior: 'allow', updatedInput: {...request.input, answers}});
+      return;
+    }
+    request.resolve({behavior: 'allow', updatedInput: request.input,
+      ...(response.decision === 'allowSession' && request.suggestions?.length ? {updatedPermissions: request.suggestions} : {})});
+  }
+
+  send(session: LiveSession, text: string, images: string[], steer = false) {
+    session.inbox.push(userMessage(text, images, session.running ? steer ? 'next' : 'later' : undefined));
+    session.running = true;session.error = '';
+    this.touch(session);
+  }
+
+  async interrupt(session: LiveSession) {
+    if (!session.running) throw new BridgeError('changed', '当前没有正在运行的任务');
+    session.interrupting = true;
+    try {await session.query.interrupt();}
+    catch (error) {session.interrupting = false;throw error;}
+  }
+
+  async configure(session: LiveSession, model?: string, permissionMode?: PermissionMode) {
+    if (session.inbox.closed) throw new BridgeError('offline', 'Claude Code 会话正在释放，请稍后重试');
+    if (permissionMode === 'bypassPermissions' && permissionMode !== session.permissionMode)
+      throw new BridgeError('invalid', '“全部允许”只能在新建或重新接入会话时选择');
+    if (model && model !== session.model) {await session.query.setModel(model);session.model = model;}
+    if (permissionMode && permissionMode !== session.permissionMode) {
+      await session.query.setPermissionMode(permissionMode);session.permissionMode = permissionMode;
+    }
+  }
+
+  /** Model choices from Claude Code itself; uses a running session or a short-lived idle process. */
+  async supportedModels(cwd: string): Promise<Json[]> {
+    if (this.models && Date.now() - this.models.at < 10 * 60_000) return this.models.list;
+    const running = [...this.live.values()].find(session => !session.closed);
+    let probe: Query | undefined, inbox: Inbox | undefined;
+    try {
+      let source = running?.query;
+      if (!source) {
+        inbox = new Inbox();
+        const executable = this.executable();
+        probe = (await this.load())({prompt: inbox, options: {cwd, ...(executable ? {pathToClaudeCodeExecutable: executable} : {}), stderr: () => {}}});
+        source = probe;
+      }
+      const list = (await source.supportedModels()).map(model => ({id: model.value, label: model.displayName, description: model.description}));
+      this.models = {at: Date.now(), list};
+      return list;
+    } catch (error) {
+      throw error instanceof BridgeError ? error : new BridgeError('unavailable', '无法读取 Claude Code 的模型列表，请检查电脑上的安装和登录');
+    } finally {inbox?.close();try {probe?.close();} catch {}}
+  }
+
+  close() {for (const session of [...this.live.values()]) {try {session.query.close();} catch {}this.closeSession(session);}}
+}

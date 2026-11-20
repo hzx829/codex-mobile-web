@@ -3,6 +3,7 @@ import type {AntigravityIssue, AntigravityMessage, MessageItem} from '../src/sha
 import {groupItems} from './activity';
 import {ActivityGroup} from './conversation';
 import {SafeMarkdown} from './content';
+import {IconButton} from './icon-button';
 
 export function antigravityIssueText(issue: AntigravityIssue, canSend: boolean) {
   if (issue.kind === 'interrupted') return 'Antigravity 的回复中断了，可以发送消息继续。';
@@ -25,14 +26,18 @@ export function groupAntigravityMessages(messages: AntigravityMessage[]) {
 type Props = {
   messages: AntigravityMessage[]; running: boolean;
   openFile: (path:string)=>void; openPreview: (url:string)=>void; onFollowup: (text:string)=>void;
+  onCopy?: (text:string)=>void;
 };
-export const AntigravityMessages = memo(function AntigravityMessages({messages,running,openFile,openPreview,onFollowup}: Props) {
+export const AntigravityMessages = memo(function AntigravityMessages({messages,running,openFile,openPreview,onFollowup,onCopy}: Props) {
   const groups = useMemo(() => groupAntigravityMessages(messages), [messages]);
   return groups.map((group, index) => {
     const first = group[0];
     if (first.role === 'activity') return <ActivityGroup key={first.id} items={group} running={running && index === groups.length-1} openFile={openFile}/>;
-    return <article key={first.id} className={`message ${first.role}`}>
+    const message=<article className={`message ${first.role}`}>
       <SafeMarkdown allowFileUrls text={first.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>
     </article>;
+    return <div key={first.id} className={first.role==='user'?'user-entry':'turn'}>{message}
+      {onCopy&&first.text&&<div className={first.role==='user'?'user-actions':'assistant-actions'}><IconButton icon="copy" label={first.role==='user'?'复制消息文字':'复制回复文字'} onClick={()=>onCopy(first.text)}/></div>}
+    </div>;
   });
 });

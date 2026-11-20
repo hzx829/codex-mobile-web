@@ -15,6 +15,10 @@ export function resolveCodex(configured = process.env.CODEX_BIN): string {
   return resolveWindowsCodex(process.env.PATH || '', process.env.LOCALAPPDATA || '');
 }
 
+function tryResolveCodex(): string {
+  try { return resolveCodex(); } catch { return ''; }
+}
+
 export function resolveWindowsCodex(pathValue: string, localAppData: string): string {
   const managed = localAppData ? join(localAppData, 'OpenAI', 'Codex', 'bin') : '';
   if (managed && existsSync(managed)) {
@@ -46,17 +50,28 @@ export function resolveWindowsCodex(pathValue: string, localAppData: string): st
 export class AppServer extends EventEmitter {
   child: ChildProcessWithoutNullStreams | null = null;
   version='';
+  private starting?: Promise<void>;
   private next = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   requests = new Map<string, Json>();
   private responding=new Set<string>();
-  constructor(public bin = resolveCodex(), private env: NodeJS.ProcessEnv = process.env) { super(); }
+  constructor(public bin = tryResolveCodex(), private env: NodeJS.ProcessEnv = process.env) { super(); }
   legacyRuntime() {
     const bin=this.env.CODEX_LEGACY_BIN;
     return bin&&bin!==this.bin&&existsSync(bin)?new AppServer(resolveCodex(bin),this.env):undefined;
   }
-  async start() {
-    if (this.child) return;
+  start(): Promise<void> {
+    if (this.starting) return this.starting;
+    if (this.child) return Promise.resolve();
+    this.starting = this.launch().finally(() => {this.starting = undefined;});
+    return this.starting;
+  }
+  private async launch() {
+    if (!this.bin) {
+      // Codex may be installed after the connector started; resolve again instead of failing forever.
+      try { this.bin = resolveCodex(this.env.CODEX_BIN); }
+      catch (error) { throw new BridgeError('codex_missing', `这台电脑未找到 Codex：${(error as Error).message}`); }
+    }
     if(this.env.CODEX_PROFILE)throw new BridgeError('unsupported_profile','连接器暂不支持为 app-server 选择命名 profile。请使用默认配置，或连接已经使用该配置的官方桌面会话；不会自动换用其他模型。');
     // This client releases idle threads so the desktop can open them immediately.
     const args = ['-c', 'thread_unload_delay_secs=0', 'app-server', '--stdio'];
@@ -64,13 +79,22 @@ export class AppServer extends EventEmitter {
     this.child = child;
     child.stderr.on('data', () => {}); // Native diagnostics can contain credentials; never forward them to the relay.
     createInterface({ input: child.stdout }).on('line', line => {
+      if(this.child!==child)return;
       try { this.receive(JSON.parse(line)); } catch { this.emit('diagnostic', 'invalid_runtime_frame'); }
     });
     child.on('error', e => { if(this.child===child)this.disconnected(e); });
+    child.stdin.on('error', e => { if(this.child===child){child.kill();this.disconnected(e);} });
     child.on('exit', () => { if(this.child===child)this.disconnected(new BridgeError('offline','Codex 运行进程已退出',true)); });
-    const initialized=await this.rpc('initialize', { clientInfo: { name: 'codex_mobile_web', title: 'Codex Mobile Web', version: '0.1.3' }, capabilities: { experimentalApi: true } });
-    this.version=String(initialized.userAgent||'').match(/\/(\d+\.\d+\.\d+[^\s;)]*)/)?.[1]||'';
-    this.write({ method: 'initialized' });
+    try {
+      const initialized=await this.request('initialize', { clientInfo: { name: 'codex_mobile_web', title: 'Codex Mobile Web', version: '0.1.3' }, capabilities: { experimentalApi: true } },30_000);
+      if(this.child!==child)throw new BridgeError('offline','Codex 在初始化时退出',true);
+      this.version=String(initialized.userAgent||'').match(/\/(\d+\.\d+\.\d+[^\s;)]*)/)?.[1]||'';
+      this.write({ method: 'initialized' });
+    } catch (error) {
+      // A half-started child would make later start() calls return early without a usable runtime.
+      if (this.child === child) { child.kill(); this.disconnected(error as Error); }
+      throw error;
+    }
   }
   private receive(m: Json) {
     if (m.id !== undefined && !m.method) {
@@ -88,7 +112,11 @@ export class AppServer extends EventEmitter {
     }
     this.emit('event', m);
   }
-  rpc<T = any>(method: string, params: Json = {}, timeout = 30_000): Promise<T> {
+  async rpc<T = any>(method: string, params: Json = {}, timeout = 30_000): Promise<T> {
+    if (this.starting) await this.starting;
+    return this.request(method,params,timeout);
+  }
+  private request<T = any>(method: string, params: Json, timeout: number): Promise<T> {
     return new Promise((resolve, reject) => {
       const id = ++this.next;
       const timer = setTimeout(() => { this.pending.delete(id); reject(new BridgeError('timeout', `Codex 请求超时：${method}`, true)); }, timeout);
