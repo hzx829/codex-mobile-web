@@ -94,6 +94,12 @@ docker compose -f compose.yaml -f compose.https.yaml down
 
 服务器需保留 `.env` 和 Caddy 证书卷，电脑需保留自己的 `.local/`。程序包中不包含这些运行数据。默认中继状态日志不主动记录聊天或文件正文，附带代理配置未启用访问日志；容器日志做大小轮换。自定义代理、云平台及诊断设置可能另行留存信息；错误日志也应检查后再分享。
 
+### 只更新网页或电脑连接器
+
+只改了手机网页、中继没变时，不必重建中继：按 `scripts/web-deploy.sh` 开头的说明在电脑上打包 `dist`，上传后在服务器上运行这个脚本。它只替换网页文件，保留旧的带哈希资源给还开着旧页面的手机，核对通过前中继进程不动，失败时换回原来的页面。这个脚本按直接运行 Node 的中继（`/opt/codex-mobile-relay`，systemd 服务）编写，目录、服务名和端口可用 `CODEX_RELAY_ROOT`、`CODEX_RELAY_SERVICE`、`CODEX_RELAY_PORT` 改。
+
+电脑上实际运行的连接器如果是安装包（由 `Codex Mobile Web.exe` 启动），`npm run update:deploy` 检查的是仓库自己的安装，会拒绝。这时先 `npm run build`，再运行 `npm run deploy:package-connector -- <安装包文件夹>`：只替换安装包里的 `build/connector.mjs`，等 Claude Code 和 Codex 空闲才重启，保留安装包自己的设置和 Codex 版本，新构建没起来就换回原来的。
+
 ## 已有 HTTPS 反向代理
 
 如果服务器已经有 Nginx 或 Caddy，占用了 80/443，只启动中继：
