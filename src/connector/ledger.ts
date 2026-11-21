@@ -1,9 +1,19 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { BridgeError, type Json } from '../shared/types.js';
 import type {FileAttachment} from '../shared/attachments.js';
 
 export type UploadRecord=FileAttachment&{threadId:string;cwd:string};
+/** The team member the relay says sent a request; absent when the relay has no team. */
+export type Actor={userId:string;deviceId?:string;name?:string};
+/** Set around each relay request, so every operation it starts records its sender without passing it through each app. */
+export const requestActor=new AsyncLocalStorage<Actor|undefined>();
+export function actorOf(value:unknown):Actor|undefined{
+  const actor=value as Json|null|undefined;
+  if(!actor||typeof actor.userId!=='string'||!actor.userId||actor.userId.length>100)return undefined;
+  return {userId:actor.userId,...typeof actor.deviceId==='string'?{deviceId:actor.deviceId.slice(0,100)}:{},...typeof actor.name==='string'?{name:actor.name.slice(0,100)}:{}};
+}
 
 function canonical(v: any): string {
   if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';
@@ -64,6 +74,7 @@ export class Ledger {
     for(const table of QUEUE_TABLES)this.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, thread_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, error TEXT);
       UPDATE ${table} SET state='uncertain', error='连接器在发送时重启，请核实会话；不会自动重发' WHERE state='sending';
       UPDATE operations SET state='uncertain', result=json_object('error',json_object('code','interrupted','message','连接器在发送时重启，请核实会话；不会自动重发')) WHERE id IN (SELECT id FROM ${table} WHERE state='uncertain');`);
+    if(!this.db.prepare('PRAGMA table_info(operations)').all().some(column=>column.name==='actor'))this.db.exec('ALTER TABLE operations ADD COLUMN actor TEXT');
     this.db.exec("UPDATE operations SET state='uncertain' WHERE state='pending';");
     this.db.prepare(`DELETE FROM operations WHERE updated < ? ${QUEUE_TABLES.map(table=>`AND id NOT IN (SELECT id FROM ${table})`).join(' ')}`).run(Date.now()-7*86400_000);
     this.codexQueue=new MessageQueue(this,'queued_messages');
@@ -72,6 +83,11 @@ export class Ledger {
   read(id:string):Json {
     const row=this.db.prepare('SELECT state,result FROM operations WHERE id=?').get(id);
     return row?{state:row.state,...(row.result?JSON.parse(String(row.result)): {})}:{state:'unknown'};
+  }
+  /** Who sent an operation, as the relay stamped it. */
+  actor(id:string):Actor|undefined {
+    const row=this.db.prepare('SELECT actor FROM operations WHERE id=?').get(id);
+    try{return row?.actor?actorOf(JSON.parse(String(row.actor))):undefined;}catch{return undefined;}
   }
   owns(id:string){return Boolean(this.db.prepare('SELECT id FROM managed WHERE id=?').get(id));}
   upload(id:string):UploadRecord|undefined {return this.db.prepare('SELECT id, thread_id AS threadId, cwd, name, size FROM file_uploads WHERE id=?').get(id) as UploadRecord|undefined;}
@@ -93,7 +109,8 @@ export class Ledger {
     }
     const age=Date.now()-Number(id.split(':')[0]);
     if(age>5*60_000||age < -60_000)throw new BridgeError('expired','操作已过期或手机时间不准确，请核实任务后重新操作');
-    this.db.prepare('INSERT INTO operations VALUES (?,?,?,NULL,?)').run(id,hash,'pending',Date.now());
+    const actor=requestActor.getStore();
+    this.db.prepare('INSERT INTO operations (id,hash,state,result,updated,actor) VALUES (?,?,?,NULL,?,?)').run(id,hash,'pending',Date.now(),actor?JSON.stringify(actor):null);
     const promise=(async()=>{
       try {
         const result=await fn();

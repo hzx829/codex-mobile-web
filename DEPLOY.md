@@ -72,6 +72,24 @@ Compose 部署运行 `docker compose -f compose.yaml -f compose.https.yaml up -d
 
 电脑主人解压后双击「启动.cmd」。网页的「电脑」菜单会在电脑名旁显示「借用」。停止连接用「停止.cmd」，清空该包里的项目、会话和登录副本用「清除访客数据.cmd」。要撤销访客包，从中继配置删除对应的 Token 并重新应用配置。
 
+## 团队成员（可选）
+
+默认整个中继只有一个共享 Token。多人一起用时可以启用团队：每人用自己的邀请链接登录，每台设备可以单独移除，会话列表标出是谁开的会话，管理员能看到操作记录。设计见 [团队账号与会话归属](docs/team/DESIGN.md)。
+
+1. 先升级中继和网页端。Compose 部署新增 `relay_data` 数据卷，数据库在 `/data/relay.sqlite`。直接用 Node 运行的实例（例如 systemd）默认写在工作目录的 `.local/relay.sqlite`，可用 `BRIDGE_DATA` 指定其他目录；该目录需要可写。
+2. 启用团队并创建所有者，`--url` 填手机访问的地址：
+
+   ```sh
+   docker compose -f compose.yaml -f compose.https.yaml exec relay node build/relay.mjs team init --name 你的名字 --url https://codex.your-domain.com
+   ```
+
+   直接用 Node 运行的实例，在程序目录用与中继相同的 `BRIDGE_DATA` 运行 `node build/relay.mjs team init …`。
+3. 在手机或电脑浏览器打开输出的邀请链接，即以所有者身份登录。之后在“选项 → 团队 → 成员”添加成员，把生成的链接或二维码发给对方。每个邀请链接 24 小时内有效，只能用一次。
+4. 启用后，手机不能再用共享 Token 登录，已打开的网页会回到登录页。电脑连接器继续用原 Token 连接，不需要修改。若要给某台电脑换成专用 Token，在“团队 → 电脑”中生成，再在那台电脑的“修改连接配置”里替换；生成后，那台电脑就不能再用共享 Token 连接。
+5. 所有者的设备全部丢失时，在服务器上运行 `team invite --user <名字>` 重新生成邀请链接；`team list` 列出成员。
+
+`relay.sqlite` 保存成员、设备、会话归属和操作记录，不保存消息正文。备份时先停止中继，再复制数据卷或该文件。
+
 ## 日常操作
 
 下列命令都在解压后的部署目录运行：
@@ -129,6 +147,8 @@ IP 证书有效期约 6 天，必须自动续期，并设置部署钩子执行 `
 | 网页连接反复中断 | 反向代理是否支持 `/ws`；先看连接器错误日志，不要重新发送结果不明的操作 |
 | 预览新标签页无法打开 | 公网 TCP 3341 是否开放、该端口是否配置 HTTPS 和 WebSocket 转发；电脑上的开发服务是否仍在运行 |
 | 502 | `docker compose ps` 中 relay 是否 healthy；用回环 `/health` 区分中继与 HTTPS 问题 |
+| `team init` 提示无法打开数据库 | Compose 是否已加 `relay_data` 数据卷并重新 `up -d`；直接运行时 `BRIDGE_DATA` 目录是否可写 |
+| 团队成员看不到某台电脑 | 管理员在“团队 → 成员 → 编辑”中检查该成员的可用电脑 |
 
 公网部署的完成条件：HTTPS 健康检查通过；手机用移动数据连接；能打开项目和原有任务；在测试会话发送一条消息并收到回复；中继重启后恢复连接。仅 `/health` 成功不代表整条链路已经通过。
 

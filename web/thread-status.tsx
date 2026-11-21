@@ -50,7 +50,9 @@ export function ThreadStatusPanel({point,view,threadId,cwd,connected,close,copy,
     };
     void refresh();return()=>{alive=false;clearTimeout(timer);};
   },[threadId,connected]);
+  const people=[view?.owner&&`由 ${view.owner.name} 创建`,view?.lastSender&&view.lastSender.id!==view.owner?.id&&`${view.lastSender.name} 最后发送`].filter(Boolean).join(' · ');
   return <Popover point={point} title="状态" label="会话状态" className="thread-status" close={close}>
+    {people&&<p className="status-owner">{people}</p>}
     <StatusDetails view={view} threadId={threadId} cwd={cwd} connected={connected} status={status} loading={loading} error={error} copy={()=>{void copy().then(()=>setCopied('对话线程 ID 已复制')).catch(()=>setCopied('复制失败，可选择上方 ID 手动复制。'));}}/>
     {copied&&<p className="muted" role="status">{copied}</p>}
   </Popover>;

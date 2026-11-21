@@ -22,7 +22,10 @@ export interface SessionView {
   id: string; sessionId: string; title: string; cwd: string; model: string; provider: string; effort?: string; approvalPolicy?: string; serviceTier?: string | null;
   source: 'desktop' | 'connector' | 'history'; activeTurnId: string | null; running?: boolean; contextUsage?: ContextUsage | null;
   turns: TurnView[]; requests: Json[]; queuedMessages?: QueuedMessage[]; canControl: boolean; hasMore?: boolean; nextCursor?: TurnCursor | null; notice?: string; retry?: string; generation?: string; resumeUnavailable?: boolean;
+  /** Added by a relay with a team: who started the session and who last sent to it, when known. */
+  owner?: TeamMember | null; lastSender?: TeamMember | null;
 }
+export interface TeamMember { id: string; name: string }
 export class BridgeError extends Error {
   constructor(public code: string, message: string, public uncertain = false) { super(message); }
 }

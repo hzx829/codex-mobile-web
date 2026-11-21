@@ -6,6 +6,10 @@ services:
     environment:
       BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN in .env}
       BRIDGE_CONNECTOR_TOKENS: ${BRIDGE_CONNECTOR_TOKENS:-[]}
+      # Team members, devices and the activity log (relay.sqlite). Without a team it stays empty.
+      BRIDGE_DATA: /data
+    volumes:
+      - relay_data:/data
     ports:
       - "127.0.0.1:3340:3340"
       - "127.0.0.1:3341:3341"
@@ -23,3 +27,5 @@ services:
       options:
         max-size: "5m"
         max-file: "3"
+volumes:
+  relay_data:

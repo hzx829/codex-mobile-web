@@ -1,6 +1,6 @@
 import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Client,operationId} from './client';
+import {Client,inviteCode,operationId} from './client';
 import {AntigravityPanel} from './antigravity';
 import {AntigravitySidebar} from './antigravity-sidebar';
 import {ClaudeCodePanel} from './claude-code';
@@ -46,6 +46,7 @@ import {ModelButton,ModelPicker} from './model-picker';
 import {voiceProvider,voiceProviderLabel} from '../src/shared/voice';
 import {useVoiceInput} from './use-voice-input';
 import {useStableEvent} from './use-event';
+import {TeamPanel,type TeamUser} from './team';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -60,7 +61,8 @@ const save=(key:string,value:any)=>{try{localStorage.setItem(key,JSON.stringify(
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const computerName=(machine:Machine)=>machine.name+(machine.guest?'（借用）':'');
 const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:target.kind==='artifact'?target.title||'claude.ai 页面':'网页预览';
-function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('token');if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
+// A team invite link (#invite=…) is kept like a Token until the relay exchanges it for this device's own token.
+function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const invite=params.get('invite'),token=params.get('token')||(invite?inviteCode('#invite='+invite):null);if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
 // Only the approval policy changes; the sandbox stays as configured on the computer.
 const APPROVALS:PermissionOption[]=[
   {id:'on-request',label:'按需审批',description:'需要时请你审批命令和文件修改'},
@@ -70,10 +72,14 @@ const approvalName=(policy?:string)=>APPROVALS.find(option=>option.id===policy)?
 const savedLocation=initialLocation();
 const listKey=(machine:string,project:string,archived:boolean)=>`${machine}:${project}:${archived?'archived':'recent'}`;
 type PreviewTab={id:number;target:PreviewTarget};
-type Sheet='home'|'computer'|'projects'|'add'|'file'|'browser'|'voice'|'claude-project'|null;
+type Sheet='home'|'computer'|'projects'|'add'|'file'|'browser'|'voice'|'claude-project'|'team'|null;
+/** Sessions another member started; the filter keeps those of `me` and leaves lists without owners as they are. */
+const ownedBy=(threads:Json[],me:TeamUser|null,onlyMine:boolean)=>me&&onlyMine?threads.filter(thread=>!('owner' in thread)||thread.owner?.id===me.id):threads;
 
 function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
+  // The signed-in member once the relay has a team; null with the shared Token.
+  const [me,setMe]=useState<TeamUser|null>(null),[onlyMine,setOnlyMine]=useState(()=>load('only-mine',false)===true),teamDevice=useRef('');
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Machine[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const [remoteListRevision,refreshRemoteList]=useState(0);
@@ -223,9 +229,11 @@ function App(){
     if(!token)return;
     const c=new Client(token,m=>{
       if(m.type==='ready'||m.type==='machines')setMachines(m.machines||m.data||[]);
+      if(m.type==='ready'){setMe(m.user||null);teamDevice.current=m.device?.id||'';}
+      if(m.type==='team.user')setMe(m.user||null);
       if(m.type==='changed'&&m.machineId===current.current.machine&&(!m.threadId||m.threadId===current.current.selected))scheduleRefresh();
       if(m.type==='live'&&current.current.service==='codex'&&m.machineId===current.current.machine&&m.threadId===current.current.selected)receiveLive(m as LiveFrame);
-    },setStatus);client.current=c;
+    },setStatus,next=>save('connection',next));client.current=c;
     return()=>{c.close();clearTimeout(refreshTimer.current);cancelAnimationFrame(liveFrame.current);liveFrame.current=0;liveFrames.current=[];};
   },[token]);
   useEffect(()=>client.current?.onPreview(message=>{
@@ -453,7 +461,10 @@ function App(){
   }
   function closeBrowser(){const session=browserState;browserSequence.current++;setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});if(session)void call('preview.stop',{sessionId:session.sessionId,threadId:session.threadId},session.machineId).catch(()=>{});}
   function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');const next=id?supportedRoute(serviceHome(service),machines.find(item=>item.id===id)?.services):home;history.replaceState({cmwRoute:next,cmwMachine:id},'',location.pathname);rememberLocation(next,id);setMachine(id);setRoute(next);}
-  function logout(){client.current?.close();save('connection','');setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);void clearCache();changeMachine('');}
+  function logout(){
+    // A member signing out also removes this device, so its token stops working everywhere.
+    if(me&&teamDevice.current&&client.current?.ready)void client.current.team('team.devices.revoke',{deviceId:teamDevice.current}).catch(()=>{});
+    client.current?.close();save('connection','');setMe(null);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);void clearCache();changeMachine('');}
   async function copyText(text:string){
       if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
       else {
@@ -512,7 +523,7 @@ function App(){
   const pendingShown=optimistic&&optimistic.key===scope&&!optimisticDelivered(optimistic,view)?optimistic:null;
   const attachmentCount=images.length+files.length,selectedImageBytes=images.reduce((sum,url)=>sum+imageBytes(url),0);
   const effortLabel=reasoningLabel(selection.effort),sending=busy&&(Boolean(uploadProgress)||pending?.action==='turn.send'||pending?.action==='session.create');
-  const listedThreads=useMemo(()=>visibleThreads(sessions,preferences,project,archived,searchQuery),[sessions,preferences,project,archived,searchQuery]);
+  const listedThreads=useMemo(()=>ownedBy(visibleThreads(sessions,preferences,project,archived,searchQuery),me,onlyMine),[sessions,preferences,project,archived,searchQuery,me,onlyMine]);
   const visibleTitle=newChat?'新聊天':view?.title||sessions.find(s=>s.id===selected)?.title||'正在打开…';
   const conversationCopy=useStableEvent((text:string)=>void copyText(text).then(()=>setNotice('已复制文字')).catch(()=>setError('复制失败，请长按选择文字')));
   const conversationEdit=useStableEvent((turnId:string,itemId:string,text:string)=>editTurn(mutate,target(),{turnId,itemId,text},{model,effort,approvalPolicy:approval,serviceTier}));
@@ -520,7 +531,7 @@ function App(){
   const conversation=useMemo(()=>view?.turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={Boolean(view.running)} source={view.source} latestUser={turn.id===latestUserTurn} disabled={!connected||busy||Boolean(pending)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} onFollowup={markdownFollowup} onCopy={conversationCopy} onEdit={conversationEdit} onFork={conversationFork} onDiff={conversationDiff} onBlocked={setNotice}/>),[view?.turns,view?.running,view?.source,latestUserTurn,connected,busy,Boolean(pending),markdownOpenFile,markdownOpenPreview,markdownFollowup,conversationCopy,conversationEdit,conversationFork,conversationDiff]);
   const feedback=<>{error&&<div className="feedback error" role="alert"><span>{error}</span><IconButton icon="close" label="关闭提示" onClick={()=>setError('')}/></div>}{notice&&<div className="feedback" role="status">{notice}</div>}{pending&&!busy&&<div className="pending"><button onClick={()=>void checkPending()}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先查看最新任务，确认这次操作的实际结果。清除提示不会重发旧操作。')){setOperation(null);setNotice('');setOptimistic(old=>old?.key===scope?null:old);}}}>我已核实</button></div>}</>;
 
-  if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>通过自部署中继继续电脑上的对话。</p><form onSubmit={e=>{e.preventDefault();save('connection',tokenInput.trim());setToken(tokenInput.trim());}}><label>中继地址<input readOnly value={location.origin}/></label><label>连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">Token 不匹配，请重新输入。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
+  if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>通过自部署中继继续电脑上的对话。</p><form onSubmit={e=>{e.preventDefault();const value=inviteCode(tokenInput)||tokenInput.trim();save('connection',value);setToken(value);}}><label>中继地址<input readOnly value={location.origin}/></label><label>邀请链接或连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴团队邀请链接，或电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">登录信息无效或已失效。请重新输入，团队成员请向管理员要新的邀请链接。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   const selectService=(next:Service)=>navigate(switchRoute(machine,route,next));
   const switcher=<ServiceSwitch active={service} available={available} disabled={busy||voiceBusy||imageLoading} select={selectService}/>;
   const previewPane=preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:preview.kind==='artifact'?'经电脑中转，手机不直接访问 claude.ai':undefined}
@@ -543,6 +554,10 @@ function App(){
   const computerOptions=<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{computerName(m)}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>;
   // One choice for Codex, Claude Code and Antigravity; transcription always runs through Codex on the computer.
   const voiceOptions=<><label>识别方式<select value={voiceMode} onChange={e=>{const mode=voiceProvider(e.target.value);setVoiceMode(mode);save('voice-provider',mode);}}><option value="codex">Codex 识别</option><option value="keyboard">系统键盘</option></select></label><p className="muted">{voiceMode==='codex'?'点麦克风开始录音，再点结束，文字填入输入框。需要 HTTPS 和电脑上 Codex 的 ChatGPT 登录；Claude Code 和 Antigravity 也用它识别。录音经中继、电脑发送到语音服务。':'点麦克风打开输入框，再使用手机键盘上的听写。'}</p><p className="muted">选择保存在当前浏览器，三个应用共用。</p><button className="primary" onClick={()=>setSheet(null)}>完成</button></>;
+  const teamItems=me&&<><MenuItem icon="team" onClick={()=>setSheet('team')}>团队<span className="menu-detail">{me.name}</span></MenuItem>
+    <MenuItem icon="chat" onClick={()=>{setOnlyMine(!onlyMine);save('only-mine',!onlyMine);setSheet(null);}}>只看我的会话{onlyMine&&<Icon name="check" size={18}/>}</MenuItem></>;
+  const teamPanel=me&&<TeamPanel me={me} team={(action,payload)=>client.current?client.current.team(action,payload):Promise.reject({message:'尚未连接中继'})} logout={logout} copy={copyText}
+    machines={new Map(machines.map(item=>[item.id,computerName(item)]))}/>;
   const fileOptions=<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>;
   if(service==='antigravity'||service==='claude'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
@@ -564,7 +579,7 @@ function App(){
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
-        listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='claude'&&route.project?
+        listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>ownedBy(threads,me,onlyMine)} action={service==='claude'&&route.project?
           <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
         onNew={project=>{setClaudeNewCwd(project);if(id)navigate(withConversation(route,''));}}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
@@ -581,11 +596,13 @@ function App(){
         <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}
       {sheet==='home'&&<SheetPanel title="选项" close={()=>setSheet(null)}>
         <MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>
+        {teamItems}
         <MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);refreshRemoteList(value=>value+1);}}>刷新项目与会话</MenuItem>
         <MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>
-        <MenuItem icon="logout" onClick={logout}>断开连接</MenuItem>
+        <MenuItem icon="logout" onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem>
       </SheetPanel>}
       {sheet==='voice'&&<SheetPanel title="语音输入" close={()=>setSheet(null)}>{voiceOptions}</SheetPanel>}
+      {sheet==='team'&&teamPanel&&<SheetPanel title="团队" close={()=>setSheet(null)}>{teamPanel}</SheetPanel>}
       {sheet==='computer'&&<SheetPanel title="电脑" close={()=>setSheet(null)}>{computerOptions}</SheetPanel>}
       {sheet==='file'&&<SheetPanel title="查看项目文件" close={()=>setSheet(null)}>{fileOptions}</SheetPanel>}
       {sheet==='claude-project'&&route.project&&<SheetPanel title="项目设置" close={()=>setSheet(null)}>
@@ -647,13 +664,14 @@ function App(){
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
      {permissionPoint&&<PermissionPicker anchor={permissionButton.current} point={permissionPoint} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} disabled={busy} onChange={setApproval} close={()=>setPermissionPoint(null)}/>}
      {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
-     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页',voice:'语音输入','claude-project':'项目'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
-       {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem><MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>断开连接</MenuItem></>}
+     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页',voice:'语音输入','claude-project':'项目',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
+       {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>{teamItems}<MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem></>}
       {sheet==='computer'&&computerOptions}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>selectProject(p)}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div>
          {guest?<GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setProjects(old=>[...new Set([...old,path])]);selectProject(path);}}/>:
          <details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details>}</>}
        {sheet==='voice'&&voiceOptions}
+       {sheet==='team'&&teamPanel}
        {sheet==='add'&&<AddOptions attachments={attachments} pick={pick} disabled={busy} connected={connected} error={error} imagesBlocked={canImage?undefined:'当前模型未确认图片能力'}
          voiceLabel={voiceLabel} chooseVoice={()=>setSheet('voice')} browse={selected?()=>setSheet('browser'):undefined}
          projectFiles={selected?()=>setSheet('file'):undefined} refresh={selected?()=>{setSheet(null);void refreshSession();}:undefined} chooseProject={newChat?()=>setSheet('projects'):undefined}/>}

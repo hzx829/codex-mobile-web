@@ -3,6 +3,7 @@ import {Icon,type IconName} from './icons';
 import type {Json} from '../src/shared/types';
 import type {ThreadPreference} from './thread-preferences';
 import {Popover,type MenuPoint} from './popover';
+import {OwnerBadge} from './team';
 
 export function relativeTime(value:number){
   if(!value)return '';
@@ -21,7 +22,7 @@ export function ThreadRow({thread,selected,disabled=false,preference={},time,ope
     onPointerUp={cancel} onPointerCancel={cancel} onPointerLeave={cancel}
     onKeyDown={menu?e=>{if(e.key==='Enter'||e.key===' ')held.current=false;if(e.key==='ContextMenu'||e.key==='F10'&&e.shiftKey){e.preventDefault();const rect=e.currentTarget.getBoundingClientRect();menu({x:rect.left+16,y:rect.bottom});}}:undefined}>
     <span className="session-name">{thread.status?.type==='active'&&<i className="dot online"/>}{preference.unread&&<i className="dot unread-dot"/>}{thread.title}</span>
-    <span className="session-meta">{preference.pinned&&<Icon name="pin" size={14}/>}<time>{time}</time></span>
+    <span className="session-meta">{preference.pinned&&<Icon name="pin" size={14}/>}<time>{time}</time><OwnerBadge owner={thread.owner}/></span>
   </button>;
 }
 

@@ -52,8 +52,9 @@ The voice choice is saved as `voice-provider` in browser `localStorage`. Audio s
 | Connector `.local/connect.html`, `connect-qr.png` | Connection page and QR code containing the Token | Until regenerated/deleted; protect like the Token itself |
 | Connector `.local/operations.sqlite` | Operation IDs, payload hashes, states, result/error receipts, managed-session IDs; queued message text, images, file references and settings; upload metadata | Queued payloads are deleted on confirmed dispatch or removal; failed/uncertain entries remain until removed. Operation rows older than seven days are removed when the ledger opens, except those still in the queue. Managed-session IDs and upload metadata do not expire automatically. Receipts may contain sensitive error details; SQLite deletion does not guarantee secure erasure from disk, WAL or backups |
 | Runtime logs | Startup, connection and error diagnostics | Windows `.local/*.log` has no app-defined rotation. Supplied Compose rotates each service's local logs at 5 MB × 3 files. Other deployments follow their own settings |
-| Relay process | Peers, routes and forwarded content in memory | No application database or deliberate disk storage of conversation/file payloads. This excludes host swap, crash dumps, infrastructure logging and operator modifications |
+| Relay process | Peers, routes and forwarded content in memory | No deliberate disk storage of conversation/file payloads; without team mode there is no application database. This excludes host swap, crash dumps, infrastructure logging and operator modifications |
 | Relay deployment | Token in environment/configuration; Caddy certificate/configuration volumes when used | Until changed/removed by the operator |
+| Relay `relay.sqlite` (team mode only) | Members, devices, token hashes, session owners and titles, activity log; see Team mode below | Until removed by the operator; activity older than 400 days is deleted at relay start |
 | Native Codex and workspace | History, credentials, task results and project files | Governed by Codex and your retention/backups; uninstalling the bridge does not delete them |
 
 Default relay/connector status logging does not deliberately record message bodies or Tokens; the supplied Caddyfile does not enable access logging. Not all error messages are guaranteed to be sanitized. Custom proxies, cloud platforms and debugging settings may record metadata or additional content.
@@ -67,6 +68,14 @@ An authenticated client can expose a loopback web service through the preview po
 **File preview and download are not confined to a project and do not pass through Codex's sandbox or approval flow.** They read as the connector's OS user and accept absolute paths and cross-directory references, including sensitive files. Previews support text/images up to 2 MiB; video playback and downloads support files up to 100 MiB. Video is assembled in browser memory before playback. Transfers use the authenticated connection without a public download URL or relay disk copy. Format and size limits are not an authorization boundary. Use a dedicated OS account if you need to restrict readable files.
 
 Task execution follows the applicable Codex session's permissions. The bridge adds no extra confirmation layer, and a Token holder can answer supported native approvals. The web page, static assets and `/health` are public; machine/conversation requests require WebSocket authentication. Use an unguessable random Token and HTTPS for public access. The app also accepts plain HTTP/WS and does not enforce HTTPS for you.
+
+### Team mode (optional)
+
+After the relay operator runs `team init`, phones no longer sign in with the shared Token. Each member opens a one-time invite link (valid 24 hours, single use), which the relay exchanges for a random token for that device. Connectors keep using the shared Token unless an admin gives a computer its own token.
+
+The relay then keeps `relay.sqlite` in its data directory. It holds member names and roles; device names; SHA-256 hashes of device, invite and computer tokens; which member started each session (computer, app, session ID and the session's latest list title); and an activity log of write actions (time, member, device, computer, app, action, session ID, operation ID and outcome). It does not store message text, prompts, replies, file contents or what an approval allowed. Activity older than 400 days is deleted when the relay starts. The connector's operation ledger also records the member the relay named for each operation.
+
+Members can see and operate every session on the computers they may use. Session owners are labels, not isolation: every member's tasks still run as the computer's OS user. Removing a device or disabling a member closes its connections immediately. Signing out removes the current device. The browser keeps the device token in `localStorage` under `connection` and the "only my sessions" choice under `only-mine`.
 
 ### Connect, revoke and remove
 
@@ -132,8 +141,9 @@ Antigravity 面板沿用共享 Token。中继可读取转发的桌面对话标�
 | 连接器 `.local/connect.html`、`connect-qr.png` | 含 Token 的连接页和二维码 | 重新生成/删除前保留，按 Token 同等保管 |
 | 连接器 `.local/operations.sqlite` | 操作 ID、载荷摘要、状态、结果/错误回执、托管会话 ID；排队消息的文字、图片、文件引用及设置；上传元数据 | 排队内容在确认发送或移出时删除，失败和结果不明的条目保留到手动移出。打开数据库时删除超过七天且已不在队列中的操作记录；托管会话 ID 和上传元数据无自动过期。回执可能含敏感错误详情；SQLite 删除不保证清除磁盘、WAL 或备份中的副本 |
 | 运行日志 | 启动、连接和错误诊断 | Windows `.local/*.log` 无应用层轮换；附带 Compose 对各服务按 5 MB × 3 文件轮换；其他部署依自身设置 |
-| 中继进程 | 内存中的连接、路由和转发内容 | 无应用数据库，不主动把聊天/文件正文持久化到磁盘；不涵盖系统交换空间、崩溃转储、基础设施日志或管理者修改 |
+| 中继进程 | 内存中的连接、路由和转发内容 | 不主动把聊天/文件正文持久化到磁盘；未启用团队模式时无应用数据库；不涵盖系统交换空间、崩溃转储、基础设施日志或管理者修改 |
 | 中继部署 | 环境/配置中的 Token；使用 Caddy 时的证书和配置卷 | 管理者修改/删除前保留 |
+| 中继 `relay.sqlite`（仅团队模式） | 成员、设备、Token 哈希、会话归属与标题、操作记录；见下文“团队模式” | 管理者删除前保留；超过 400 天的操作记录在中继启动时删除 |
 | 原生 Codex 与工作区 | 历史、认证材料、任务结果、项目文件 | 由 Codex 和使用者的保留/备份设置管理；卸载连接器不会删除这些数据 |
 
 默认中继/连接器状态日志不主动记录消息正文或 Token，附带 Caddyfile 未启用访问日志。但不能保证所有错误信息都已脱敏；自定义代理、云平台或调试设置可能另行记录连接信息或内容。
@@ -147,6 +157,14 @@ Token 同时认证手机和连接器，没有独立只读凭据、设备批准�
 任务执行沿用对应 Codex 会话的权限。连接器不增加额外确认层，Token 持有者也能回应支持的原生审批。网页、静态资源与 `/health` 公开可访问，电脑/会话请求需先完成 WebSocket 认证。公网使用需要难以猜测的随机 Token 和 HTTPS；程序也接受 HTTP/WS，不会替使用者强制 HTTPS。
 
 持有 Token 的客户端可以通过预览端口开放电脑回环地址上的网页。手机浏览器运行网页，请求经中继和连接器转到选定的本机服务。一次性预览链接会建立浏览器会话 Cookie；主动结束预览、在应用中切换 thread/电脑、电脑断线或闲置 30 分钟后，该会话失效。中继运营者可读取和改动被代理的页面及表单内容。
+
+### 团队模式（可选）
+
+中继管理者运行 `team init` 后，手机不能再用共享 Token 登录。每个成员打开一次性邀请链接（24 小时内有效，只能用一次），中继把它换成这台设备自己的随机令牌。电脑连接器继续使用共享 Token，除非管理员给某台电脑生成了专用 Token。
+
+此后中继在数据目录保存 `relay.sqlite`，内容包括：成员名字和角色；设备名；设备、邀请和电脑 Token 的 SHA-256 哈希；每个会话由谁创建（电脑、应用、会话 ID 和列表中最近的标题）；写操作记录（时间、成员、设备、电脑、应用、操作类型、会话 ID、操作 ID 和结果）。不保存消息正文、提示词、回复、文件内容或审批允许的具体内容。超过 400 天的操作记录在中继启动时删除。连接器的操作账本也会记下中继标注的操作者。
+
+成员可以查看和操作自己可用电脑上的全部会话。会话归属只是标记，不是隔离：所有成员的任务都以电脑上的系统用户身份运行。移除设备或停用成员会立即断开其连接；退出登录会移除当前设备。浏览器在 `localStorage` 的 `connection` 中保存设备令牌，在 `only-mine` 中保存“只看我的会话”选项。
 
 ### 连接、撤销与清理
 

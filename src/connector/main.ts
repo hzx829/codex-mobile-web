@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { readConfig } from '../shared/config.js';
 import { MAX_FRAME, BridgeError, bridgeServices, type BridgeRequest, type Json } from '../shared/types.js';
-import { Ledger } from './ledger.js';
+import { Ledger, actorOf, requestActor } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
 import { AntigravityBridge } from './antigravity.js';
@@ -108,9 +108,10 @@ function connect() {
     if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
     if(m.type!=='request')return;
     try{
-      const result=m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
+      // Operations started by this request record the team member the relay names as its sender.
+      const result=await requestActor.run(actorOf(m.actor),async()=>m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
-        :await services.handle({id:String(m.id),action:String(m.action) as BridgeRequest['action'],payload:m.payload&&typeof m.payload==='object'?m.payload:{}});
+        :await services.handle({id:String(m.id),action:String(m.action) as BridgeRequest['action'],payload:m.payload&&typeof m.payload==='object'?m.payload:{}}));
       if(socket===ws)send({type:'response',id:m.id,result});
     }
     catch(e){const err=e instanceof BridgeError?e:new BridgeError('computer_error','电脑处理失败，请查看本机状态');if(socket===ws)send({type:'response',id:m.id,error:{code:err.code,message:err.message,uncertain:err.uncertain}});}
