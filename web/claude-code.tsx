@@ -17,6 +17,7 @@ import {GuestProjectForm} from './claude-projects';
 import {useComposerAttachments} from './composer-attachments';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
 import {ModelMenu} from './model-picker';
+import {listedModel,modelDisplayName,reasoningLabel,resolveModelSelection,type ModelSelection} from '../src/shared/models';
 import {PermissionMenu,type PermissionOption} from './permission-picker';
 import {SheetPanel} from './sheet';
 import {uploadAttachments,type UploadProgress} from './file-upload';
@@ -65,7 +66,8 @@ export function ClaudeCodePanel(props:Props){
   const [view,setView]=useState<Json|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
   const [draft,setDraft]=useState(()=>load(`${scope}:draft`)),[pending,setPending]=useState(()=>load(`${scope}:pending`));
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
-  const [model,setModel]=useState(()=>load(`claude:${machine}:model`)),[mode,setMode]=useState('');
+  // A saved session keeps its own model and effort until changed here; the last choice only seeds new sessions.
+  const [model,setModel]=useState(()=>creating?load(`claude:${machine}:model`):''),[effort,setEffort]=useState(()=>creating?load(`claude:${machine}:effort`):''),[mode,setMode]=useState('');
   const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null),[menuPoint,setMenuPoint]=useState<MenuPoint|null>(null),[statusPoint,setStatusPoint]=useState<MenuPoint|null>(null);
   const [models,setModels]=useState<Json[]|null>(null),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]),[defaultMode,setDefaultMode]=useState('');
   const request=useRef(call);request.current=call;
@@ -172,7 +174,7 @@ export function ClaudeCodePanel(props:Props){
     if(attachments.loading||voiceBusy)return;
     const text=draft.trim();
     if(!text&&!images.length&&!files.length)return;
-    const settings={...(model?{model}:{}),...(selectedMode?{permissionMode:selectedMode}:{})};
+    const settings={...(model?{model}:{}),...(effort?{effort}:{}),...(selectedMode?{permissionMode:selectedMode}:{})};
     if(creating){
       if(!startPath){setError('请选择项目');return;}
       stick.current=true;
@@ -195,6 +197,7 @@ export function ClaudeCodePanel(props:Props){
       edit([draft.trim(),message.text].filter(Boolean).join('\n\n'));
       setImages(old=>[...old,...(message.images||[])]);
       if(message.model)setModel(message.model);
+      if(message.effort)setEffort(message.effort);
       setMode(message.permissionMode||'');
       setNotice('已撤回到输入框');
       requestAnimationFrame(()=>composer.current?.focus());
@@ -203,7 +206,7 @@ export function ClaudeCodePanel(props:Props){
   /** Rewrites a sent message: the session continues from the turn before it, as Codex does. */
   async function resend(turnId:string,text:string){
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
-    const settings={...(model?{model}:{}),...(selectedMode&&(selectedMode!=='bypassPermissions'||bypassLater)?{permissionMode:selectedMode}:{})};
+    const settings={...(model?{model}:{}),...(effort?{effort}:{}),...(selectedMode&&(selectedMode!=='bypassPermissions'||bypassLater)?{permissionMode:selectedMode}:{})};
     stick.current=true;
     await mutate('claude.edit',{conversationId,turnId,text,...settings,...(external?{confirmIdle:true}:{})});
   }
@@ -213,7 +216,7 @@ export function ClaudeCodePanel(props:Props){
     try{const result=await request.current('claude.models',{cwd:view?.cwd||startPath||undefined});if(alive.current)setModels(result.models||[]);}
     catch(e:any){if(alive.current)setModelsError(e?.message||'模型列表读取失败');}
   }
-  function chooseModel(value:string){setModel(value);store(`claude:${machine}:model`,value);}
+  function chooseModel(value:ModelSelection){setModel(value.model);setEffort(value.effort);store(`claude:${machine}:model`,value.model);store(`claude:${machine}:effort`,value.effort);}
 
   const copy=useStableEvent((text:string)=>void copyText(text).catch(()=>setError('复制失败，请长按选择文字')));
   // A fork is a new Claude Code session holding the transcript up to the end of this turn.
@@ -236,7 +239,16 @@ export function ClaudeCodePanel(props:Props){
   const attachmentCount=attachments.count;
   const title=creating?'新的 Claude Code 会话':view?.title||'正在打开…';
   const project=creating?(startPath?workspaceName(startPath):'选择项目'):view?.cwd?workspaceName(view.cwd):'Claude Code';
-  const modelLabel=model?(models||[]).find(item=>item.id===model)?.label||model:view?.model||'默认模型';
+  // Codex-shaped entries for the shared picker. Older connectors list no effort levels: then only the model is chosen.
+  const pickerModels:Json[]=(models||[]).map(item=>({model:item.id,displayName:item.label,description:item.description,resolvedModel:item.resolvedModel,
+    supportedReasoningEfforts:(item.efforts||[]).map((level:string)=>({reasoningEffort:level}))}));
+  const tuning=!models||pickerModels.some(item=>item.supportedReasoningEfforts.length);
+  // What the session runs on now: its own model matched to the list, or Claude Code's default for a new one.
+  const listed=creating?pickerModels[0]:listedModel(pickerModels,view?.model);
+  const currentModel={model:listed?.model||view?.model||'',effort:view?.effort||''};
+  const selection=resolveModelSelection(pickerModels,{model,effort},currentModel);
+  const currentLabel=modelDisplayName(listed,view?.model)||'默认模型';
+  const modelLabel=modelDisplayName(selection.model,selection.id)||'默认模型',effortLabel=reasoningLabel(effort||view?.effort||'');
   const controlledRun=running&&Boolean(view?.controlled);
   return <main className="thread-panel" inert={inert}>
     <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}>
@@ -287,9 +299,9 @@ export function ClaudeCodePanel(props:Props){
         add={()=>setAdding(true)} addDisabled={!canWrite||attachments.loading}
         permission={<PermissionMenu options={MODES.filter(option=>option.id!=='bypassPermissions'||creating||!view?.controlled||bypassLater)} value={selectedMode}
           current={{id:effectiveMode,label:modeLabel(effectiveMode)}} disabled={!connected||busy} onChange={setMode}/>}
-        model={<ModelMenu label={modelLabel} title="选择 Claude Code 模型" tuning={false} disabled={!connected||busy} opened={()=>void openModels()}
-          models={(models||[]).map(item=>({model:item.id,displayName:item.label,description:item.description}))} value={{model,effort:''}} current={{model:view?.model}}
-          currentLabel={view?.model||'默认模型'} onChange={selection=>chooseModel(selection.model)}
+        model={<ModelMenu label={modelLabel} details={effortLabel?[effortLabel]:[]} title="选择 Claude Code 模型" tuning={tuning} speed={false} disabled={!connected||busy} opened={()=>void openModels()}
+          models={pickerModels} value={{model,effort}} current={currentModel}
+          currentLabel={currentLabel} onChange={chooseModel}
           status={modelsError?<p role="alert">{modelsError} <button type="button" onClick={()=>void openModels()}>重试</button></p>:!models?<p role="status">正在读取模型…</p>:!models.length&&<p role="status">没有可选模型</p>}/>}
         running={controlledRun?{stop:()=>void mutate('claude.stop',{conversationId}),disabled:!connected||busy||Boolean(pending),queue:true}:undefined}
         send={{label:queueNext?'完成后发送':'发送消息',sending:Boolean(pending&&busy),disabled:!canSend||!drafted||creating&&!startPath}}/>

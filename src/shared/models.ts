@@ -23,6 +23,18 @@ export function fastTier(model:Json|undefined):string|undefined {
   return tier?.id||model?.additionalSpeedTiers?.find((id:string)=>id==='fast'||id==='priority');
 }
 
+/**
+ * The list entry for the model a session reports. Claude Code lists aliases ("opus") whose `resolvedModel` is the
+ * full ID a session runs on; the named entry is preferred over "default", and a "[1m]" suffix is ignored.
+ */
+export function listedModel(models:Json[],id:string|undefined):Json|undefined {
+  if(!id)return undefined;
+  const base=(value:unknown)=>String(value||'').replace(/\[[^\]]*\]$/,'');
+  const resolved=(entry:Json)=>base(entry.resolvedModel)===base(id);
+  return models.find(entry=>entry.model===id)||models.find(entry=>base(entry.model)===base(id))
+    ||models.find(entry=>entry.model!=='default'&&resolved(entry))||models.find(resolved);
+}
+
 export function resolveModelSelection(models:Json[],value:ModelSelection,current:ModelDefaults) {
   const id=value.model||current.model||'',model=models.find(entry=>entry.model===id);
   const effort=value.effort||current.effort||model?.defaultReasoningEffort||'';
@@ -35,6 +47,6 @@ export function selectModel(models:Json[],value:ModelSelection,current:ModelDefa
   const next=models.find(entry=>entry.model===id);
   if(!next)return value;
   const previous=resolveModelSelection(models,value,current),efforts=reasoningOptions(next);
-  const effort=efforts.includes(previous.effort)?previous.effort:efforts.includes(next.defaultReasoningEffort)?next.defaultReasoningEffort:efforts[0]||'';
+  const effort=efforts.includes(previous.effort)?previous.effort:efforts.includes(next.defaultReasoningEffort)?next.defaultReasoningEffort:previous.effort?efforts[0]||'':'';
   return {model:id,effort,serviceTier:previous.isFast?fastTier(next)||null:null};
 }

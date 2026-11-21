@@ -9,7 +9,7 @@ import {imageBytes, validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
-import {ClaudeRuntime, PERMISSION_MODES, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
+import {CLAUDE_EFFORTS, ClaudeRuntime, PERMISSION_MODES, type ClaudeEffort, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
 import {claudeArtifactTitles, claudePatches, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
@@ -54,6 +54,11 @@ function permissionMode(value: unknown): PermissionMode | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (!PERMISSION_MODES.includes(value as PermissionMode)) throw new BridgeError('invalid', '权限模式无效');
   return value as PermissionMode;
+}
+function optionalEffort(value: unknown): ClaudeEffort | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (!CLAUDE_EFFORTS.includes(value as ClaudeEffort)) throw new BridgeError('invalid', '思考程度无效');
+  return value as ClaudeEffort;
 }
 const optionalModel = (value: unknown) => value === undefined || value === null || value === '' ? undefined : textRequired(value, '模型', 200);
 function message(p: Json) {
@@ -113,7 +118,7 @@ export class ClaudeCodeBridge {
     if (session && (session.running || session.requests.size || session.inbox.closed)) return;
     this.sending.add(id);
     try {
-      const {text, images = [], model, permissionMode: mode} = head.payload;
+      const {text, images = [], model, effort, permissionMode: mode} = head.payload;
       if (!session) {
         const info = await this.info(id).catch(() => undefined);
         // Wait while the terminal or IDE may be running it; never start a second writer.
@@ -123,10 +128,10 @@ export class ClaudeCodeBridge {
       try {
         if (!session || session.closed) {
           const {cwd = ''} = await this.info(id);
-          session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, model, permissionMode: mode});
+          session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, model, effort, permissionMode: mode});
         } else {
           if (guestWorkspace()) await projectDirectory(session.cwd);
-          await this.runtime.configure(session, model, mode);
+          await this.runtime.configure(session, model, mode, effort);
         }
         this.runtime.send(session, text, images, undefined, head.id);
         this.ledger?.recordSender({service: 'claude', threadId: id, opId: head.id, kind: 'text', text});
@@ -235,7 +240,7 @@ export class ClaudeCodeBridge {
     }
     if (turns.length && !recent.length) throw new BridgeError('too_large', 'Claude Code 最新一轮过长，请在电脑上查看');
     return {
-      id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', revision: current.revision, running,
+      id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', effort: live?.effort || '', revision: current.revision, running,
       controlled: Boolean(live), external, permissionMode: live?.permissionMode || '',
       defaultPermissionMode: this.runtime.defaultMode, canBypass: Boolean(live?.canBypass), requests: live?.pending || [], error: live?.error || '',
       queuedMessages: (this.queue?.queued(id) || []).map(message => ({id: message.id, text: message.payload.text || '',
@@ -319,11 +324,11 @@ export class ClaudeCodeBridge {
     }
     if (action === 'claude.create') {
       const cwd = await projectDirectory(textRequired(p.cwd, '项目目录', 4096));
-      const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode);
+      const input = message(p), model = optionalModel(p.model), effort = optionalEffort(p.effort), mode = permissionMode(p.permissionMode);
       const files = input.files.length ? {files: attachmentIds(input.files)} : {};
-      return this.mutate(p, {action, cwd, text: input.text, images: fingerprint(input.images), ...files, model, mode}, async () => {
+      return this.mutate(p, {action, cwd, text: input.text, images: fingerprint(input.images), ...files, model, ...(effort ? {effort} : {}), mode}, async () => {
         const text = await this.attach(newScope(cwd), input.text, input.files);
-        const session = await this.runtime.start({cwd, model, permissionMode: mode});
+        const session = await this.runtime.start({cwd, model, effort, permissionMode: mode});
         this.runtime.send(session, text, input.images, undefined, p.opId);
         const conversationId = await this.runtime.waitForId(session);
         this.ledger?.recordSender({service: 'claude', threadId: conversationId, opId: p.opId, kind: 'text', text});
@@ -354,9 +359,9 @@ export class ClaudeCodeBridge {
         : downloadProjectFile(cwd, path, textRequired(p.revision, '文件版本', 64), p.offset);
     }
     if (action === 'claude.send') {
-      const input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode), delivery = sendMode(p.mode);
+      const input = message(p), model = optionalModel(p.model), effort = optionalEffort(p.effort), mode = permissionMode(p.permissionMode), delivery = sendMode(p.mode);
       const files = input.files.length ? {files: attachmentIds(input.files)} : {};
-      return this.mutate(p, {action, id, text: input.text, images: fingerprint(input.images), ...files, model, mode, delivery, confirmIdle: p.confirmIdle === true}, async () => {
+      return this.mutate(p, {action, id, text: input.text, images: fingerprint(input.images), ...files, model, ...(effort ? {effort} : {}), mode, delivery, confirmIdle: p.confirmIdle === true}, async () => {
         if (this.sending.has(id)) throw new BridgeError('busy', '这条会话已有一条消息正在提交，请稍后再试');
         this.sending.add(id);
         try {
@@ -365,7 +370,7 @@ export class ClaudeCodeBridge {
           // Behind a running turn, or behind messages already waiting, a plain send waits its turn on this computer.
           if (delivery === 'queue' && this.queue && (session?.running || session?.requests.size || this.queue.queued(id).length)) {
             await this.info(id);
-            this.queue.enqueue(textRequired(p.opId, '操作标识', 100), id, {text, images: input.images, model, permissionMode: mode});
+            this.queue.enqueue(textRequired(p.opId, '操作标识', 100), id, {text, images: input.images, model, ...(effort ? {effort} : {}), permissionMode: mode});
             this.queueChanged(id);
             return {conversationId: id, kind: 'queued'};
           }
@@ -374,10 +379,10 @@ export class ClaudeCodeBridge {
             const directory = await projectDirectory(cwd);
             if ((await this.revision(id)).external && p.confirmIdle !== true)
               throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
-            session = await this.runtime.start({cwd: directory, resume: id, model, permissionMode: mode});
+            session = await this.runtime.start({cwd: directory, resume: id, model, effort, permissionMode: mode});
           } else {
             if (guestWorkspace()) await projectDirectory(session.cwd);
-            await this.runtime.configure(session, model, mode);
+            await this.runtime.configure(session, model, mode, effort);
           }
           const running = session.running;
           this.runtime.send(session, text, input.images, delivery === 'steer' ? 'next' : delivery === 'now' ? 'now' : undefined, p.opId);
@@ -397,7 +402,7 @@ export class ClaudeCodeBridge {
           const message = queue.cancelQueued(id, queuedId);
           this.queueChanged(id);
           return action === 'claude.withdrawQueued'
-            ? {queuedId, kind: 'queue_withdrawn', message: {text: message.text || '', images: message.images || [], model: message.model, permissionMode: message.permissionMode}}
+            ? {queuedId, kind: 'queue_withdrawn', message: {text: message.text || '', images: message.images || [], model: message.model, effort: message.effort, permissionMode: message.permissionMode}}
             : {queuedId, kind: 'queue_cancelled'};
         }
         // Into the running turn with that turn's settings, as Codex's steer does.
@@ -423,8 +428,8 @@ export class ClaudeCodeBridge {
     }
     if (action === 'claude.edit') {
       // Codex-style edit: the session continues from the turn before this message; it and everything after are dropped.
-      const turnId = textRequired(p.turnId, '消息', 100), input = message(p), model = optionalModel(p.model), mode = permissionMode(p.permissionMode);
-      return this.mutate(p, {action, id, turnId, text: input.text, images: fingerprint(input.images), model, mode, confirmIdle: p.confirmIdle === true}, async () => {
+      const turnId = textRequired(p.turnId, '消息', 100), input = message(p), model = optionalModel(p.model), effort = optionalEffort(p.effort), mode = permissionMode(p.permissionMode);
+      return this.mutate(p, {action, id, turnId, text: input.text, images: fingerprint(input.images), model, ...(effort ? {effort} : {}), mode, confirmIdle: p.confirmIdle === true}, async () => {
         if (this.sending.has(id)) throw new BridgeError('busy', '这条会话已有一条消息正在提交，请稍后再试');
         this.sending.add(id);
         try {
@@ -434,11 +439,11 @@ export class ClaudeCodeBridge {
           if (index < 0 || turns[index].items[0]?.role !== 'user') throw new BridgeError('changed', '找不到这条消息，请刷新会话后重试');
           const anchor = turns[index - 1]?.anchor;
           if (!anchor) throw new BridgeError('invalid', '第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话');
-          const live = this.runtime.get(id), kept = mode || live?.permissionMode;
+          const live = this.runtime.get(id), kept = mode || live?.permissionMode, keptEffort = effort || live?.effort || undefined;
           if (live) await this.runtime.shutdown(live);
           else if ((await this.revision(id)).external && p.confirmIdle !== true)
             throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
-          const session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, resumeAt: anchor, model, permissionMode: kept});
+          const session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, resumeAt: anchor, model, effort: keptEffort, permissionMode: kept});
           this.runtime.send(session, input.text, input.images, undefined, p.opId);
           this.ledger?.recordSender({service: 'claude', threadId: id, opId: p.opId, kind: 'text', text: input.text});
           return {submitted: true};

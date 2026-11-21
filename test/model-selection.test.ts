@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {modelDisplayName,reasoningLabel,resolveModelSelection,selectModel} from '../src/shared/models.js';
+import {listedModel,modelDisplayName,reasoningLabel,resolveModelSelection,selectModel} from '../src/shared/models.js';
 
 const models=[
   {model:'gpt-6-astra',displayName:'GPT-6-Astra',defaultReasoningEffort:'medium',supportedReasoningEfforts:[{reasoningEffort:'medium'},{reasoningEffort:'xhigh'},{reasoningEffort:'ultra'}],serviceTiers:[{id:'priority',name:'Fast'}]},
@@ -38,4 +38,18 @@ test('changing model replaces unsupported inherited reasoning and maps actual sp
   assert.deepEqual(selectModel(models,inherited,current,'custom'),{model:'custom',effort:'future',serviceTier:null});
   assert.deepEqual(selectModel(models,{...inherited,serviceTier:null},current,'gpt-6-luna'),{model:'gpt-6-luna',effort:'medium',serviceTier:null});
   assert.equal(selectModel(models,inherited,current,'missing'),inherited);
+});
+
+test('a session model is matched to its list entry, and an unknown effort stays inherited',()=>{
+  const efforts=[{reasoningEffort:'low'},{reasoningEffort:'high'}];
+  const claude=[{model:'default',resolvedModel:'claude-opus-5-5',supportedReasoningEfforts:efforts},{model:'opus',resolvedModel:'claude-opus-5-5',supportedReasoningEfforts:efforts},
+    {model:'sonnet',resolvedModel:'claude-sonnet-5-5',supportedReasoningEfforts:efforts},{model:'claude-fable-5-2',resolvedModel:'claude-fable-5-2'}];
+  assert.equal(listedModel(claude,'claude-opus-5-5')?.model,'opus');
+  assert.equal(listedModel(claude,'claude-sonnet-5-5[1m]')?.model,'sonnet');
+  assert.equal(listedModel(claude,'claude-fable-5-2')?.model,'claude-fable-5-2');
+  assert.equal(listedModel(claude,'claude-old'),undefined);assert.equal(listedModel(claude,''),undefined);
+  assert.equal(listedModel([claude[0]],'claude-opus-5-5')?.model,'default');
+  // Claude Code does not report its default effort: choosing a model must not pick the lowest level.
+  assert.deepEqual(selectModel(claude,inherited,{model:'opus'},'sonnet'),{model:'sonnet',effort:'',serviceTier:null});
+  assert.deepEqual(selectModel(claude,{...inherited,effort:'high'},{model:'opus'},'sonnet'),{model:'sonnet',effort:'high',serviceTier:null});
 });

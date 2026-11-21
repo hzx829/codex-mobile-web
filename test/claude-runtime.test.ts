@@ -63,8 +63,9 @@ function fakeClaude(projects: string) {
     const generator = run() as any;
     generator.interrupt = async () => {interrupted = true;calls.push({type: 'interrupt'});};
     generator.setModel = async (model: string) => {calls.push({type: 'model', model});};
+    generator.applyFlagSettings = async (settings: any) => {calls.push({type: 'settings', settings});};
     generator.setPermissionMode = async (mode: string) => {calls.push({type: 'mode', mode});};
-    generator.supportedModels = async () => [{value: 'opus', displayName: 'Opus', description: '最强'}, {value: 'sonnet', displayName: 'Sonnet', description: '均衡'}];
+    generator.supportedModels = async () => [{value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: '最强', supportsEffort: true, supportedEffortLevels: ['low', 'high', 'max']}, {value: 'sonnet', displayName: 'Sonnet', description: '均衡'}];
     generator.close = () => {closed = true;calls.push({type: 'close'});};
     return generator;
   };
@@ -87,19 +88,21 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
 
     // New session, with a model and image.
     const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-    const create = {cwd, text: '你好', images: [image], model: 'opus', permissionMode: 'acceptEdits', opId: opId()};
+    const create = {cwd, text: '你好', images: [image], model: 'opus', effort: 'high', permissionMode: 'acceptEdits', opId: opId()};
     const created = await bridge.handle('claude.create', create);
     assert.equal(created.state, 'accepted');
     const id = created.conversationId;
     assert.deepEqual(await bridge.handle('claude.create', create), created, 'retrying an operation never starts a second session');
     assert.equal(fake.calls.filter(call => call.type === 'start').length, 1);
-    assert.equal(fake.calls[0].options.model, 'opus');assert.equal(fake.calls[0].options.permissionMode, 'acceptEdits');
+    assert.equal(fake.calls[0].options.model, 'opus');assert.equal(fake.calls[0].options.effort, 'high');assert.equal(fake.calls[0].options.permissionMode, 'acceptEdits');
     assert.equal(fake.calls[0].options.env.CLAUDE_CODE_ENTRYPOINT, 'codex-mobile-web', 'an entrypoint the terminal resume list shows');
     assert.equal(fake.calls[0].options.cwd, cwd);
     assert.deepEqual(fake.calls[0].options.systemPrompt, {type: 'preset', preset: 'claude_code'});
     assert.equal(fake.calls[1].images, 1);
     let view = await until(() => read(id), value => !value.running && value.turns.length === 1);
     assert.equal(view.controlled, true);assert.equal(view.turns[0].items.at(-1).text, '好的：你好');
+    assert.equal(view.effort, 'high', 'the session reports the effort it was started with');
+    await assert.rejects(bridge.handle('claude.send', {conversationId: id, text: 'x', effort: 'extreme', opId: opId()}), /思考程度无效/);
 
     // Tool approval with "remember".
     assert.equal((await bridge.handle('claude.send', {conversationId: id, text: 'run npm test', opId: opId()})).state, 'accepted');
@@ -140,7 +143,7 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
     assert.equal((await bridge.handle('claude.cancelQueued', {conversationId: id, queuedId: dropOp, opId: opId()})).kind, 'queue_cancelled');
     assert.equal((await bridge.handle('claude.operation', {opId: dropOp})).kind, 'queue_cancelled', 'a deleted message reads back as not sent');
     assert.equal((await bridge.handle('claude.archive', {conversationId: id, opId: opId()})).state, 'failed', 'queued messages block archiving');
-    await bridge.handle('claude.send', {conversationId: id, text: '顺便', mode: 'steer', model: 'sonnet', opId: opId()});
+    await bridge.handle('claude.send', {conversationId: id, text: '顺便', mode: 'steer', model: 'sonnet', effort: 'max', opId: opId()});
     await bridge.handle('claude.send', {conversationId: id, text: '马上', mode: 'now', opId: opId()});
     // A queued message can also interrupt the reply, from the queue.
     const jumpOp = opId();
@@ -155,9 +158,10 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
       [['slow', undefined, 0], ['顺便', 'next', 0], ['马上', 'now', 0], ['插队', 'now', 0], ['之后再做', undefined, 1]], 'the queued message goes out after the turn, with its image');
     assert.equal((await bridge.handle('claude.operation', {opId: queuedOp})).submitted, true);
     assert.ok(fake.calls.some(call => call.type === 'model' && call.model === 'sonnet'));
+    assert.deepEqual(fake.calls.filter(call => call.type === 'settings').map(call => call.settings), [{effortLevel: 'max'}], 'a changed effort is applied to the running session, once');
     assert.ok(fake.calls.some(call => call.type === 'interrupt'));
     assert.equal((await read(id)).error, '', 'a requested stop is not reported as an error');
-    assert.deepEqual((await bridge.handle('claude.models', {})).models.map((m: any) => m.id), ['opus', 'sonnet']);
+    assert.deepEqual((await bridge.handle('claude.models', {})).models.map((m: any) => [m.id, m.resolvedModel, m.efforts]), [['opus', 'claude-opus-5-5', ['low', 'high', 'max']], ['sonnet', undefined, []]]);
 
     // Idle sessions are released so the terminal can resume them.
     await until(() => read(id), value => value.controlled === false, 15_000);
