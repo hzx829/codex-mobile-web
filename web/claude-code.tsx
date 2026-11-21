@@ -47,9 +47,9 @@ const MODES:PermissionOption[]=[
   {id:'default',label:'按需审批',description:'按 Claude Code 的规则，需要时请你审批'},
   {id:'acceptEdits',label:'自动接受编辑',description:'文件修改自动接受，命令仍需审批'},
   {id:'plan',label:'只做计划',description:'只读分析并给出计划，你确认后才执行'},
-  {id:'bypassPermissions',label:'全部允许',description:'不再请求任何审批（慎用）；只用于下一条消息',elevated:true},
+  {id:'bypassPermissions',label:'跳过权限确认',description:'不再请求任何审批，直接执行（慎用）',elevated:true},
 ];
-/** A session without a mode of its own runs in Claude Code's default mode. */
+/** A session without a mode of its own runs in the connector's default mode (older connectors: Claude Code's default). */
 const modeLabel=(mode:string)=>MODES.find(m=>m.id===mode)?.label||mode;
 /** Where "remember" saves the rule, as the connector reports it; older connectors do not say. */
 const REMEMBER={session:'本会话允许',project:'本项目始终允许',user:'始终允许'} as const;
@@ -66,7 +66,7 @@ export function ClaudeCodePanel(props:Props){
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   const [model,setModel]=useState(()=>load(`claude:${machine}:model`)),[mode,setMode]=useState('');
   const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null),[menuPoint,setMenuPoint]=useState<MenuPoint|null>(null),[statusPoint,setStatusPoint]=useState<MenuPoint|null>(null);
-  const [models,setModels]=useState<Json[]|null>(null),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]);
+  const [models,setModels]=useState<Json[]|null>(null),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]),[defaultMode,setDefaultMode]=useState('');
   const request=useRef(call);request.current=call;
   const alive=useRef(true),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
   useComposerHeight(composer,draft,true);
@@ -84,7 +84,7 @@ export function ClaudeCodePanel(props:Props){
   useEffect(()=>{void refresh();},[connected,conversationId,refresh]);
   useEffect(()=>{
     if(!creating||!connected)return;
-    request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setTarget(old=>old||list[0]?.id||(guest?'':OTHER));}).catch(failed);
+    request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setDefaultMode(page.defaultPermissionMode||'');setTarget(old=>old||list[0]?.id||(guest?'':OTHER));}).catch(failed);
   },[creating,connected,guest]);
   useEffect(()=>{
     if(!connected||!view?.revision)return;
@@ -153,7 +153,10 @@ export function ClaudeCodePanel(props:Props){
   // A project from the list, or an unlisted folder passed in.
   const chosen=places.find(place=>place.id===target)||(target&&target!==OTHER?{id:target,path:target}:undefined);
   const startPath=target===OTHER?cwd.trim():chosen?.path||'';
-  const selectedMode=mode==='bypassPermissions'&&view?.controlled?'':mode;
+  // Older connectors start a session with skipping allowed only when it is chosen then; newer ones say so with canBypass.
+  const bypassLater=Boolean(view?.canBypass),oneShotBypass=!bypassLater;
+  const selectedMode=mode==='bypassPermissions'&&view?.controlled&&!bypassLater?'':mode;
+  const effectiveMode=view?.permissionMode||view?.defaultPermissionMode||defaultMode||'default';
   const queued:QueuedMessage[]=view?.queuedMessages||[];
   // As in Codex: behind a running turn or waiting messages, a plain send waits on the computer until the turn ends.
   const queueNext=!creating&&(running||queued.length>0);
@@ -181,7 +184,7 @@ export function ClaudeCodePanel(props:Props){
     const message=queueNext?null:{...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,files.map(file=>file.name)),baseline:userIds(view)};
     if(message)setOutgoing(message);
     const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(external?{confirmIdle:true}:{})},
-      result=>{cleared();if(selectedMode==='bypassPermissions')setMode('');
+      result=>{cleared();if(selectedMode==='bypassPermissions'&&oneShotBypass)setMode('');
         setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='sent_now'?'已立即发送':'');},upload({conversationId}));
     if(message)setOutgoing(old=>old!==message?old:accepted?{...message,acceptedAt:Date.now()}:null);
   }
@@ -199,7 +202,7 @@ export function ClaudeCodePanel(props:Props){
   /** Rewrites a sent message: the session continues from the turn before it, as Codex does. */
   async function resend(turnId:string,text:string){
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
-    const settings={...(model?{model}:{}),...(selectedMode&&selectedMode!=='bypassPermissions'?{permissionMode:selectedMode}:{})};
+    const settings={...(model?{model}:{}),...(selectedMode&&(selectedMode!=='bypassPermissions'||bypassLater)?{permissionMode:selectedMode}:{})};
     stick.current=true;
     await mutate('claude.edit',{conversationId,turnId,text,...settings,...(external?{confirmIdle:true}:{})});
   }
@@ -281,8 +284,8 @@ export function ClaudeCodePanel(props:Props){
         locked={busy} showImage={showImage} uploadProgress={uploadProgress}
         voice={voice} voiceMode={props.voiceMode} voiceDisabled={busy} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
         add={()=>setAdding(true)} addDisabled={!canWrite||attachments.loading}
-        permission={<PermissionMenu options={MODES.filter(option=>option.id!=='bypassPermissions'||creating||!view?.controlled)} value={selectedMode}
-          current={{id:view?.permissionMode||'default',label:modeLabel(view?.permissionMode||'default')}} disabled={!connected||busy} onChange={setMode}/>}
+        permission={<PermissionMenu options={MODES.filter(option=>option.id!=='bypassPermissions'||creating||!view?.controlled||bypassLater)} value={selectedMode}
+          current={{id:effectiveMode,label:modeLabel(effectiveMode)}} disabled={!connected||busy} onChange={setMode}/>}
         model={<ModelMenu label={modelLabel} title="选择 Claude Code 模型" tuning={false} disabled={!connected||busy} opened={()=>void openModels()}
           models={(models||[]).map(item=>({model:item.id,displayName:item.label,description:item.description}))} value={{model,effort:''}} current={{model:view?.model}}
           currentLabel={view?.model||'默认模型'} onChange={selection=>chooseModel(selection.model)}

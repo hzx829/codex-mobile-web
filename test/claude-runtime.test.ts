@@ -197,6 +197,51 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
   }
 });
 
+test('the connector default permission mode: skip prompts by default, and switch in and out while running', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-mode-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  const bridges: ClaudeCodeBridge[] = [];
+  try {
+    const config = join(root, 'config'), cwd = join(root, 'repo');
+    await mkdir(join(config, 'projects', 'work'), {recursive: true});await mkdir(cwd);
+    process.env.CLAUDE_CONFIG_DIR = config;
+
+    // Own computer: no mode chosen means skipping prompts, and the session may switch back and forth.
+    const fake = fakeClaude(join(config, 'projects'));
+    const bridge = new ClaudeCodeBridge(ledger, config, undefined, Date.now, new ClaudeRuntime(async () => fake.query, () => undefined, 60_000, undefined, 'bypassPermissions'));
+    bridges.push(bridge);
+    assert.equal((await bridge.handle('claude.list', {})).defaultPermissionMode, 'bypassPermissions');
+    const id = (await bridge.handle('claude.create', {cwd, text: '你好', opId: opId()})).conversationId;
+    assert.equal(fake.calls[0].options.permissionMode, 'bypassPermissions');
+    assert.equal(fake.calls[0].options.allowDangerouslySkipPermissions, true);
+    let view = await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 1);
+    assert.deepEqual([view.permissionMode, view.defaultPermissionMode, view.canBypass], ['bypassPermissions', 'bypassPermissions', true]);
+    await bridge.handle('claude.send', {conversationId: id, text: '慢一点', permissionMode: 'default', opId: opId()});
+    await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 2);
+    assert.equal((await bridge.handle('claude.send', {conversationId: id, text: '继续', permissionMode: 'bypassPermissions', opId: opId()})).state, 'accepted');
+    assert.deepEqual(fake.calls.filter(call => call.type === 'mode').map(call => call.mode), ['default', 'bypassPermissions']);
+    await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 3);
+
+    // Claude Code's own default (a borrowed computer): skipping is only possible when the session starts with it.
+    const plain = fakeClaude(join(config, 'projects'));
+    const guarded = new ClaudeCodeBridge(ledger, config, undefined, Date.now, new ClaudeRuntime(async () => plain.query, () => undefined, 60_000));
+    bridges.push(guarded);
+    const other = (await guarded.handle('claude.create', {cwd, text: '你好', opId: opId()})).conversationId;
+    assert.equal(plain.calls[0].options.permissionMode, 'default');
+    assert.equal(plain.calls[0].options.allowDangerouslySkipPermissions, undefined);
+    view = await until(() => guarded.handle('claude.read', {conversationId: other}), value => !value.running && value.turns.length === 1);
+    assert.deepEqual([view.defaultPermissionMode, view.canBypass], ['default', false]);
+    const refused = await guarded.handle('claude.send', {conversationId: other, text: 'x', permissionMode: 'bypassPermissions', opId: opId()});
+    assert.equal(refused.state, 'failed');
+  } finally {
+    for (const bridge of bridges) bridge.close();
+    ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
 test('Claude Code executable and messages', () => {
   assert.equal(findClaude({CLAUDE_CODE_BIN: 'C:/tools/claude.exe'}, () => false, 'win32'), 'C:/tools/claude.exe');
   assert.equal(findClaude({PATH: 'C:\\a;C:\\b', USERPROFILE: 'C:\\Users\\me'}, path => path === join('C:\\b', 'claude.exe'), 'win32'), join('C:\\b', 'claude.exe'));

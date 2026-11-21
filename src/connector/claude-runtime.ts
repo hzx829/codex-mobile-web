@@ -98,6 +98,8 @@ export class LiveSession {
   hint = '';
   /** Context window size, read once from Claude Code. */
   window?: number | null;
+  /** Started with permission to skip prompts, so it can switch into "bypassPermissions" later. */
+  canBypass = false;
   constructor(public cwd: string, public query: Query, public inbox: Inbox, public model: string, public permissionMode: PermissionMode) {}
   get pending() {return [...this.requests.values()].map(request => request.view);}
 }
@@ -137,7 +139,9 @@ export class ClaudeRuntime extends EventEmitter {
   private live = new Map<string, LiveSession>();
   private models?: {at: number; list: Json[]};
   constructor(private load: () => Promise<QueryFn>, private executable = () => findClaude(), private idleMs = 5 * 60_000,
-    private entrypoint = DEFAULT_ENTRYPOINT) {super();}
+    private entrypoint = DEFAULT_ENTRYPOINT,
+    /** The mode a session runs in when the phone does not choose one. */
+    readonly defaultMode: PermissionMode = 'default') {super();}
 
   get(id: string) {return this.live.get(id);}
   get busy() {return [...this.live.values()].some(session => session.running || session.requests.size || session.inbox.size);}
@@ -158,14 +162,16 @@ export class ClaudeRuntime extends EventEmitter {
     if (options.resume) {const existing = this.live.get(options.resume);if (existing) return existing;}
     const query = await this.load();
     const inbox = new Inbox();
-    const mode = options.permissionMode || 'default';
+    const mode = options.permissionMode || this.defaultMode;
+    // With skipping as the default, every session may switch into it (and back) while it runs.
+    const canBypass = mode === 'bypassPermissions' || this.defaultMode === 'bypassPermissions';
     let session!: LiveSession;
     const executable = this.executable();
     const hint = executable ? '' : '没有找到电脑上的 claude 程序；请安装 Claude Code，或在连接器配置中设置 claudeBin。';
     let q: Query;
     try {q = query({prompt: inbox, options: {
       cwd: options.cwd, ...(options.resume ? {resume: options.resume} : {}), ...(options.resume && options.resumeAt ? {resumeSessionAt: options.resumeAt} : {}), ...(options.model ? {model: options.model} : {}),
-      permissionMode: mode, ...(mode === 'bypassPermissions' ? {allowDangerouslySkipPermissions: true} : {}),
+      permissionMode: mode, ...(canBypass ? {allowDangerouslySkipPermissions: true} : {}),
       ...(executable ? {pathToClaudeCodeExecutable: executable} : {}),
       env: claudeEnv(this.entrypoint),
       systemPrompt: {type: 'preset', preset: 'claude_code'},
@@ -174,7 +180,7 @@ export class ClaudeRuntime extends EventEmitter {
     }});} catch (error) {
       throw new BridgeError('unavailable', `Claude Code 无法启动：${(error as Error)?.message || '未知错误'}${hint ? '。' + hint : ''}`);
     }
-    session = new LiveSession(options.cwd, q, inbox, options.model || '', mode);
+    session = new LiveSession(options.cwd, q, inbox, options.model || '', mode);session.canBypass = canBypass;
     session.hint = hint;
     if (options.resume) {session.id = options.resume;this.live.set(options.resume, session);}
     void this.consume(session);
@@ -326,7 +332,7 @@ export class ClaudeRuntime extends EventEmitter {
 
   async configure(session: LiveSession, model?: string, permissionMode?: PermissionMode) {
     if (session.inbox.closed) throw new BridgeError('offline', 'Claude Code 会话正在释放，请稍后重试');
-    if (permissionMode === 'bypassPermissions' && permissionMode !== session.permissionMode)
+    if (permissionMode === 'bypassPermissions' && permissionMode !== session.permissionMode && !session.canBypass)
       throw new BridgeError('invalid', '“全部允许”只能在新建或重新接入会话时选择');
     if (model && model !== session.model) {await session.query.setModel(model);session.model = model;}
     if (permissionMode && permissionMode !== session.permissionMode) {

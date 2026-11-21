@@ -12,7 +12,7 @@ import { BrowserPreview } from './browser-preview.js';
 import { AntigravityBridge } from './antigravity.js';
 import { ServiceRouter, type ServiceBridge } from './services.js';
 import { ClaudeCodeBridge, sdkQuery } from './claude-code.js';
-import { ClaudeRuntime } from './claude-runtime.js';
+import { ClaudeRuntime, PERMISSION_MODES } from './claude-runtime.js';
 import { ArtifactViewer } from './claude-artifacts.js';
 import { GUEST_ENTRYPOINT, NoDesktop, preflight, returnLogins, useGuestHomes } from './guest.js';
 import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './guest-checks.js';
@@ -56,7 +56,11 @@ if(available.includes('claude')){
   // CLAUDE_CODE_ENTRYPOINT: by default 'codex-mobile-web', which the terminal's `claude --resume` list shows; `claudeEntrypoint`
   // overrides it. A guest's sessions use 'sdk-ts', which that list hides. See docs/claude-local/M1-RESULTS.md.
   const entrypoint=guest?GUEST_ENTRYPOINT:typeof config.claudeEntrypoint==='string'&&config.claudeEntrypoint?config.claudeEntrypoint:undefined;
-  const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,entrypoint));
+  // On your own computer sessions skip permission prompts unless the phone picks another mode; `claudePermissionMode` overrides it.
+  // A borrowed computer keeps Claude Code's default (ask when needed).
+  const configuredMode=PERMISSION_MODES.find(mode=>mode===config.claudePermissionMode);
+  const defaultMode=guest?'default':configuredMode||'bypassPermissions';
+  const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,entrypoint,defaultMode));
   // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
   // A guest's profile lives in the guest folder, so clearing the guest data removes that sign-in too.
   claudeCode.artifacts=new ArtifactViewer(guest?guest.root:config.dataDir);

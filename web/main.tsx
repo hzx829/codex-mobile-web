@@ -566,7 +566,7 @@ function App(){
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
         listAction={`${service}.list`} appName={serviceLabel(service)} action={service==='claude'&&route.project?
           <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
-        onNew={project=>setClaudeNewCwd(project)}
+        onNew={project=>{setClaudeNewCwd(project);if(id)navigate(withConversation(route,''));}}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         machine={machine} guest={guest} newCwd={id?null:claudeNewCwd} created={created} forked={forked}

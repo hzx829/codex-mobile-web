@@ -228,7 +228,8 @@ export class ClaudeCodeBridge {
     if (turns.length && !recent.length) throw new BridgeError('too_large', 'Claude Code 最新一轮过长，请在电脑上查看');
     return {
       id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', revision: current.revision, running,
-      controlled: Boolean(live), external, permissionMode: live?.permissionMode || '', requests: live?.pending || [], error: live?.error || '',
+      controlled: Boolean(live), external, permissionMode: live?.permissionMode || '',
+      defaultPermissionMode: this.runtime.defaultMode, canBypass: Boolean(live?.canBypass), requests: live?.pending || [], error: live?.error || '',
       queuedMessages: (this.queue?.queued(id) || []).map(message => ({id: message.id, text: message.payload.text || '',
         imageCount: message.payload.images?.length || 0, imageBytes: (message.payload.images || []).reduce((sum: number, url: string) => sum + imageBytes(url), 0),
         state: message.state, error: message.error})),
@@ -282,7 +283,8 @@ export class ClaudeCodeBridge {
         : undefined;
       const now = this.now();
       return {data: page.map(info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,
-        running: this.runtime.get(info.sessionId)?.running ?? (!guestWorkspace() && now - info.lastModified < ACTIVE_MS)})), hasMore: matches.length > offset + PAGE, projects};
+        running: this.runtime.get(info.sessionId)?.running ?? (!guestWorkspace() && now - info.lastModified < ACTIVE_MS)})), hasMore: matches.length > offset + PAGE, projects,
+        defaultPermissionMode: this.runtime.defaultMode};
     }
     if (action === 'claude.operation') {
       if (!this.ledger) throw new BridgeError('unavailable', '连接器未启用操作记录');
@@ -421,11 +423,11 @@ export class ClaudeCodeBridge {
           if (index < 0 || turns[index].items[0]?.role !== 'user') throw new BridgeError('changed', '找不到这条消息，请刷新会话后重试');
           const anchor = turns[index - 1]?.anchor;
           if (!anchor) throw new BridgeError('invalid', '第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话');
-          const live = this.runtime.get(id);
+          const live = this.runtime.get(id), kept = mode || live?.permissionMode;
           if (live) await this.runtime.shutdown(live);
           else if ((await this.revision(id)).external && p.confirmIdle !== true)
             throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
-          const session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, resumeAt: anchor, model, permissionMode: mode});
+          const session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, resumeAt: anchor, model, permissionMode: kept});
           this.runtime.send(session, input.text, input.images);
           return {submitted: true};
         } finally {this.sending.delete(id);}

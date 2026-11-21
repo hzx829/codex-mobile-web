@@ -16,7 +16,11 @@ M0 中关于桌面 App 数据目录、Cowork 文件格式的记录保留在 `M0-
 ### 1. 本机 Claude Code 会话（M1）
 用 Agent SDK 运行：新建、续聊、排队、停止、审批、提问、计划确认、图片、模型和权限模式。会话存在 `~/.claude/projects`，终端 `claude --resume` 也能接续。`CLAUDE_CODE_ENTRYPOINT` 默认设为 `codex-mobile-web`（终端 `/resume` 列表会隐藏 SDK 默认的 `sdk-*`），可用配置 `claudeEntrypoint` 覆盖；连接器还会去掉从父 Claude Code 会话继承来的会话变量（见 `M1-RESULTS.md`）借用电脑（访客模式）固定用 `sdk-ts`，见 `docs/guest-mode/`。
 
-启动参数只给 `cwd`、模型、权限模式和 `systemPrompt: {type:'preset', preset:'claude_code'}`。`settingSources` 不传，SDK 默认读取全部设置（用户、项目、本地），所以 `CLAUDE.md`、`.claude/settings.json`、`.mcp.json` 和记忆都和终端里一样生效。
+启动参数只给 `cwd`、模型、权限模式和 `systemPrompt: {type:'preset', preset:'claude_code'}`。
+
+**默认权限模式（2026-11-21）**：自用电脑上，手机没选权限模式时按“跳过权限确认”（`bypassPermissions`）运行，可用配置 `claudePermissionMode` 改成其他模式；借用电脑（访客模式）仍按 Claude Code 自己的默认（按需审批）。默认是跳过时，每个会话都带 `allowDangerouslySkipPermissions` 启动，所以运行中也能在“按需审批”等模式和“跳过权限确认”之间来回切换；会话视图里的 `canBypass` 告诉手机可以这样切。改写消息时会话重启，沿用原来的模式。会话空闲释放后再续聊，回到默认模式。
+
+**桌面 App 的 Code 页看不到手机建的会话**：会话写在本机 `~/.claude/projects`（entrypoint `codex-mobile-web`，不在桌面的隐藏名单里），但桌面 Code 页只列它自己的会话索引（`%LOCALAPPDATA%\Claude-Data\…\claude-code-sessions`），CLI 会话要用桌面里的“Import Claude Code CLI sessions”导入才会出现（桌面日志 `[CCD-SessionRecovery] Probe: N importable CLI transcript(s)` 会数到它们）。连接器不去写桌面 App 的索引文件。`settingSources` 不传，SDK 默认读取全部设置（用户、项目、本地），所以 `CLAUDE.md`、`.claude/settings.json`、`.mcp.json` 和记忆都和终端里一样生效。
 
 ### 2. 项目 = 文件夹
 - 列表：会话按 `cwd` 分组，每个文件夹就是一个项目。
