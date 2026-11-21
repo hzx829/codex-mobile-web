@@ -14,6 +14,7 @@ import {Icon} from './icons';
 import {useStableEvent} from './use-event';
 import {operationId} from './client';
 import type {Json,RequestAction} from '../src/shared/types';
+import {SenderScope} from './senders';
 const IMAGES_BLOCKED='请更新这台电脑上的连接器后再给 Antigravity 发送图片。';
 function saved(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
 function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
@@ -212,7 +213,7 @@ export function AntigravityPanel(props:Props){
           {!target&&<option value="">{!projects?'正在读取项目…':'桌面上还没有项目'}</option>}
           {projects?.map(item=><option key={item.id} value={item.id}>{projectName(item)}</option>)}
         </select></label></div>}
-      {view&&<AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/>}
+      {view&&<SenderScope senders={view.messages.map((message:{sender?:{id:string;name:string}})=>message.sender)}><AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/></SenderScope>}
       {!view&&busy&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
       {view&&!view.messages.length&&<p className="muted">{view.running?'Antigravity 正在开始处理…':'桌面尚未记录可显示的消息。'}</p>}
       {antigravityStatus&&<ConversationStatus>{antigravityStatus}</ConversationStatus>}

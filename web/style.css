@@ -573,3 +573,5 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .usage-table th:first-child{text-align:left;font-weight:500;overflow-wrap:anywhere}
 .usage-table thead th{color:var(--fg-3);font-weight:400;font-size:12px}
 .usage > .muted{margin:0 0 8px}
+/* Sender above a user message, shown when several members took part in a session. */
+.message-sender{text-align:right;margin:0 6px 4px;font-size:12px;color:var(--fg-3)}

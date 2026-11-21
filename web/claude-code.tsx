@@ -22,6 +22,7 @@ import {SheetPanel} from './sheet';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import type {Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
+import {SenderScope} from './senders';
 
 type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;guest?:boolean;
@@ -259,8 +260,8 @@ export function ClaudeCodePanel(props:Props){
         {startPath&&<p className="muted">{startPath}</p>}</div>:<>
         {view?.truncated&&<p className="muted">仅显示近期记录，完整会话可在电脑查看。</p>}
         {!view&&busy&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
-        {turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source="connector"  latestUser={false} disabled={!canWrite}
-          openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={editTurn} onFork={fork} onDiff={diff} onBlocked={setNotice} editBlocked={!view?.truncated&&turn.id===turns[0]?.id?FIRST_MESSAGE:undefined}/>)}
+        <SenderScope senders={turns.flatMap(turn=>turn.items.map(item=>item.sender))}>{turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source="connector"  latestUser={false} disabled={!canWrite}
+          openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={editTurn} onFork={fork} onDiff={diff} onBlocked={setNotice} editBlocked={!view?.truncated&&turn.id===turns[0]?.id?FIRST_MESSAGE:undefined}/>)}</SenderScope>
         {outgoing&&<PendingMessage message={outgoing} openFile={openFile} openPreview={openPreview} onFollowup={followup}/>}
         {view&&!turns.length&&!running&&<p className="muted">这条会话还没有可显示的消息。</p>}
         {view?.error&&<ConversationStatus>{view.error}</ConversationStatus>}

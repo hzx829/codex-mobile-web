@@ -246,6 +246,21 @@ usage        (event_id, model, ts, machine_id, service, thread_id, turn_id, user
 
 - 时间范围只有今天、7 天、30 天，没有自定义。
 - 不统计运行时长、活跃天数和新建会话数。
-- 会话内显示每条消息的发送人仍未做。
+- 会话内显示每条消息的发送人见 §14。
 
 测试：`test/usage-stats.test.ts`（Codex 差值、Claude 基线与清零、Codex app-server 和桌面两条路径、Claude 轮次与发起操作、中继去重与按成员查询、网页的数字格式、日期范围和 CSV）。全部 242 个测试通过。在浏览器里用本机临时中继和 74 条模拟轮次检查过桌面宽度和手机宽度下的用量页。
+
+## 14 消息发送人（2026-11-21）
+
+会话里每条从手机发出的消息记下发送人；一个会话里出现两个以上成员时，网页在每条用户消息上方显示名字（自己的显示“我”）。
+
+- 连接器在发送成功时写 `message_senders`（只在中继标注了发起人时写，保留 400 天）。原生会话记录里没有我们的标识，所以按应用对应：
+  - Codex：按轮次。新一轮记 `start`，运行中追加记 `steer`，都带轮次 ID。一轮的用户消息条数和记录条数一致时按顺序对应；不一致（例如桌面上也追加过）时只给开始这一轮的消息标名字，不会标错。
+  - Claude Code 和 Antigravity：SDK 不能指定消息 ID，按发送的原文（去掉首尾空白、统一换行后的哈希）从最新往前配对。重复的短消息（如“继续”）与最近的发送配对；Antigravity 只读记录末尾一段，从后往前也能对齐。
+- 读会话时连接器给 `MessageItem.sender`（Antigravity 为消息的 `sender`）填上成员 ID 和名字；中继在 `*.read` / `*.watch` 回执中换成成员当前的名字。
+- 网页 `web/senders.tsx`：`SenderScope` 判断会话里是否有别人的消息，`SenderLabel` 显示在用户气泡上方。Codex 和 Claude Code 共用 `ConversationTurn`，Antigravity 在 `antigravity-messages.tsx`。
+- 同时补上 Codex 改写消息（`turn.edit`）开始的新一轮的用量归属和发送人。
+
+未验证：Antigravity 记录里的用户消息文字是否与连接器发送的原文完全一致；不一致时这些消息只是没有名字。
+
+测试：`test/message-senders.test.ts`。

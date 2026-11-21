@@ -10,7 +10,7 @@ import { machineIdPattern, type ConnectorToken } from '../shared/config.js';
 import { PreviewTunnel } from './preview-tunnel.js';
 import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 import { TeamError, type TeamStore } from './team/store.js';
-import { CREATE_ACTIONS, LIST_ACTIONS, MUTATION_ACTIONS, READ_ACTIONS, SEND_ACTIONS, createdThread, handleTeam, publicUser, serviceOf, threadOf, type Member } from './team/actions.js';
+import { CREATE_ACTIONS, LIST_ACTIONS, MUTATION_ACTIONS, READ_ACTIONS, SENDER_ACTIONS, SEND_ACTIONS, createdThread, handleTeam, publicUser, refreshSenderNames, serviceOf, threadOf, type Member } from './team/actions.js';
 
 /** `member`: the signed-in person on a phone once the relay has a team; absent with the shared Token. */
 type Peer={role:'phone'|'connector';machine?:Machine;alive:boolean;watch?:{machineId:string;threadId:string};member?:Member};
@@ -101,6 +101,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         result.owner=team.owners(r.machineId,service,[read]).get(read)??null;
         result.lastSender=team.lastSender(r.machineId,service,read,SEND_ACTIONS)??null;
       }
+      if(SENDER_ACTIONS.has(r.action)&&result&&typeof result==='object')refreshSenderNames(team,result);
     }catch(error){console.error('团队记录写入失败：',(error as Error).message);}
   }
   function finish(routeId:string,message:Json){

@@ -52,6 +52,7 @@ import 'react-diff-view/style/index.css';
 import './preview.css';
 // The model and permission pickers share these styles; imported here so the components stay importable in tests.
 import './model-picker.css';
+import {SenderRoot,SenderScope} from './senders';
 
 const FilePreviewPanel=lazy(()=>import('./file-preview').then(module=>({default:module.FilePreviewPanel})));
 const DiffViewer=lazy(()=>import('./diff-viewer').then(module=>({default:module.DiffViewer})));
@@ -575,7 +576,7 @@ function App(){
       archive:async()=>{await claudeChange('claude.archive',{conversationId:thread.id});if(thread.id===id)open('');},
       duplicate:async()=>{forked((await claudeChange('claude.fork',{conversationId:thread.id})).conversationId);},
     });
-    return <div className={`shell ${id||creatingClaude||creatingAntigravity?'has-session':''}`}>
+    return <SenderRoot me={me?.id}><div className={`shell ${id||creatingClaude||creatingAntigravity?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
@@ -608,9 +609,9 @@ function App(){
       {sheet==='claude-project'&&route.project&&<SheetPanel title="项目设置" close={()=>setSheet(null)}>
         <ClaudeProjectEditor key={route.project} folder={route.project} connected={connected} call={call} done={()=>setSheet(null)}/></SheetPanel>}
       {previewPane}
-    </div>;
+    </div></SenderRoot>;
   }
-  return <div className={`shell ${showThread?'has-session':''}`}>
+  return <SenderRoot me={me?.id}><div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>
       <HomeHeader project={projectName(project)} machineName={machineName} connected={connected} relayOnline={status==='online'} back={backToProjects} backDisabled={busy} chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {!project&&!archived&&!searchQuery&&switcher}
@@ -636,7 +637,7 @@ function App(){
         <div className="timeline-content" ref={timelineContent}>
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={!connected||loadingOlder} onClick={()=>void loadOlder()}>{loadingOlder?'正在加载…':historyError?`${historyError} · 重试`:'加载更早内容'}</button>}
-        {pendingShown&&(newChat||!view?.turns.length)?null:newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:conversation}
+        {pendingShown&&(newChat||!view?.turns.length)?null:newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:<SenderScope senders={view?.turns.flatMap(turn=>turn.items.map(item=>item.sender))||[]}>{conversation}</SenderScope>}
         {pendingShown&&<PendingMessage message={pendingShown} openFile={markdownOpenFile} openPreview={markdownOpenPreview} onFollowup={markdownFollowup}/>}
         {!newChat&&view?.retry&&<ConversationStatus>{view.retry}</ConversationStatus>}
         {!connected?<ConversationStatus>{!everOnline.current?'正在连接电脑…':cachedShown?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost}</ConversationStatus>:cachedShown&&<ConversationStatus>正在同步最新内容…</ConversationStatus>}
@@ -679,7 +680,7 @@ function App(){
        {sheet==='browser'&&selected&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);save(previewUrlKey(machine,selected),e.target.value);}} placeholder="http://127.0.0.1:5173"/></label><p className="muted">地址仅用于当前聊天。先在电脑启动网页服务，再打开预览。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
      </SheetPanel>}
      {previewPane}
-  </div>;
+  </div></SenderRoot>;
 }
 // The app shell is cached by a service worker for instant reopening; see public/sw.js.
 // UpdateBanner moves an open page to a new release once the worker has it.

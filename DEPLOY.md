@@ -74,7 +74,7 @@ Compose 部署运行 `docker compose -f compose.yaml -f compose.https.yaml up -d
 
 ## 团队成员（可选）
 
-默认整个中继只有一个共享 Token。多人一起用时可以启用团队：每人用自己的邀请链接登录，每台设备可以单独移除，会话列表标出是谁开的会话，管理员能看到操作记录。设计见 [团队账号与会话归属](docs/team/DESIGN.md)。
+默认整个中继只有一个共享 Token。多人一起用时可以启用团队：每人用自己的邀请链接登录，每台设备可以单独移除，会话列表标出是谁开的会话，管理员能看到操作记录。启用后的日常使用见 [团队使用说明](docs/team/GUIDE.md)，设计见 [团队账号与会话归属](docs/team/DESIGN.md)。
 
 1. 先升级中继和网页端。Compose 部署新增 `relay_data` 数据卷，数据库在 `/data/relay.sqlite`。直接用 Node 运行的实例（例如 systemd）默认写在工作目录的 `.local/relay.sqlite`，可用 `BRIDGE_DATA` 指定其他目录；该目录需要可写。
 2. 启用团队并创建所有者，`--url` 填手机访问的地址：

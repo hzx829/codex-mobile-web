@@ -13,6 +13,7 @@ import {ClaudeRuntime, PERMISSION_MODES, type ClaudeResponse, type PermissionMod
 import {claudeArtifactTitles, claudePatches, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
+import {claudeUserText, sendersByText} from './message-senders.js';
 
 const sessionId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 /** How a message sent during a running turn is delivered, as in Codex: after the turn, into it, or at once. */
@@ -128,6 +129,7 @@ export class ClaudeCodeBridge {
           await this.runtime.configure(session, model, mode);
         }
         this.runtime.send(session, text, images, undefined, head.id);
+        this.ledger?.recordSender({service: 'claude', threadId: id, opId: head.id, kind: 'text', text});
         queue.finishQueued(head.id, {conversationId: id, submitted: true});
       } catch (error) {
         queue.finishQueued(head.id, {}, error instanceof BridgeError ? error : new BridgeError('unexpected', '排队消息发送结果待核实，不会自动重发', true));
@@ -213,6 +215,12 @@ export class ClaudeCodeBridge {
     // Edits keep their diffs only in the raw transcript; read it alongside the SDK's messages.
     const raw = current.exists ? await this.transcript(id).then(path => readFile(path, 'utf8'), () => '') : '';
     const turns = claudeTurns(messages, running, claudePatches(raw, info?.cwd || live?.cwd || ''), claudeArtifactTitles(raw));
+    // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
+    const records = this.ledger?.senders('claude', id) || [];
+    if (records.length) {
+      const senders = sendersByText(messages.flatMap(entry => {const text = claudeUserText(entry);return text === undefined || !entry.uuid ? [] : [{id: entry.uuid, text}];}), records);
+      for (const turn of turns) for (const item of turn.items) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
+    }
     await this.nameSavedPages(turns);
     const usage = (messages.findLast(entry => entry.type === 'assistant' && (entry.message as Json | undefined)?.usage)?.message as Json | undefined)?.usage;
     const usedTokens = usage ? ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens'].reduce((sum, key) => sum + (Number(usage[key]) || 0), 0) : 0;
@@ -317,7 +325,9 @@ export class ClaudeCodeBridge {
         const text = await this.attach(newScope(cwd), input.text, input.files);
         const session = await this.runtime.start({cwd, model, permissionMode: mode});
         this.runtime.send(session, text, input.images, undefined, p.opId);
-        return {conversationId: await this.runtime.waitForId(session)};
+        const conversationId = await this.runtime.waitForId(session);
+        this.ledger?.recordSender({service: 'claude', threadId: conversationId, opId: p.opId, kind: 'text', text});
+        return {conversationId};
       });
     }
     if (action === 'claude.file.uploadStart' || action === 'claude.file.uploadChunk') {
@@ -371,6 +381,7 @@ export class ClaudeCodeBridge {
           }
           const running = session.running;
           this.runtime.send(session, text, input.images, delivery === 'steer' ? 'next' : delivery === 'now' ? 'now' : undefined, p.opId);
+          this.ledger?.recordSender({service: 'claude', threadId: id, opId: p.opId, kind: 'text', text});
           return {submitted: true, kind: running ? delivery === 'now' ? 'sent_now' : 'steer_accepted' : 'turn_accepted'};
         } finally {this.sending.delete(id);}
       });
@@ -399,7 +410,7 @@ export class ClaudeCodeBridge {
         try {
           if (guestWorkspace()) await projectDirectory(session.cwd);
           queue.sending(queuedId);
-          try {this.runtime.send(session, message.payload.text, message.payload.images || [], delivery === 'now' ? 'now' : 'next');}
+          try {this.runtime.send(session, message.payload.text, message.payload.images || [], delivery === 'now' ? 'now' : 'next');this.ledger?.recordSender({service: 'claude', threadId: id, opId: queuedId, kind: 'text', text: message.payload.text || ''});}
           catch (error) {
             const failure = error instanceof BridgeError ? error : new BridgeError('unexpected', '追加结果待核实，不会自动重发', true);
             queue.finishQueued(queuedId, {}, failure);throw failure;
@@ -429,6 +440,7 @@ export class ClaudeCodeBridge {
             throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
           const session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, resumeAt: anchor, model, permissionMode: kept});
           this.runtime.send(session, input.text, input.images, undefined, p.opId);
+          this.ledger?.recordSender({service: 'claude', threadId: id, opId: p.opId, kind: 'text', text: input.text});
           return {submitted: true};
         } finally {this.sending.delete(id);}
       });

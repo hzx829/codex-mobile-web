@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { BridgeError, type Json, type UsageEvent } from '../shared/types.js';
 import type {FileAttachment} from '../shared/attachments.js';
+import { textKey, type SenderRecord } from './message-senders.js';
 
 export type UploadRecord=FileAttachment&{threadId:string;cwd:string};
 /** The team member the relay says sent a request; absent when the relay has no team. */
@@ -79,6 +80,11 @@ export class Ledger {
     this.db.exec(`CREATE TABLE IF NOT EXISTS usage_outbox (id TEXT PRIMARY KEY, payload TEXT NOT NULL, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS claude_usage_cursor (session_id TEXT PRIMARY KEY, totals TEXT NOT NULL, updated INTEGER NOT NULL);`);
     this.db.prepare('DELETE FROM usage_outbox WHERE created < ?').run(Date.now()-30*86400_000);
+    // Who sent each message from the phone, so a session shows names next to messages from several members.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS message_senders (seq INTEGER PRIMARY KEY AUTOINCREMENT, service TEXT NOT NULL, thread_id TEXT NOT NULL,
+        turn_id TEXT, kind TEXT NOT NULL, text_hash TEXT, user_id TEXT NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS message_senders_thread ON message_senders(service, thread_id, seq);`);
+    this.db.prepare('DELETE FROM message_senders WHERE created < ?').run(Date.now()-400*86400_000);
     this.db.exec("UPDATE operations SET state='uncertain' WHERE state='pending';");
     this.db.prepare(`DELETE FROM operations WHERE updated < ? ${QUEUE_TABLES.map(table=>`AND id NOT IN (SELECT id FROM ${table})`).join(' ')}`).run(Date.now()-7*86400_000);
     this.codexQueue=new MessageQueue(this,'queued_messages');
@@ -101,6 +107,21 @@ export class Ledger {
     const full:UsageEvent={...event,ts:event.ts??Date.now(),...actor?{actor:{userId:actor.userId,...actor.name?{name:actor.name}:{}}}:{}};
     this.db.prepare('INSERT OR IGNORE INTO usage_outbox VALUES (?,?,?)').run(full.id,JSON.stringify(full),Date.now());
     this.onUsage?.();
+  }
+  /**
+   * Remembers who sent a message, when the relay named a sender for its operation. Codex messages are
+   * keyed by `turnId`; Claude Code and Antigravity by their exact `text`.
+   */
+  recordSender(entry:{service:string;threadId:string;opId:string;kind:SenderRecord['kind'];turnId?:string|null;text?:string}) {
+    const actor=this.actor(entry.opId);if(!actor)return;
+    // A missing name label never fails the send it describes.
+    try{this.db.prepare('INSERT INTO message_senders (service,thread_id,turn_id,kind,text_hash,user_id,name,created) VALUES (?,?,?,?,?,?,?,?)')
+      .run(entry.service,entry.threadId,entry.turnId??null,entry.kind,entry.text===undefined?null:textKey(entry.text),actor.userId,actor.name||'',Date.now());}
+    catch(error){console.error('发送人记录失败：',(error as Error).message);}
+  }
+  senders(service:string,threadId:string):SenderRecord[] {
+    return this.db.prepare('SELECT turn_id,kind,text_hash,user_id,name FROM message_senders WHERE service=? AND thread_id=? ORDER BY seq').all(service,threadId)
+      .map(row=>({turnId:row.turn_id===null?null:String(row.turn_id),kind:String(row.kind) as SenderRecord['kind'],textHash:row.text_hash===null?null:String(row.text_hash),sender:{id:String(row.user_id),name:String(row.name)}}));
   }
   pendingUsage(limit=200):UsageEvent[] {return this.db.prepare('SELECT payload FROM usage_outbox ORDER BY created, id LIMIT ?').all(limit).map(row=>JSON.parse(String(row.payload)));}
   ackUsage(ids:unknown[]) {const remove=this.db.prepare('DELETE FROM usage_outbox WHERE id=?');for(const id of ids)if(typeof id==='string')remove.run(id);}

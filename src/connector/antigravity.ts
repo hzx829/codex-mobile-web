@@ -11,6 +11,7 @@ import {callHub} from './antigravity-hub.js';
 import {validateImages} from '../shared/images.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
+import {sendersByText} from './message-senders.js';
 
 const guid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const idle = 'CASCADE_RUN_STATUS_IDLE';
@@ -168,6 +169,7 @@ export class AntigravityBridge {
         throw error;
       }
       this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
+      this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: prompt});
       return {conversationId: id, submitted: true};
     });
   }
@@ -242,6 +244,12 @@ export class AntigravityBridge {
     }
     const {path, ...view} = current;
     const {messages: items, issue} = await transcript(path);
+    // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
+    const records = this.ledger.senders('antigravity', id);
+    if (records.length) {
+      const senders = sendersByText(items.filter(item => item.role === 'user'), records);
+      for (const item of items) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
+    }
     this.recent.delete(id);
     this.recent.set(id, {revision: view.revision, messages: items});
     if (this.recent.size > 8) this.recent.delete(this.recent.keys().next().value!);
@@ -339,6 +347,7 @@ export class AntigravityBridge {
           await this.hub(directory, 'SendUserCascadeMessage', message);
           // Antigravity reports no tokens; the turn still counts for whoever sent it.
           this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
+          this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: prompt});
           return {submitted: true};
         }
         await this.hub(directory, 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks: false});

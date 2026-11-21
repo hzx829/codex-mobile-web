@@ -10,6 +10,20 @@ export const CREATE_ACTIONS = new Set(['session.create', 'session.fork', 'claude
 /** Session lists and reads, which the relay marks with each session's owner. */
 export const LIST_ACTIONS = new Set(['sessions.list', 'claude.list', 'antigravity.list']);
 export const READ_ACTIONS = new Set(['session.read', 'claude.read', 'antigravity.read']);
+/** Replies whose messages may name their sender; the relay shows each member's current name. */
+export const SENDER_ACTIONS = new Set([...READ_ACTIONS, 'claude.watch', 'antigravity.watch']);
+
+/** Replaces the name the computer recorded with the member's current one, so a renamed member reads the same everywhere. */
+export function refreshSenderNames(store: TeamStore, result: Json) {
+  const names = new Map<string, string>();
+  const messages: Json[] = [...(Array.isArray(result.messages) ? result.messages : []), ...(Array.isArray(result.turns) ? result.turns.flatMap((turn: Json) => Array.isArray(turn?.items) ? turn.items : []) : [])];
+  for (const message of messages) {
+    const id = message?.sender?.id;
+    if (typeof id !== 'string') continue;
+    if (!names.has(id)) names.set(id, store.user(id)?.name ?? message.sender.name);
+    message.sender = {id, name: names.get(id)};
+  }
+}
 /** Requests that put a message into a session. */
 export const SEND_ACTIONS = ['session.create', 'turn.send', 'turn.steerQueued', 'turn.edit', 'claude.create', 'claude.send', 'claude.steerQueued', 'claude.edit', 'antigravity.create', 'antigravity.send'];
 /** Requests that change something on a computer; each one is written to the activity log. */

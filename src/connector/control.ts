@@ -16,6 +16,7 @@ import {validateAttachments,uploadId,fileAttachment} from '../shared/attachments
 import {startUpload,appendUpload,attachmentLinks} from './attachments.js';
 import {contextUsage,accountLimits} from './usage.js';
 import {codexBase,codexTokens} from './usage-meter.js';
+import {markCodexSenders} from './message-senders.js';
 import {readModels,reasoningEffort} from './models.js';
 import {revertThread} from './revert.js';
 import {fastTier} from '../shared/models.js';
@@ -199,6 +200,7 @@ export class Control extends EventEmitter {
       if(cursor&&p.cursor.native!=null)cursor.native=textRequired(p.cursor.native,'历史游标',4000);
       const view=await this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(1,Math.floor(Number(p.limit)||20))),cursor);
       if(!cursor&&p.watch===true){this.watch(view.id);this.liveDiff.prime(view.id,this.generation,view.turns.at(-1));}
+      markCodexSenders(view.turns,this.ledger.senders('codex',view.id));
       return sessionSnapshot(view,cursor?undefined:p.known);
     }
     if(req.action==='session.status') {
@@ -518,7 +520,7 @@ export class Control extends EventEmitter {
         this.loaded.add(id);
         this.contexts.delete(id);
         for(const turn of raw.turns.slice(-numTurns))this.diffs.delete(turn.id||turn.turnId);
-        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input,...settings});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);this.rememberSettings(id,settings);}
+        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input,...settings});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);this.startTurn(id,result.turn.id,p.opId,false,settings.model||session.model);this.ledger.recordSender({service:'codex',threadId:id,opId:p.opId,kind:'start',turnId:result.turn.id});this.rememberSettings(id,settings);}
         catch {this.emit('change',id);throw new BridgeError('partial','后续聊天已回退，但重发未获确认。请刷新会话核实后再发送。',true);}
       }
       this.emit('change',id);return {threadId:id,kind:'edited'};
@@ -554,6 +556,9 @@ export class Control extends EventEmitter {
           void this.refreshDesktop(id);
         }
       }
+      // The message joins the running turn (steer) or starts the new one; either way its sender is remembered by that turn.
+      const sentTurn=session.activeTurnId||result?.result?.turn?.id||result?.turn?.id;
+      if(sentTurn)this.ledger.recordSender({service:'codex',threadId:id,opId:p.opId,kind:session.activeTurnId?'steer':'start',turnId:sentTurn});
       this.emit('change',id);
       return {threadId:id,turnId:result?.result?.turn?.id||result?.turn?.id||result?.result?.turnId||result?.turnId||session.activeTurnId||null,kind:session.activeTurnId?'steer_accepted':'turn_accepted'};
     }
