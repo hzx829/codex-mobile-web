@@ -47,9 +47,9 @@ curl --fail https://codex.your-domain.com/health
 
 ## 连接 Windows 电脑
 
-1. 等连接器管理的任务完成，双击原安装目录的 `stop.cmd`。
-2. 打开 `configure.cmd`，选择“连接自己的中继（已部署的公网地址）”。地址填 `https://codex.your-domain.com`，Token 填服务器 `.env` 中的相同值。
-3. 保存后双击 `start.cmd`。此模式只启动电脑连接器；无需迁移模型配置或项目目录。
+1. 等连接器管理的任务完成。便携包在托盘图标菜单选择“修改连接配置”（会先停止服务）；源码目录先运行 `stop.cmd` 再打开 `configure.cmd`。
+2. 在配置窗口选择“连接自己的中继（已部署的公网地址）”。地址填 `https://codex.your-domain.com`，Token 填服务器 `.env` 中的相同值。
+3. 保存后托盘会自动重新启动（源码目录运行 `start.cmd`）。此模式只启动电脑连接器；无需迁移模型配置或项目目录。
 4. 手机扫码，或打开域名填写同一个 Token。关闭手机 Wi-Fi、用移动数据验证，能看到电脑在线和原有项目才算公网链路通过。
 
 电脑需要保持开机和联网。电脑离线时服务器仍能显示网页，但无法代替电脑执行 Codex。原来的 Wi-Fi 模式仍可通过配置窗口切回。
@@ -72,6 +72,26 @@ Compose 部署运行 `docker compose -f compose.yaml -f compose.https.yaml up -d
 
 电脑主人解压后双击「启动.cmd」。网页的「电脑」菜单会在电脑名旁显示「借用」。停止连接用「停止.cmd」，清空该包里的项目、会话和登录副本用「清除访客数据.cmd」。要撤销访客包，从中继配置删除对应的 Token 并重新应用配置。
 
+## 团队成员（可选）
+
+默认整个中继只有一个共享 Token。多人一起用时可以启用团队：每人用自己的邀请链接登录，每台设备可以单独移除，会话列表标出是谁开的会话，管理员能看到操作记录。启用后的日常使用见 [团队使用说明](docs/team/GUIDE.md)，设计见 [团队账号与会话归属](docs/team/DESIGN.md)。
+
+1. 先升级中继和网页端。Compose 部署新增 `relay_data` 数据卷，数据库在 `/data/relay.sqlite`。直接用 Node 运行的实例（例如 systemd）默认写在工作目录的 `.local/relay.sqlite`，可用 `BRIDGE_DATA` 指定其他目录；该目录需要可写。
+2. 启用团队并创建所有者，`--url` 填手机访问的地址：
+
+   ```sh
+   docker compose -f compose.yaml -f compose.https.yaml exec relay node build/relay.mjs team init --name 你的名字 --url https://codex.your-domain.com
+   ```
+
+   直接用 Node 运行的实例，在程序目录用与中继相同的 `BRIDGE_DATA` 运行 `node build/relay.mjs team init …`。
+3. 在手机或电脑浏览器打开输出的邀请链接，即以所有者身份登录。之后在“选项 → 团队 → 成员”添加成员，把生成的链接或二维码发给对方。每个邀请链接 24 小时内有效，只能用一次。
+4. 启用后，手机不能再用共享 Token 登录，已打开的网页会回到登录页。电脑连接器继续用原 Token 连接，不需要修改。若要给某台电脑换成专用 Token，在“团队 → 电脑”中生成，再在那台电脑的“修改连接配置”里替换；生成后，那台电脑就不能再用共享 Token 连接。
+5. 所有者的设备全部丢失时，在服务器上运行 `team invite --user <名字>` 重新生成邀请链接；`team list` 列出成员。
+
+“团队 → 用量”按人统计轮次和 token。只有更新后的电脑连接器才会上报，更新前完成的轮次不会补算。
+
+`relay.sqlite` 保存成员、设备、会话归属、操作记录和每轮用量，不保存消息正文。备份时先停止中继，再复制数据卷或该文件。
+
 ## 日常操作
 
 下列命令都在解压后的部署目录运行：
@@ -93,6 +113,12 @@ docker compose -f compose.yaml -f compose.https.yaml down
 升级时将新包解压到新目录，核对 SHA256，把旧目录 `.env` 复制到新目录，进入新目录执行启动命令。固定 Compose 项目名 `codex-mobile-relay` 会更新原部署并复用证书卷。保留旧包；回退时进入旧目录执行同样的 `up -d --build`。同一台服务器默认只运行一个实例，不要对复用中的部署执行 `down -v`。
 
 服务器需保留 `.env` 和 Caddy 证书卷，电脑需保留自己的 `.local/`。程序包中不包含这些运行数据。默认中继状态日志不主动记录聊天或文件正文，附带代理配置未启用访问日志；容器日志做大小轮换。自定义代理、云平台及诊断设置可能另行留存信息；错误日志也应检查后再分享。
+
+### 只更新网页或电脑连接器
+
+只改了手机网页、中继没变时，不必重建中继：按 `scripts/web-deploy.sh` 开头的说明在电脑上打包 `dist`，上传后在服务器上运行这个脚本。它只替换网页文件，保留旧的带哈希资源给还开着旧页面的手机，核对通过前中继进程不动，失败时换回原来的页面。这个脚本按直接运行 Node 的中继（`/opt/codex-mobile-relay`，systemd 服务）编写，目录、服务名和端口可用 `CODEX_RELAY_ROOT`、`CODEX_RELAY_SERVICE`、`CODEX_RELAY_PORT` 改。
+
+电脑上实际运行的连接器如果是安装包（由 `Codex Mobile Web.exe` 启动），`npm run update:deploy` 检查的是仓库自己的安装，会拒绝。这时先 `npm run build`，再运行 `npm run deploy:package-connector -- <安装包文件夹>`：只替换安装包里的 `build/connector.mjs`，等 Claude Code 和 Codex 空闲才重启，保留安装包自己的设置和 Codex 版本，新构建没起来就换回原来的。
 
 ## 已有 HTTPS 反向代理
 
@@ -123,6 +149,8 @@ IP 证书有效期约 6 天，必须自动续期，并设置部署钩子执行 `
 | 网页连接反复中断 | 反向代理是否支持 `/ws`；先看连接器错误日志，不要重新发送结果不明的操作 |
 | 预览新标签页无法打开 | 公网 TCP 3341 是否开放、该端口是否配置 HTTPS 和 WebSocket 转发；电脑上的开发服务是否仍在运行 |
 | 502 | `docker compose ps` 中 relay 是否 healthy；用回环 `/health` 区分中继与 HTTPS 问题 |
+| `team init` 提示无法打开数据库 | Compose 是否已加 `relay_data` 数据卷并重新 `up -d`；直接运行时 `BRIDGE_DATA` 目录是否可写 |
+| 团队成员看不到某台电脑 | 管理员在“团队 → 成员 → 编辑”中检查该成员的可用电脑 |
 
 公网部署的完成条件：HTTPS 健康检查通过；手机用移动数据连接；能打开项目和原有任务；在测试会话发送一条消息并收到回复；中继重启后恢复连接。仅 `/health` 成功不代表整条链路已经通过。
 

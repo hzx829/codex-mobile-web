@@ -6,7 +6,9 @@ import type {AntigravityMessage} from '../src/shared/types.js';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
-import {mkdtemp, mkdir, appendFile, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, appendFile, rm, writeFile, readFile} from 'node:fs/promises';
+import {uploadAttachments} from '../web/file-upload.js';
+import {fileReference} from '../web/preview-target.js';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
@@ -146,23 +148,105 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   assert.ok(results.every(r=>r.state==='accepted'));
   assert.equal(writes.length,1);
   assert.deepEqual(writes[0],{method:'SendUserCascadeMessage',body:{cascadeId:id,items:[{text:'next'}],clientMessageId:payload.opId.split(':')[1]}});
-  assert.deepEqual(await bridge.handle('antigravity.models',{conversationId:id}),{models:[{id:'MODEL_HIGH',label:'Model High'}],current:'MODEL_PREVIOUS'});
+  assert.deepEqual(await bridge.handle('antigravity.models',{conversationId:id}),{models:[{id:'MODEL_HIGH',label:'Model High'}],current:'MODEL_PREVIOUS',supportsImages:true});
   const selected={...payload,model:'MODEL_HIGH',opId:makeOp()};
   assert.equal((await bridge.handle('antigravity.send',selected)).state,'accepted');
   assert.equal((await bridge.handle('antigravity.send',selected)).state,'accepted');
   assert.deepEqual(writes[1],{method:'SendUserCascadeMessage',body:{cascadeId:id,items:[{text:'next'}],clientMessageId:selected.opId.split(':')[1],
     cascadeConfig:{...config,plannerConfig:{...config.plannerConfig,planModel:'MODEL_HIGH'}}}});
+  // Phone images travel as the desktop's inline `media` items.
+  const png='data:image/png;base64,iVBORw0KGgo=',jpeg='data:image/jpeg;base64,/9j/4AA=';
+  const pictured={...payload,opId:makeOp(),images:[png,jpeg]};
+  assert.equal((await bridge.handle('antigravity.send',pictured)).state,'accepted');
+  assert.deepEqual(writes[2],{method:'SendUserCascadeMessage',body:{cascadeId:id,items:[{text:'next'}],
+    media:[{mimeType:'image/png',inlineData:'iVBORw0KGgo='},{mimeType:'image/jpeg',inlineData:'/9j/4AA='}],clientMessageId:pictured.opId.split(':')[1]}});
+  await assert.rejects(bridge.handle('antigravity.send',{...pictured,images:[jpeg]}),(error:BridgeError)=>error.code==='conflict');
+  await assert.rejects(bridge.handle('antigravity.send',{...payload,opId:makeOp(),images:['data:image/gif;base64,R0lGOD==']}),(error:BridgeError)=>error.code==='invalid');
   await assert.rejects(bridge.handle('antigravity.send',{...selected,model:'MODEL_RETIRED'}),(error:BridgeError)=>error.code==='conflict');
   for(const model of ['MODEL_RETIRED','MODEL_UNKNOWN'])assert.equal((await bridge.handle('antigravity.send',{...payload,opId:makeOp(),model})).state,'failed');
   advanceTurn=true;
   assert.equal((await bridge.handle('antigravity.send',{...selected,opId:makeOp()})).state,'failed');
-  assert.equal(writes.length,2);
+  assert.equal(writes.length,3);
   db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING',last_user_input_step_index=4");
   assert.equal((await bridge.handle('antigravity.stop',{...payload,opId:makeOp()})).state,'failed');
   const stop = {...payload,turn:(await bridge.handle('antigravity.read',{conversationId:id})).turn,opId:makeOp()};
   assert.equal((await bridge.handle('antigravity.stop',stop)).state,'uncertain');
   assert.equal((await bridge.handle('antigravity.stop',stop)).state,'uncertain');
   assert.equal((await bridge.handle('antigravity.operation',stop)).state,'uncertain');
-  assert.equal(writes.length,3);
+  assert.equal(writes.length,4);
   await assert.rejects(bridge.handle('antigravity.read',{conversationId:'../outside'}),/ID 无效/);
+});
+
+test('Antigravity reads the untruncated transcript and starts new conversations under their desktop project', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'cmw-antigravity-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir,'conversation_summaries.db'));
+  t.after(async()=>{db.close();ledger.close();await rm(dir,{recursive:true,force:true});});
+  const id = randomUUID(), logs = join(dir,'brain',id,'.system_generated','logs'), projects = join(dir,'projects');
+  await mkdir(logs,{recursive:true});await mkdir(projects);
+  const line = (step:object) => JSON.stringify(step)+'\n', long = '长'.repeat(5000);
+  await writeFile(join(logs,'transcript.jsonl'),line({type:'PLANNER_RESPONSE',step_index:1,content:'cut <truncated 10482 bytes>',truncated_fields:['content']}));
+  await writeFile(join(logs,'transcript_full.jsonl'),line({type:'PLANNER_RESPONSE',step_index:1,content:long}));
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const project = pathToFileURL(dir).href, insert = db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)');
+  const other = randomUUID();
+  insert.run(other,'Elsewhere','CASCADE_RUN_STATUS_IDLE','2026-11-19T00:00:00.000Z',2,0,'t',0,JSON.stringify(['file:///elsewhere']));
+  insert.run(id,'Here','CASCADE_RUN_STATUS_IDLE','2026-11-18T00:00:00.000Z',2,-1,'t',0,JSON.stringify([project]));
+  await writeFile(join(projects,'p.json'),JSON.stringify({id:'project-1',name:'工作区',projectResources:{resources:[{gitFolder:{folderUri:project+'/'}}]}}));
+  const config = {plannerConfig:{planModel:'MODEL_A',modelName:'old',tools:['read_file']}};
+  const created = randomUUID(), writes:{method:string;body:any}[] = [];
+  let failSend:BridgeError|null = null;
+  const bridge = new AntigravityBridge(dir,ledger,async (_dir,method,body)=>{
+    if(method==='GetCascadeModelConfigData')return {clientModelConfigs:[{label:'B',modelOrAlias:{model:'MODEL_B'}}]};
+    if(method==='GetTrajectoryTurns'){
+      // The conversation in the same project is preferred, and its user step of -1 is read as the first step.
+      assert.deepEqual(body,{cascadeId:id,stepIndices:[0]});
+      return {turns:[{firstStep:{userInput:{userConfig:config}}}]};
+    }
+    writes.push({method,body});
+    if(method==='StartCascade')return {cascadeId:created};
+    if(method==='SendUserCascadeMessage'&&failSend)throw failSend;
+    return {};
+  },projects);
+  const view = await bridge.handle('antigravity.read',{conversationId:id});
+  assert.deepEqual(view.messages,[{id:'1',role:'assistant',text:long}]);
+  assert.deepEqual((await bridge.handle('antigravity.list',{})).projects.find((item:{id:string})=>item.id===project),{id:project,path:dir,name:'工作区'});
+  assert.deepEqual(await bridge.handle('antigravity.models',{project}),{models:[{id:'MODEL_B',label:'B'}],current:'MODEL_A',supportsImages:true});
+  const makeOp = () => `${Date.now()}:${randomUUID()}`, op = makeOp();
+  const result = await bridge.handle('antigravity.create',{project,text:'开始',opId:op,model:'MODEL_B'});
+  assert.deepEqual(result,{state:'accepted',conversationId:created,submitted:true});
+  assert.deepEqual(writes,[
+    {method:'StartCascade',body:{workspaceUris:[project],source:'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',trajectoryType:'CORTEX_TRAJECTORY_TYPE_CASCADE',projectEnvConfig:{projectId:'project-1'}}},
+    {method:'SendUserCascadeMessage',body:{cascadeId:created,items:[{text:'开始'}],clientMessageId:op.split(':')[1],cascadeConfig:{plannerConfig:{planModel:'MODEL_B',tools:['read_file']}}}},
+  ]);
+  assert.equal((await bridge.handle('antigravity.create',{project,text:'开始',opId:op,model:'MODEL_B'})).conversationId,created);
+  assert.equal(writes.length,2,'a repeated operation is not sent again');
+  failSend = new BridgeError('unavailable','down');
+  assert.equal((await bridge.handle('antigravity.create',{project,text:'again',opId:makeOp()})).state,'failed');
+  assert.deepEqual(writes.at(-1),{method:'DeleteCascadeTrajectory',body:{cascadeId:created}},'an empty conversation is removed when its message certainly failed');
+  failSend = new BridgeError('uncertain','lost',true);
+  assert.deepEqual(await bridge.handle('antigravity.create',{project,text:'again',opId:makeOp()}),{state:'accepted',conversationId:created,submitted:false,uncertain:true});
+  assert.notEqual(writes.at(-1)!.method,'DeleteCascadeTrajectory');
+  await assert.rejects(bridge.handle('antigravity.create',{project:'https://example.com/x',text:'x',opId:makeOp()}),/这台电脑上的项目/);
+  // Documents are uploaded into the project first and the message links to them, so typed text may be empty.
+  failSend = null;
+  const call = (action:any,payload:any) => bridge.handle(action,payload);
+  const doc = () => ({id:randomUUID(),name:'需求.docx',size:4,file:new File([Buffer.from('word')],'需求.docx')});
+  const lastText = ():string => (writes[writes.length-1] as {body:any}).body.items[0].text;
+  const linked = (text:string) => [...text.matchAll(/\]\(<([^>]+)>\)/g)].map(match=>fileReference(match[1]).path);
+  const newFiles = await uploadAttachments(call,{prefix:'antigravity.',scope:{project}},[doc()]);
+  assert.equal((await bridge.handle('antigravity.create',{project,text:'',files:newFiles,opId:makeOp()})).state,'accepted');
+  const firstLinks = linked(lastText());
+  const turn = view.turn!;
+  assert.equal(firstLinks.length,1);
+  assert.equal(await readFile(firstLinks[0],'utf8'),'word');
+  await assert.rejects(bridge.handle('antigravity.create',{project,text:'',opId:makeOp()}),/消息无效/,'without files the message is still required');
+  // Files belong to the conversation (or new project) they were uploaded for.
+  const elsewhere = await bridge.handle('antigravity.send',{conversationId:id,turn,text:'x',files:newFiles,opId:makeOp()});
+  assert.equal(elsewhere.state,'failed');
+  assert.match(elsewhere.error!.message,/当前会话/);
+  const own = await uploadAttachments(call,{prefix:'antigravity.',scope:{conversationId:id}},[doc()]);
+  assert.equal((await bridge.handle('antigravity.send',{conversationId:id,turn,text:'看附件',files:own,opId:makeOp()})).state,'accepted');
+  const sent = lastText();
+  assert.match(sent,/^看附件\n\n附件/);
+  assert.equal(await readFile(linked(sent)[0],'utf8'),'word');
 });

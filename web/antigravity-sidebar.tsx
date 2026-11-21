@@ -10,7 +10,7 @@ import {useStableEvent} from './use-event';
 import type {Json,RequestAction} from '../src/shared/types';
 
 type Project={id:string;path:string;name?:string};
-type Thread={id:string;title:string;updatedAt:number;running:boolean;cwd?:string};
+type Thread={id:string;title:string;updatedAt:number;running:boolean;cwd?:string;owner?:{id:string;name:string}|null};
 /** Session actions an app supports beyond pinning and copying the ID, which every app gets. */
 export type ThreadActions={rename?:(name:string)=>Promise<void>;archive?:()=>Promise<void>;duplicate?:()=>Promise<void>};
 function loadPreferences(key:string):ThreadPreferences{try{return JSON.parse(localStorage.getItem(key)||'{}')||{};}catch{return {};}}
@@ -23,9 +23,11 @@ type Props={
   onNew?:(project:string)=>void;
   selected:string;project:string;machine:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;switcher:ReactNode;action?:ReactNode;
   copyText:(text:string)=>Promise<void>;threadActions?:(thread:Json)=>ThreadActions;
+  /** Narrows the shown sessions, such as to those the signed-in team member started. */
+  filter?:(threads:Json[])=>Json[];
   call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseProject:(id:string)=>void;chooseComputer:()=>void;more:()=>void;
 };
-export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',onNew,selected,project,machine,machineName,connected,relayOnline,inert,revision,switcher,action,copyText,threadActions,call,open,chooseProject,chooseComputer,more}:Props){
+export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',filter,onNew,selected,project,machine,machineName,connected,relayOnline,inert,revision,switcher,action,copyText,threadActions,call,open,chooseProject,chooseComputer,more}:Props){
   const [search,setSearch]=useState(''),[query,setQuery]=useState(''),[projects,setProjects]=useState<Project[]>([]);
   const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean}|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
@@ -42,7 +44,8 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
   const key=JSON.stringify([project,query]),current=page?.key===key?page:null;
   const items=current?.items||[];
   const matching=query?items.filter(item=>item.title.toLowerCase().includes(query.toLowerCase())):items;
-  const visible=visibleThreads(matching,preferences,project,false,query) as Thread[];
+  const shown=visibleThreads(matching,preferences,project,false,query) as Thread[];
+  const visible=filter?filter(shown) as Thread[]:shown;
   const load=useStableEvent((more=false)=>{
     if(!connected)return;
     const offset=more?current?.offset||0:0;

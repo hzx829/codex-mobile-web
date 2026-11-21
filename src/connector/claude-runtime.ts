@@ -5,6 +5,7 @@ import {homedir} from 'node:os';
 import {delimiter, join} from 'node:path';
 import type {Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage} from '@anthropic-ai/claude-agent-sdk';
 import {BridgeError, type Json} from '../shared/types.js';
+import type {ClaudeBaseline} from './usage-meter.js';
 
 export type QueryFn = (params: {prompt: AsyncIterable<SDKUserMessage>; options?: Options}) => Query;
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
@@ -15,8 +16,17 @@ export type ClaudeQuestion = {question: string; header: string; multiSelect: boo
 export type ClaudeRequestView = {
   id: string; kind: 'permission' | 'question' | 'plan'; tool: string; title: string; detail: string;
   canRemember: boolean; questions?: ClaudeQuestion[];
+  /** Where "remember" saves the rule, so the phone can name it: this session, this project or every project. */
+  rememberScope?: 'session' | 'project' | 'user';
 };
 export type ClaudeResponse = {decision: 'allow' | 'allowSession' | 'deny'; answers?: Record<string, string>; message?: string};
+
+/** The broadest place the suggested permission updates would be written. */
+function rememberScope(suggestions: PermissionUpdate[] | undefined): ClaudeRequestView['rememberScope'] {
+  if (!suggestions?.length) return undefined;
+  const places = suggestions.map(update => update.destination);
+  return places.includes('userSettings') ? 'user' : places.some(place => place === 'projectSettings' || place === 'localSettings') ? 'project' : 'session';
+}
 
 type Pending = {view: ClaudeRequestView; input: Record<string, unknown>; suggestions?: PermissionUpdate[]; resolve: (result: PermissionResult) => void};
 
@@ -89,6 +99,14 @@ export class LiveSession {
   hint = '';
   /** Context window size, read once from Claude Code. */
   window?: number | null;
+  /** Started with permission to skip prompts, so it can switch into "bypassPermissions" later. */
+  canBypass = false;
+  /** The operation that started the running turn, so its tokens go to whoever sent it. */
+  turnOpId?: string;
+  /** A 'now' message that may end the running turn and start its own; it starts the next turn when it does. */
+  nowOpId?: string;
+  /** Where this session's running token total starts; see recordClaudeTurn. */
+  usageBaseline: ClaudeBaseline = 'zero';
   constructor(public cwd: string, public query: Query, public inbox: Inbox, public model: string, public permissionMode: PermissionMode) {}
   get pending() {return [...this.requests.values()].map(request => request.view);}
 }
@@ -128,7 +146,9 @@ export class ClaudeRuntime extends EventEmitter {
   private live = new Map<string, LiveSession>();
   private models?: {at: number; list: Json[]};
   constructor(private load: () => Promise<QueryFn>, private executable = () => findClaude(), private idleMs = 5 * 60_000,
-    private entrypoint = DEFAULT_ENTRYPOINT) {super();}
+    private entrypoint = DEFAULT_ENTRYPOINT,
+    /** The mode a session runs in when the phone does not choose one. */
+    readonly defaultMode: PermissionMode = 'default') {super();}
 
   get(id: string) {return this.live.get(id);}
   get busy() {return [...this.live.values()].some(session => session.running || session.requests.size || session.inbox.size);}
@@ -149,14 +169,16 @@ export class ClaudeRuntime extends EventEmitter {
     if (options.resume) {const existing = this.live.get(options.resume);if (existing) return existing;}
     const query = await this.load();
     const inbox = new Inbox();
-    const mode = options.permissionMode || 'default';
+    const mode = options.permissionMode || this.defaultMode;
+    // With skipping as the default, every session may switch into it (and back) while it runs.
+    const canBypass = mode === 'bypassPermissions' || this.defaultMode === 'bypassPermissions';
     let session!: LiveSession;
     const executable = this.executable();
     const hint = executable ? '' : '没有找到电脑上的 claude 程序；请安装 Claude Code，或在连接器配置中设置 claudeBin。';
     let q: Query;
     try {q = query({prompt: inbox, options: {
       cwd: options.cwd, ...(options.resume ? {resume: options.resume} : {}), ...(options.resume && options.resumeAt ? {resumeSessionAt: options.resumeAt} : {}), ...(options.model ? {model: options.model} : {}),
-      permissionMode: mode, ...(mode === 'bypassPermissions' ? {allowDangerouslySkipPermissions: true} : {}),
+      permissionMode: mode, ...(canBypass ? {allowDangerouslySkipPermissions: true} : {}),
       ...(executable ? {pathToClaudeCodeExecutable: executable} : {}),
       env: claudeEnv(this.entrypoint),
       systemPrompt: {type: 'preset', preset: 'claude_code'},
@@ -165,9 +187,11 @@ export class ClaudeRuntime extends EventEmitter {
     }});} catch (error) {
       throw new BridgeError('unavailable', `Claude Code 无法启动：${(error as Error)?.message || '未知错误'}${hint ? '。' + hint : ''}`);
     }
-    session = new LiveSession(options.cwd, q, inbox, options.model || '', mode);
+    session = new LiveSession(options.cwd, q, inbox, options.model || '', mode);session.canBypass = canBypass;
     session.hint = hint;
     if (options.resume) {session.id = options.resume;this.live.set(options.resume, session);}
+    // Resuming from an earlier message drops later turns, so the saved total no longer applies.
+    session.usageBaseline = options.resume ? options.resumeAt ? 'unknown' : 'cursor' : 'zero';
     void this.consume(session);
     return session;
   }
@@ -199,6 +223,10 @@ export class ClaudeRuntime extends EventEmitter {
         } else if (m.type === 'system' && m.subtype === 'session_state_changed') {
           session.running = m.state !== 'idle' || session.inbox.size > 0;
         } else if (m.type === 'result') {
+          // Each result ends a turn; 'turn' listeners record its tokens against the sender of the turn.
+          const opId = session.turnOpId;session.turnOpId = session.nowOpId;session.nowOpId = undefined;
+          if (session.id) {try {this.emit('turn', session, m, opId);} catch { /* Usage records never stop the session. */ }}
+          session.usageBaseline = 'cursor';
           session.running = session.inbox.size > 0;
           session.error = m.subtype === 'success' || session.interrupting ? '' : (Array.isArray(m.errors) ? m.errors.join('\n') : '') || 'Claude Code 本轮出错';
           session.interrupting = false;
@@ -262,6 +290,7 @@ export class ClaudeRuntime extends EventEmitter {
       title: kind === 'question' ? 'Claude 有问题要问你' : kind === 'plan' ? 'Claude 已完成计划，是否开始执行？' : context.title || `Claude 想使用 ${context.displayName || tool}`,
       detail: kind === 'plan' ? str(input.plan) : kind === 'question' ? '' : [context.description, inputSummary(tool, input), context.decisionReason].filter(Boolean).join('\n\n'),
       canRemember: kind === 'permission' && Boolean(context.suggestions?.length), ...(asked ? {questions: asked} : {}),
+      ...(kind === 'permission' && context.suggestions?.length ? {rememberScope: rememberScope(context.suggestions)} : {}),
     };
     return new Promise(resolve => {
       const finish = (result: PermissionResult) => {
@@ -297,8 +326,14 @@ export class ClaudeRuntime extends EventEmitter {
       ...(response.decision === 'allowSession' && request.suggestions?.length ? {updatedPermissions: request.suggestions} : {})});
   }
 
-  send(session: LiveSession, text: string, images: string[], steer = false) {
-    session.inbox.push(userMessage(text, images, session.running ? steer ? 'next' : 'later' : undefined));
+  /**
+   * `priority` applies only while a turn runs: 'next' joins it once its current tool calls finish, 'now' moves
+   * movable work to the background (or interrupts) and joins at once, 'later' waits for the turn to end.
+   */
+  send(session: LiveSession, text: string, images: string[], priority?: 'now' | 'next' | 'later', opId?: string) {
+    if (!session.running && opId) session.turnOpId = opId;
+    else if (session.running && priority === 'now' && opId) session.nowOpId = opId;
+    session.inbox.push(userMessage(text, images, session.running ? priority : undefined));
     session.running = true;session.error = '';
     this.touch(session);
   }
@@ -312,7 +347,7 @@ export class ClaudeRuntime extends EventEmitter {
 
   async configure(session: LiveSession, model?: string, permissionMode?: PermissionMode) {
     if (session.inbox.closed) throw new BridgeError('offline', 'Claude Code 会话正在释放，请稍后重试');
-    if (permissionMode === 'bypassPermissions' && permissionMode !== session.permissionMode)
+    if (permissionMode === 'bypassPermissions' && permissionMode !== session.permissionMode && !session.canBypass)
       throw new BridgeError('invalid', '“全部允许”只能在新建或重新接入会话时选择');
     if (model && model !== session.model) {await session.query.setModel(model);session.model = model;}
     if (permissionMode && permissionMode !== session.permissionMode) {

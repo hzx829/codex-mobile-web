@@ -44,7 +44,7 @@ test('lost native receipt stays uncertain and is never retried',async()=>{
 test('restart turns pending operations uncertain without storing prompt text',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'cmw-ledger-'));const file=join(dir,'ops.sqlite');
   let ledger=new Ledger(file);const id=op();
-  ledger.db.prepare('INSERT INTO operations VALUES (?,?,?,?,?)').run(id,'digest','pending',null,Date.now());ledger.close();ledger=new Ledger(file);
+  ledger.db.prepare('INSERT INTO operations (id,hash,state,result,updated) VALUES (?,?,?,?,?)').run(id,'digest','pending',null,Date.now());ledger.close();ledger=new Ledger(file);
   assert.equal(ledger.read(id).state,'uncertain');ledger.close();await removeTestTemp(dir);
 });
 test('desktop patches preserve ordering and reject a missing or unsafe baseline',()=>{

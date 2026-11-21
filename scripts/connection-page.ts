@@ -4,15 +4,15 @@ export function connectionPage(config:any,qr:string,codexVersion:string) {
   const local=JSON.stringify({relayUrl:config.relayUrl,token:config.token,machineId:config.machineId}).replace(/</g,'\\u003c');
   return `<!doctype html><html lang="zh-CN"><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Codex 随行 · 电脑状态</title>
 <style>*{box-sizing:border-box}body{font:16px/1.6 system-ui;color:#171717;background:#fafafa;max-width:560px;margin:5vh auto;padding:24px}h1{font-size:28px;font-weight:550}section{background:white;border:1px solid #eee;border-radius:24px;padding:24px;margin:18px 0}img{display:block;width:280px;max-width:100%;margin:auto}a{color:inherit}code{display:block;word-break:break-all;padding:12px;background:#f5f5f5;border-radius:12px}small,p{color:#666}.status{color:#171717;font-weight:550}button{border:1px solid #ddd;border-radius:30px;background:white;font:inherit;padding:8px 18px;cursor:pointer}li{overflow-wrap:anywhere}</style>
-<h1>用手机接上电脑</h1><section><div id="status" class="status" role="status">正在检查连接…</div><p id="detail">电脑保持开机并联网，手机即可查看和指挥任务。</p><small>${escape(codexVersion)}</small><p><button id="retry">重新检查</button></p></section>
+<h1>在手机或浏览器使用这台电脑</h1><section><div id="status" class="status" role="status">正在检查连接…</div><p id="detail">电脑保持开机并联网，手机或任意浏览器即可查看和指挥 Codex、Claude Code 与 Antigravity 的任务。</p><small>${escape(codexVersion)}</small><p><button id="retry">重新检查</button></p></section>
 <section><img alt="手机连接二维码" src="${qr}"><p>${config.mode==='connector'?'手机扫描二维码，连接自己的中继。':'手机和电脑连接同一 Wi-Fi 后扫描二维码。'}</p><p><a href="${escape(link.href)}">在电脑打开网页 ↗</a></p><p>中继：${escape(config.relayUrl)}</p><details><summary>手工连接 Token</summary><code>${escape(config.token)}</code></details></section>
-<section>自动接入电脑 Codex 的全部项目和会话，无需逐个配置。<p>更改地址或 Token：先完成任务并运行 stop.cmd，再打开 configure.cmd。电脑休眠或断网时无法远程操作。</p><small>二维码包含连接凭证，请保留在自己的设备中。模型 Key 仍由电脑上的 Codex 管理。</small></section>
+<section>自动接入电脑 Codex 的全部项目和会话，无需逐个配置。<p>更改地址或 Token：先完成任务，再从托盘图标菜单选择“修改连接配置”（源码目录用 stop.cmd 和 configure.cmd）。电脑休眠或断网时无法远程操作。</p><small>二维码包含连接凭证，请保留在自己的设备中。模型 Key 仍由电脑上的 Codex 管理。</small></section>
 <script>
 const config=${local};let socket,retry,poll,deadline,next=0,pending='';
 const status=document.getElementById('status'),detail=document.getElementById('detail');
 function show(title,message){status.textContent=title;detail.textContent=message;}
 function readInfo(machines){
-  if(!machines.some(m=>m.id===config.machineId)){show('中继已连接，等待这台电脑','请运行 start.cmd；若连接器未能启动，查看 .local/connector.error.log。');return;}
+  if(!machines.some(m=>m.id===config.machineId)){show('中继已连接，等待这台电脑','请从托盘图标启动服务（源码目录运行 start.cmd）；若连接器未能启动，查看 .local/connector.error.log。');return;}
   if(pending)return;pending=String(++next);socket.send(JSON.stringify({type:'request',id:pending,machineId:config.machineId,action:'info',payload:{}}));
   deadline=setTimeout(()=>{pending='';show('电脑响应较慢','请确认本机 Codex 可以正常启动，稍后会重新检查。');},12000);
 }

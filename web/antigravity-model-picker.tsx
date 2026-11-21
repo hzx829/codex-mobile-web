@@ -1,19 +1,17 @@
-import {useEffect, useRef, useState} from 'react';
+import {useEffect,useState} from 'react';
 import type {AntigravityModel} from '../src/shared/types';
-import {Icon} from './icons';
-import {Popover, type MenuPoint} from './popover';
-import './model-picker.css';
+import {ModelMenu} from './model-picker';
 
 type Catalog = {models: AntigravityModel[]; current: string | null};
 type Props = {
   read: ()=>Promise<Catalog>; turn: string; value: string; available:boolean; disabled: boolean; onChange: (id:string)=>void;
 };
+/** The shared model menu, fed from the desktop's model list; the list is read again each time it opens. */
 export function AntigravityModelPicker({read,turn,value,available,disabled,onChange}: Props) {
   const [catalog,setCatalog] = useState<Catalog | null>(null), [error,setError] = useState('');
-  const [refresh,setRefresh] = useState(0), [point,setPoint] = useState<MenuPoint | null>(null);
-  const button = useRef<HTMLButtonElement>(null);
+  const [refresh,setRefresh] = useState(0);
   useEffect(() => {
-    if(!available){setPoint(null);return;}
+    if(!available)return;
     let active = true;
     setError('');
     read().then(result => {if (active) setCatalog(result);}).catch(failure => {
@@ -24,22 +22,9 @@ export function AntigravityModelPicker({read,turn,value,available,disabled,onCha
   const find = (id:string | null) => catalog?.models.find(model => model.id === id)?.label;
   const current = find(catalog?.current ?? null);
   const label = value ? find(value) || (catalog ? '所选模型已不可用' : '已选模型') : current ? `上轮 · ${current}` : '选择模型';
-  const options = [{id:'', label: current ? `沿用对话设置（上轮：${current}）` : '沿用对话设置'}, ...(catalog?.models ?? [])];
-  return <>
-    <button type="button" className="composer-model" ref={button} aria-haspopup="dialog" aria-expanded={Boolean(point)}
-      aria-label={`选择模型，${label}`} disabled={disabled||!available} onClick={event => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        setPoint({x:rect.right,y:rect.top,align:'end'});
-        setRefresh(n => n+1);
-      }}><span>{label}</span><Icon name="chevron" size={13}/></button>
-    {point && <Popover point={point} anchor={button.current} side="above" title="选择模型" label="选择 Antigravity 模型" close={()=>setPoint(null)} className="model-picker" focusSelector="button[aria-pressed=true]">
-      <div className="model-picker-options">{options.map(option =>
-        <button type="button" key={option.id} aria-pressed={value===option.id} disabled={disabled} onClick={() => {onChange(option.id);setPoint(null);}}>
-          <span>{option.label}</span>{value===option.id && <Icon name="check" size={16}/>}
-        </button>
-      )}</div>
-      {error ? <p role="alert">{error} <button type="button" onClick={()=>setRefresh(n=>n+1)}>重试</button></p>
-        : !catalog ? <p role="status">正在读取桌面模型…</p> : !catalog.models.length && <p role="status">桌面暂无可选模型</p>}
-    </Popover>}
-  </>;
+  return <ModelMenu label={label} title="选择 Antigravity 模型" tuning={false} disabled={disabled} unavailable={!available} opened={() => setRefresh(n => n+1)}
+    models={(catalog?.models ?? []).map(model => ({model: model.id, displayName: model.label}))} value={{model: value, effort: ''}} current={{model: catalog?.current || undefined}}
+    currentLabel={current ? `上轮 ${current}` : undefined} onChange={selection => onChange(selection.model)}
+    status={error ? <p role="alert">{error} <button type="button" onClick={() => setRefresh(n => n+1)}>重试</button></p>
+      : !catalog ? <p role="status">正在读取桌面模型…</p> : !catalog.models.length && <p role="status">桌面暂无可选模型</p>}/>;
 }

@@ -4,6 +4,7 @@ import {groupItems} from './activity';
 import {ActivityGroup} from './conversation';
 import {SafeMarkdown} from './content';
 import {IconButton} from './icon-button';
+import {SenderLabel} from './senders';
 
 export function antigravityIssueText(issue: AntigravityIssue, canSend: boolean) {
   if (issue.kind === 'interrupted') return 'Antigravity 的回复中断了，可以发送消息继续。';
@@ -36,7 +37,7 @@ export const AntigravityMessages = memo(function AntigravityMessages({messages,r
     const message=<article className={`message ${first.role}`}>
       <SafeMarkdown allowFileUrls text={first.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>
     </article>;
-    return <div key={first.id} className={first.role==='user'?'user-entry':'turn'}>{message}
+    return <div key={first.id} className={first.role==='user'?'user-entry':'turn'}>{first.role==='user'&&<SenderLabel sender={first.sender}/>}{message}
       {onCopy&&first.text&&<div className={first.role==='user'?'user-actions':'assistant-actions'}><IconButton icon="copy" label={first.role==='user'?'复制消息文字':'复制回复文字'} onClick={()=>onCopy(first.text)}/></div>}
     </div>;
   });

@@ -42,6 +42,12 @@ export class PreviewTunnel {
     const session=this.sessions.get(id);
     if(session&&session.threadId===threadId&&session.connector===connector)this.stop(id,notify);
   }
+  /** Ends a phone's previews whose computer `keep` rejects (all of them without `keep`), and tells those computers to stop. */
+  stopPhone(phone:WebSocket,keep:(connector:WebSocket)=>boolean=()=>false){
+    for(const session of [...this.sessions.values()])if(session.phone===phone&&!keep(session.connector)){
+      this.stop(session.id,true);this.send(session.connector,{type:'preview.stop',sessionId:session.id,threadId:session.threadId});
+    }
+  }
   stopPeer(peer:WebSocket){
     for(const session of this.sessions.values())if(session.connector===peer)this.stop(session.id,true);
   }
