@@ -256,7 +256,9 @@ export class AntigravityBridge {
     if (previous && previous.revision === known) {
       let keep = 0;
       while (keep < items.length && items[keep].id === previous.messages[keep]?.id &&
-             items[keep].text === previous.messages[keep].text && items[keep].role === previous.messages[keep].role) keep++;
+             items[keep].text === previous.messages[keep].text && items[keep].role === previous.messages[keep].role &&
+             // A message matched to its sender after the phone first got it is sent again with the name.
+             items[keep].sender?.id === previous.messages[keep].sender?.id) keep++;
       return {...view, issue, base: known, keep, messages: items.slice(keep)};
     }
     return {...view, issue, messages: items, notice: '显示桌面已记录的最近对话内容。'};

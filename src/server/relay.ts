@@ -4,7 +4,7 @@ import { resolve, extname, sep } from 'node:path';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { MAX_FRAME, bridgeServices, textRequired, type Json, type Machine } from '../shared/types.js';
 import { machineIdPattern, type ConnectorToken } from '../shared/config.js';
 import { PreviewTunnel } from './preview-tunnel.js';
@@ -73,9 +73,11 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
     for(const [ws,p]of peers){
       if(!p.member)continue;
       const current=team.session(p.member.device.id);
-      if(!current){ws.close(4401,'revoked');continue;}
+      // A removed device or disabled member also loses its open web previews at once.
+      if(!current){preview.stopPhone(ws);ws.close(4401,'revoked');continue;}
       p.member=current;
       if(p.watch&&!allowed(p,p.watch.machineId))p.watch=undefined;
+      preview.stopPhone(ws,connector=>allowed(p,peers.get(connector)?.machine?.id));
       send(ws,{type:'machines',data:machines(p)});send(ws,{type:'team.user',user:publicUser(current.user)});
     }
   }
@@ -121,7 +123,12 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
     const authTimer=setTimeout(()=>ws.close(4401,'auth_required'),5000);
     ws.on('error',()=>{});
     ws.on('pong',()=>{const p=peers.get(ws);if(p)p.alive=true;});
+    // A failing team database read or any other unexpected error closes this one socket instead of the relay.
     ws.on('message',buffer=>{
+      try{receive(buffer);}
+      catch(error){console.error('中继处理消息失败：',(error as Error).message);try{ws.close(1011,'server_error');}catch{}}
+    });
+    function receive(buffer:RawData){
       let m:Json;try{m=JSON.parse(buffer.toString());}catch{ws.close(4400,'invalid_frame');return;}
       if(!m||typeof m!=='object'){ws.close(4400);return;}
       const p=peers.get(ws);
@@ -218,7 +225,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       } else if(p.role==='connector'&&m.type==='changed') {
         for(const [phone,q]of peers)if(q.role==='phone'&&allowed(q,p.machine?.id))send(phone,{type:'changed',machineId:p.machine?.id,threadId:m.threadId||null,generation:m.generation});
       }
-    });
+    }
     ws.on('close',()=>{
       clearTimeout(authTimer);peers.delete(ws);
       preview.stopPeer(ws);

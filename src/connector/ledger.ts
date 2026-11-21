@@ -75,7 +75,13 @@ export class Ledger {
     for(const table of QUEUE_TABLES)this.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, thread_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, error TEXT);
       UPDATE ${table} SET state='uncertain', error='连接器在发送时重启，请核实会话；不会自动重发' WHERE state='sending';
       UPDATE operations SET state='uncertain', result=json_object('error',json_object('code','interrupted','message','连接器在发送时重启，请核实会话；不会自动重发')) WHERE id IN (SELECT id FROM ${table} WHERE state='uncertain');`);
-    if(!this.db.prepare('PRAGMA table_info(operations)').all().some(column=>column.name==='actor'))this.db.exec('ALTER TABLE operations ADD COLUMN actor TEXT');
+    // Senders live beside operations, not in them: an older connector put back after a failed update keeps writing
+    // operations with its own five columns. A database an earlier build of this feature widened is narrowed again.
+    this.db.exec('CREATE TABLE IF NOT EXISTS operation_actors (id TEXT PRIMARY KEY, actor TEXT NOT NULL)');
+    if(this.db.prepare('PRAGMA table_info(operations)').all().some(column=>column.name==='actor'))this.db.exec(`BEGIN;
+      INSERT OR IGNORE INTO operation_actors SELECT id, actor FROM operations WHERE actor IS NOT NULL;
+      ALTER TABLE operations DROP COLUMN actor;
+      COMMIT;`);
     // Finished turns waiting for a team relay to confirm them, and each Claude Code session's running token total.
     this.db.exec(`CREATE TABLE IF NOT EXISTS usage_outbox (id TEXT PRIMARY KEY, payload TEXT NOT NULL, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS claude_usage_cursor (session_id TEXT PRIMARY KEY, totals TEXT NOT NULL, updated INTEGER NOT NULL);`);
@@ -87,6 +93,7 @@ export class Ledger {
     this.db.prepare('DELETE FROM message_senders WHERE created < ?').run(Date.now()-400*86400_000);
     this.db.exec("UPDATE operations SET state='uncertain' WHERE state='pending';");
     this.db.prepare(`DELETE FROM operations WHERE updated < ? ${QUEUE_TABLES.map(table=>`AND id NOT IN (SELECT id FROM ${table})`).join(' ')}`).run(Date.now()-7*86400_000);
+    this.db.exec('DELETE FROM operation_actors WHERE id NOT IN (SELECT id FROM operations)');
     this.codexQueue=new MessageQueue(this,'queued_messages');
     this.claudeQueue=new MessageQueue(this,'claude_queued_messages');
   }
@@ -96,16 +103,19 @@ export class Ledger {
   }
   /** Who sent an operation, as the relay stamped it. */
   actor(id:string):Actor|undefined {
-    const row=this.db.prepare('SELECT actor FROM operations WHERE id=?').get(id);
+    const row=this.db.prepare('SELECT actor FROM operation_actors WHERE id=?').get(id);
     try{return row?.actor?actorOf(JSON.parse(String(row.actor))):undefined;}catch{return undefined;}
   }
   /** Called after a turn is recorded, so the connector can send it to the relay. */
   onUsage?:()=>void;
   /** Keeps a finished turn until the relay confirms it; the sender comes from the operation that started the turn. */
   recordUsage(event:Omit<UsageEvent,'ts'|'actor'>&{ts?:number}) {
-    const actor=event.opId?this.actor(event.opId):undefined;
-    const full:UsageEvent={...event,ts:event.ts??Date.now(),...actor?{actor:{userId:actor.userId,...actor.name?{name:actor.name}:{}}}:{}};
-    this.db.prepare('INSERT OR IGNORE INTO usage_outbox VALUES (?,?,?)').run(full.id,JSON.stringify(full),Date.now());
+    // A lost usage record never fails the send or turn it describes.
+    try{
+      const actor=event.opId?this.actor(event.opId):undefined;
+      const full:UsageEvent={...event,ts:event.ts??Date.now(),...actor?{actor:{userId:actor.userId,...actor.name?{name:actor.name}:{}}}:{}};
+      this.db.prepare('INSERT OR IGNORE INTO usage_outbox VALUES (?,?,?)').run(full.id,JSON.stringify(full),Date.now());
+    }catch(error){console.error('用量记录失败：',(error as Error).message);return;}
     this.onUsage?.();
   }
   /**
@@ -113,9 +123,9 @@ export class Ledger {
    * keyed by `turnId`; Claude Code and Antigravity by their exact `text`.
    */
   recordSender(entry:{service:string;threadId:string;opId:string;kind:SenderRecord['kind'];turnId?:string|null;text?:string}) {
-    const actor=this.actor(entry.opId);if(!actor)return;
     // A missing name label never fails the send it describes.
-    try{this.db.prepare('INSERT INTO message_senders (service,thread_id,turn_id,kind,text_hash,user_id,name,created) VALUES (?,?,?,?,?,?,?,?)')
+    try{const actor=this.actor(entry.opId);if(!actor)return;
+      this.db.prepare('INSERT INTO message_senders (service,thread_id,turn_id,kind,text_hash,user_id,name,created) VALUES (?,?,?,?,?,?,?,?)')
       .run(entry.service,entry.threadId,entry.turnId??null,entry.kind,entry.text===undefined?null:textKey(entry.text),actor.userId,actor.name||'',Date.now());}
     catch(error){console.error('发送人记录失败：',(error as Error).message);}
   }
@@ -151,7 +161,8 @@ export class Ledger {
     const age=Date.now()-Number(id.split(':')[0]);
     if(age>5*60_000||age < -60_000)throw new BridgeError('expired','操作已过期或手机时间不准确，请核实任务后重新操作');
     const actor=requestActor.getStore();
-    this.db.prepare('INSERT INTO operations (id,hash,state,result,updated,actor) VALUES (?,?,?,NULL,?,?)').run(id,hash,'pending',Date.now(),actor?JSON.stringify(actor):null);
+    this.db.prepare('INSERT INTO operations VALUES (?,?,?,NULL,?)').run(id,hash,'pending',Date.now());
+    if(actor)this.db.prepare('INSERT OR REPLACE INTO operation_actors VALUES (?,?)').run(id,JSON.stringify(actor));
     const promise=(async()=>{
       try {
         const result=await fn();

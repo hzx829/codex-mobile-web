@@ -350,7 +350,10 @@ export class Control extends EventEmitter {
   /** The frame that brings watching phones to the current running turn, if it changed. */
   liveFrame(id:string):LiveFrame|null {
     if(!this.watched(id))return null;
-    return this.liveDiff.frame(id,this.generation,this.liveTurn(id));
+    // A frame may carry the whole turn, which replaces the phone's copy; it keeps the senders a read showed.
+    const turn=this.liveTurn(id);
+    if(turn)markCodexSenders([turn],this.ledger.senders('codex',id));
+    return this.liveDiff.frame(id,this.generation,turn);
   }
   /** The running turn as the phone shows it, built without reading the thread; null when that is not possible. */
   liveTurn(id:string):TurnView|null {

@@ -103,6 +103,8 @@ export class LiveSession {
   canBypass = false;
   /** The operation that started the running turn, so its tokens go to whoever sent it. */
   turnOpId?: string;
+  /** A 'now' message that may end the running turn and start its own; it starts the next turn when it does. */
+  nowOpId?: string;
   /** Where this session's running token total starts; see recordClaudeTurn. */
   usageBaseline: ClaudeBaseline = 'zero';
   constructor(public cwd: string, public query: Query, public inbox: Inbox, public model: string, public permissionMode: PermissionMode) {}
@@ -222,7 +224,7 @@ export class ClaudeRuntime extends EventEmitter {
           session.running = m.state !== 'idle' || session.inbox.size > 0;
         } else if (m.type === 'result') {
           // Each result ends a turn; 'turn' listeners record its tokens against the sender of the turn.
-          const opId = session.turnOpId;session.turnOpId = undefined;
+          const opId = session.turnOpId;session.turnOpId = session.nowOpId;session.nowOpId = undefined;
           if (session.id) {try {this.emit('turn', session, m, opId);} catch { /* Usage records never stop the session. */ }}
           session.usageBaseline = 'cursor';
           session.running = session.inbox.size > 0;
@@ -330,6 +332,7 @@ export class ClaudeRuntime extends EventEmitter {
    */
   send(session: LiveSession, text: string, images: string[], priority?: 'now' | 'next' | 'later', opId?: string) {
     if (!session.running && opId) session.turnOpId = opId;
+    else if (session.running && priority === 'now' && opId) session.nowOpId = opId;
     session.inbox.push(userMessage(text, images, session.running ? priority : undefined));
     session.running = true;session.error = '';
     this.touch(session);
