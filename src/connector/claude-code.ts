@@ -127,7 +127,7 @@ export class ClaudeCodeBridge {
           if (guestWorkspace()) await projectDirectory(session.cwd);
           await this.runtime.configure(session, model, mode);
         }
-        this.runtime.send(session, text, images);
+        this.runtime.send(session, text, images, undefined, head.id);
         queue.finishQueued(head.id, {conversationId: id, submitted: true});
       } catch (error) {
         queue.finishQueued(head.id, {}, error instanceof BridgeError ? error : new BridgeError('unexpected', '排队消息发送结果待核实，不会自动重发', true));
@@ -316,7 +316,7 @@ export class ClaudeCodeBridge {
       return this.mutate(p, {action, cwd, text: input.text, images: fingerprint(input.images), ...files, model, mode}, async () => {
         const text = await this.attach(newScope(cwd), input.text, input.files);
         const session = await this.runtime.start({cwd, model, permissionMode: mode});
-        this.runtime.send(session, text, input.images);
+        this.runtime.send(session, text, input.images, undefined, p.opId);
         return {conversationId: await this.runtime.waitForId(session)};
       });
     }
@@ -370,7 +370,7 @@ export class ClaudeCodeBridge {
             await this.runtime.configure(session, model, mode);
           }
           const running = session.running;
-          this.runtime.send(session, text, input.images, delivery === 'steer' ? 'next' : delivery === 'now' ? 'now' : undefined);
+          this.runtime.send(session, text, input.images, delivery === 'steer' ? 'next' : delivery === 'now' ? 'now' : undefined, p.opId);
           return {submitted: true, kind: running ? delivery === 'now' ? 'sent_now' : 'steer_accepted' : 'turn_accepted'};
         } finally {this.sending.delete(id);}
       });
@@ -428,7 +428,7 @@ export class ClaudeCodeBridge {
           else if ((await this.revision(id)).external && p.confirmIdle !== true)
             throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
           const session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, resumeAt: anchor, model, permissionMode: kept});
-          this.runtime.send(session, input.text, input.images);
+          this.runtime.send(session, input.text, input.images, undefined, p.opId);
           return {submitted: true};
         } finally {this.sending.delete(id);}
       });

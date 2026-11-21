@@ -5,6 +5,7 @@ import {homedir} from 'node:os';
 import {delimiter, join} from 'node:path';
 import type {Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage} from '@anthropic-ai/claude-agent-sdk';
 import {BridgeError, type Json} from '../shared/types.js';
+import type {ClaudeBaseline} from './usage-meter.js';
 
 export type QueryFn = (params: {prompt: AsyncIterable<SDKUserMessage>; options?: Options}) => Query;
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
@@ -100,6 +101,10 @@ export class LiveSession {
   window?: number | null;
   /** Started with permission to skip prompts, so it can switch into "bypassPermissions" later. */
   canBypass = false;
+  /** The operation that started the running turn, so its tokens go to whoever sent it. */
+  turnOpId?: string;
+  /** Where this session's running token total starts; see recordClaudeTurn. */
+  usageBaseline: ClaudeBaseline = 'zero';
   constructor(public cwd: string, public query: Query, public inbox: Inbox, public model: string, public permissionMode: PermissionMode) {}
   get pending() {return [...this.requests.values()].map(request => request.view);}
 }
@@ -183,6 +188,8 @@ export class ClaudeRuntime extends EventEmitter {
     session = new LiveSession(options.cwd, q, inbox, options.model || '', mode);session.canBypass = canBypass;
     session.hint = hint;
     if (options.resume) {session.id = options.resume;this.live.set(options.resume, session);}
+    // Resuming from an earlier message drops later turns, so the saved total no longer applies.
+    session.usageBaseline = options.resume ? options.resumeAt ? 'unknown' : 'cursor' : 'zero';
     void this.consume(session);
     return session;
   }
@@ -214,6 +221,10 @@ export class ClaudeRuntime extends EventEmitter {
         } else if (m.type === 'system' && m.subtype === 'session_state_changed') {
           session.running = m.state !== 'idle' || session.inbox.size > 0;
         } else if (m.type === 'result') {
+          // Each result ends a turn; 'turn' listeners record its tokens against the sender of the turn.
+          const opId = session.turnOpId;session.turnOpId = undefined;
+          if (session.id) {try {this.emit('turn', session, m, opId);} catch { /* Usage records never stop the session. */ }}
+          session.usageBaseline = 'cursor';
           session.running = session.inbox.size > 0;
           session.error = m.subtype === 'success' || session.interrupting ? '' : (Array.isArray(m.errors) ? m.errors.join('\n') : '') || 'Claude Code 本轮出错';
           session.interrupting = false;
@@ -317,7 +328,8 @@ export class ClaudeRuntime extends EventEmitter {
    * `priority` applies only while a turn runs: 'next' joins it once its current tool calls finish, 'now' moves
    * movable work to the background (or interrupts) and joins at once, 'later' waits for the turn to end.
    */
-  send(session: LiveSession, text: string, images: string[], priority?: 'now' | 'next' | 'later') {
+  send(session: LiveSession, text: string, images: string[], priority?: 'now' | 'next' | 'later', opId?: string) {
+    if (!session.running && opId) session.turnOpId = opId;
     session.inbox.push(userMessage(text, images, session.running ? priority : undefined));
     session.running = true;session.error = '';
     this.touch(session);

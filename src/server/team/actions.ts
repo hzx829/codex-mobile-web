@@ -144,6 +144,15 @@ export function handleTeam(store: TeamStore, me: Member, action: string, p: Json
       store.claimThread(p.machineId, service(p.service), p.threadId, owner);
       return {result: {claimed: true}};
     }
+    case 'team.usage': {
+      // Members see their own turns; admins everyone's, including turns started on the computers themselves.
+      const since = Math.max(Number(p.since) || 0, Date.now() - 400 * 86400_000);
+      const userId = isAdmin(self) ? (typeof p.userId === 'string' ? p.userId : undefined) : self.id;
+      const rows = store.usage({since, until: Number(p.until) || undefined, userId, offsetMinutes: p.offsetMinutes});
+      const members = store.users().filter(user => isAdmin(self) || user.id === self.id).map(user => ({id: user.id, name: user.name}));
+      const machines = store.machines().map(machine => ({id: machine.id, name: context.online.get(machine.id) || machine.name}));
+      return {result: {rows, members, machines}};
+    }
     case 'team.activity': {
       const userId = isAdmin(self) ? (typeof p.userId === 'string' ? p.userId : undefined) : self.id;
       const machineId = typeof p.machineId === 'string' ? p.machineId : undefined;

@@ -54,7 +54,7 @@ The voice choice is saved as `voice-provider` in browser `localStorage`. Audio s
 | Runtime logs | Startup, connection and error diagnostics | Windows `.local/*.log` has no app-defined rotation. Supplied Compose rotates each service's local logs at 5 MB × 3 files. Other deployments follow their own settings |
 | Relay process | Peers, routes and forwarded content in memory | No deliberate disk storage of conversation/file payloads; without team mode there is no application database. This excludes host swap, crash dumps, infrastructure logging and operator modifications |
 | Relay deployment | Token in environment/configuration; Caddy certificate/configuration volumes when used | Until changed/removed by the operator |
-| Relay `relay.sqlite` (team mode only) | Members, devices, token hashes, session owners and titles, activity log; see Team mode below | Until removed by the operator; activity older than 400 days is deleted at relay start |
+| Relay `relay.sqlite` | Team mode: members, devices, token hashes, session owners and titles, activity log. Turn usage (token counts per turn and model) from connectors whenever the relay has a writable data directory; see Team mode below | Until removed by the operator; activity and usage older than 400 days are deleted at relay start |
 | Native Codex and workspace | History, credentials, task results and project files | Governed by Codex and your retention/backups; uninstalling the bridge does not delete them |
 
 Default relay/connector status logging does not deliberately record message bodies or Tokens; the supplied Caddyfile does not enable access logging. Not all error messages are guaranteed to be sanitized. Custom proxies, cloud platforms and debugging settings may record metadata or additional content.
@@ -73,7 +73,7 @@ Task execution follows the applicable Codex session's permissions. The bridge ad
 
 After the relay operator runs `team init`, phones no longer sign in with the shared Token. Each member opens a one-time invite link (valid 24 hours, single use), which the relay exchanges for a random token for that device. Connectors keep using the shared Token unless an admin gives a computer its own token.
 
-The relay then keeps `relay.sqlite` in its data directory. It holds member names and roles; device names; SHA-256 hashes of device, invite and computer tokens; which member started each session (computer, app, session ID and the session's latest list title); and an activity log of write actions (time, member, device, computer, app, action, session ID, operation ID and outcome). It does not store message text, prompts, replies, file contents or what an approval allowed. Activity older than 400 days is deleted when the relay starts. The connector's operation ledger also records the member the relay named for each operation.
+The relay then keeps `relay.sqlite` in its data directory. It holds member names and roles; device names; SHA-256 hashes of device, invite and computer tokens; which member started each session (computer, app, session ID and the session's latest list title); and an activity log of write actions (time, member, device, computer, app, action, session ID, operation ID and outcome). It also keeps one usage row per finished turn and model: time, computer, app, session ID, turn ID, the member who started the turn, model name and token counts. It does not store message text, prompts, replies, file contents or what an approval allowed. Activity and usage older than 400 days are deleted when the relay starts. The connector's operation ledger also records the member the relay named for each operation, keeps finished turns until the relay confirms them (up to 30 days), and keeps each Claude Code session's running token total.
 
 Members can see and operate every session on the computers they may use. Session owners are labels, not isolation: every member's tasks still run as the computer's OS user. Removing a device or disabling a member closes its connections immediately. Signing out removes the current device. The browser keeps the device token in `localStorage` under `connection` and the "only my sessions" choice under `only-mine`.
 
@@ -143,7 +143,7 @@ Antigravity 面板沿用共享 Token。中继可读取转发的桌面对话标�
 | 运行日志 | 启动、连接和错误诊断 | Windows `.local/*.log` 无应用层轮换；附带 Compose 对各服务按 5 MB × 3 文件轮换；其他部署依自身设置 |
 | 中继进程 | 内存中的连接、路由和转发内容 | 不主动把聊天/文件正文持久化到磁盘；未启用团队模式时无应用数据库；不涵盖系统交换空间、崩溃转储、基础设施日志或管理者修改 |
 | 中继部署 | 环境/配置中的 Token；使用 Caddy 时的证书和配置卷 | 管理者修改/删除前保留 |
-| 中继 `relay.sqlite`（仅团队模式） | 成员、设备、Token 哈希、会话归属与标题、操作记录；见下文“团队模式” | 管理者删除前保留；超过 400 天的操作记录在中继启动时删除 |
+| 中继 `relay.sqlite` | 团队模式下的成员、设备、Token 哈希、会话归属与标题、操作记录；中继有可写数据目录时，还有连接器上报的每轮用量（按轮次和模型的 token 数）；见下文“团队模式” | 管理者删除前保留；超过 400 天的操作记录和用量在中继启动时删除 |
 | 原生 Codex 与工作区 | 历史、认证材料、任务结果、项目文件 | 由 Codex 和使用者的保留/备份设置管理；卸载连接器不会删除这些数据 |
 
 默认中继/连接器状态日志不主动记录消息正文或 Token，附带 Caddyfile 未启用访问日志。但不能保证所有错误信息都已脱敏；自定义代理、云平台或调试设置可能另行记录连接信息或内容。
@@ -162,7 +162,7 @@ Token 同时认证手机和连接器，没有独立只读凭据、设备批准�
 
 中继管理者运行 `team init` 后，手机不能再用共享 Token 登录。每个成员打开一次性邀请链接（24 小时内有效，只能用一次），中继把它换成这台设备自己的随机令牌。电脑连接器继续使用共享 Token，除非管理员给某台电脑生成了专用 Token。
 
-此后中继在数据目录保存 `relay.sqlite`，内容包括：成员名字和角色；设备名；设备、邀请和电脑 Token 的 SHA-256 哈希；每个会话由谁创建（电脑、应用、会话 ID 和列表中最近的标题）；写操作记录（时间、成员、设备、电脑、应用、操作类型、会话 ID、操作 ID 和结果）。不保存消息正文、提示词、回复、文件内容或审批允许的具体内容。超过 400 天的操作记录在中继启动时删除。连接器的操作账本也会记下中继标注的操作者。
+此后中继在数据目录保存 `relay.sqlite`，内容包括：成员名字和角色；设备名；设备、邀请和电脑 Token 的 SHA-256 哈希；每个会话由谁创建（电脑、应用、会话 ID 和列表中最近的标题）；写操作记录（时间、成员、设备、电脑、应用、操作类型、会话 ID、操作 ID 和结果）。还为每一轮、每个模型保存一行用量：时间、电脑、应用、会话 ID、轮次 ID、发起这一轮的成员、模型名和 token 数。不保存消息正文、提示词、回复、文件内容或审批允许的具体内容。超过 400 天的操作记录和用量在中继启动时删除。连接器的操作账本也会记下中继标注的操作者，保存中继尚未确认的已完成轮次（最多 30 天），以及每个 Claude Code 会话的累计 token 数。
 
 成员可以查看和操作自己可用电脑上的全部会话。会话归属只是标记，不是隔离：所有成员的任务都以电脑上的系统用户身份运行。移除设备或停用成员会立即断开其连接；退出登录会移除当前设备。浏览器在 `localStorage` 的 `connection` 中保存设备令牌，在 `only-mine` 中保存“只看我的会话”选项。
 

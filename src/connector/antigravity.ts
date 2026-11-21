@@ -167,6 +167,7 @@ export class AntigravityBridge {
         await this.hub(directory, 'DeleteCascadeTrajectory', {cascadeId: id}).catch(() => {});
         throw error;
       }
+      this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
       return {conversationId: id, submitted: true};
     });
   }
@@ -336,6 +337,8 @@ export class AntigravityBridge {
             if (turnKey(latest) !== turn || !canSend(latest)) throw new BridgeError('changed', '会话状态已变化，请刷新后再发送');
           }
           await this.hub(directory, 'SendUserCascadeMessage', message);
+          // Antigravity reports no tokens; the turn still counts for whoever sent it.
+          this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
           return {submitted: true};
         }
         await this.hub(directory, 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks: false});

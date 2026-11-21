@@ -209,6 +209,11 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         preview.handle(ws,m);
       } else if(p.role==='connector'&&m.type==='live'&&typeof m.threadId==='string') {
         for(const [phone,q]of peers)if(q.role==='phone'&&q.watch?.machineId===p.machine?.id&&q.watch?.threadId===m.threadId&&allowed(q,p.machine?.id))send(phone,{...m,machineId:p.machine?.id});
+      } else if(p.role==='connector'&&m.type==='usage'&&Array.isArray(m.events)&&p.machine) {
+        // Finished turns from the computer; the relay confirms each one it stored so the computer can forget it.
+        if(!team)return;
+        try{send(ws,{type:'usage.ack',ids:team.addUsage(p.machine.id,m.events.slice(0,500))});}
+        catch(error){console.error('用量写入失败：',(error as Error).message);}
       } else if(p.role==='connector'&&m.type==='changed') {
         for(const [phone,q]of peers)if(q.role==='phone'&&allowed(q,p.machine?.id))send(phone,{type:'changed',machineId:p.machine?.id,threadId:m.threadId||null,generation:m.generation});
       }

@@ -9,6 +9,8 @@ export const ROLES: readonly Role[] = ['owner', 'admin', 'member'];
 export interface User {id: string; name: string; role: Role; status: 'active' | 'disabled'; allMachines: boolean; machines: string[]; createdAt: number}
 export interface Device {id: string; userId: string; name: string; createdAt: number; lastSeenAt: number | null; revokedAt: number | null}
 export interface Owner {id: string; name: string}
+/** One row per day, member, computer, app and model; `userId` is null for turns started on the computer itself. */
+export interface UsageRow {day: string; userId: string | null; machineId: string; service: Service; model: string; turns: number; inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null; reasoningTokens: number | null}
 export interface Activity {id: number; ts: number; userId: string; userName: string; deviceId: string | null; machineId: string; service: Service; action: string; threadId: string | null; state: string}
 
 /** One invite stays usable for a day; it only turns into a device token, which the browser keeps. */
@@ -56,8 +58,13 @@ export class TeamStore {
         machine_id TEXT NOT NULL, service TEXT NOT NULL, action TEXT NOT NULL, thread_id TEXT, op_id TEXT, state TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS activity_ts ON activity(ts);
       CREATE INDEX IF NOT EXISTS activity_user ON activity(user_id, ts);
-      CREATE INDEX IF NOT EXISTS activity_thread ON activity(machine_id, service, thread_id, ts);`);
-    this.db.prepare('DELETE FROM activity WHERE ts < ?').run(Date.now() - ACTIVITY_DAYS * 86400_000);
+      CREATE INDEX IF NOT EXISTS activity_thread ON activity(machine_id, service, thread_id, ts);
+      CREATE TABLE IF NOT EXISTS usage (event_id TEXT NOT NULL, model TEXT NOT NULL, ts INTEGER NOT NULL, machine_id TEXT NOT NULL, service TEXT NOT NULL,
+        thread_id TEXT NOT NULL, turn_id TEXT, user_id TEXT, turns INTEGER NOT NULL, input_tokens INTEGER, cached_input_tokens INTEGER,
+        output_tokens INTEGER, reasoning_tokens INTEGER, PRIMARY KEY(event_id, model));
+      CREATE INDEX IF NOT EXISTS usage_ts ON usage(ts);
+      CREATE INDEX IF NOT EXISTS usage_user ON usage(user_id, ts);`);
+    for (const table of ['activity', 'usage']) this.db.prepare(`DELETE FROM ${table} WHERE ts < ?`).run(Date.now() - ACTIVITY_DAYS * 86400_000);
   }
 
   /** Team mode starts with the first member; until then the relay keeps its single shared Token. */
@@ -270,6 +277,51 @@ export class TeamStore {
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ${limit}`).all(...values)
       .map(row => ({id: Number(row.id), ts: Number(row.ts), userId: String(row.user_id), userName: String(row.user_name), deviceId: row.device_id === null ? null : String(row.device_id),
         machineId: String(row.machine_id), service: row.service as Service, action: String(row.action), threadId: row.thread_id === null ? null : String(row.thread_id), state: String(row.state)}));
+  }
+
+  /**
+   * Stores finished turns a computer reported and returns the IDs it may forget: stored, already
+   * stored, or invalid. A turn's first model row counts the turn; further models only add tokens.
+   */
+  addUsage(machineId: string, events: unknown[]): string[] {
+    const done: string[] = [];
+    const insert = this.db.prepare(`INSERT OR IGNORE INTO usage (event_id, model, ts, machine_id, service, thread_id, turn_id, user_id, turns,
+      input_tokens, cached_input_tokens, output_tokens, reasoning_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const own = this.db.prepare('INSERT OR IGNORE INTO threads (machine_id, service, thread_id, owner_id, created_at) VALUES (?, ?, ?, ?, ?)');
+    const tokens = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+    this.transaction(() => {
+      for (const raw of events) {
+        const event = raw as Record<string, any>;
+        if (typeof event?.id !== 'string' || !event.id || event.id.length > 300) continue;
+        done.push(event.id);
+        const service = event.service;
+        if (service !== 'codex' && service !== 'claude' && service !== 'antigravity') continue;
+        if (typeof event.threadId !== 'string' || !event.threadId || event.threadId.length > 200) continue;
+        const ts = typeof event.ts === 'number' && Number.isFinite(event.ts) ? Math.min(event.ts, Date.now()) : Date.now();
+        const user = typeof event.actor?.userId === 'string' && this.user(event.actor.userId) ? event.actor.userId as string : null;
+        const id = `${machineId}:${event.id}`, turnId = typeof event.turnId === 'string' ? event.turnId.slice(0, 200) : null;
+        const models = Array.isArray(event.models) ? event.models.filter((item: any) => item && typeof item.model === 'string').slice(0, 20) : [];
+        if (!models.length) insert.run(id, '', ts, machineId, service, event.threadId, turnId, user, 1, null, null, null, null);
+        models.forEach((item: any, index: number) => insert.run(id, item.model.slice(0, 200), ts, machineId, service, event.threadId, turnId, user, index ? 0 : 1,
+          tokens(item.inputTokens), tokens(item.cachedInputTokens), tokens(item.outputTokens), tokens(item.reasoningTokens)));
+        // A session whose create reply was lost still gets the sender of its first turn as owner.
+        if (user) own.run(machineId, service, event.threadId, user, ts);
+      }
+    });
+    return done;
+  }
+
+  /** Turns and tokens from `since` on, by local day (`offsetMinutes` east of UTC), member, computer, app and model. */
+  usage(filter: {since: number; until?: number; userId?: string; offsetMinutes?: number}): UsageRow[] {
+    const offset = Math.max(-14 * 60, Math.min(14 * 60, Math.round(Number(filter.offsetMinutes) || 0))) * 60_000;
+    const where = ['ts >= ?', 'ts < ?'], values: (string | number)[] = [filter.since, filter.until ?? Date.now() + 60_000];
+    if (filter.userId) {where.push('user_id = ?');values.push(filter.userId);}
+    return this.db.prepare(`SELECT date((ts + ${offset}) / 1000, 'unixepoch') AS day, user_id, machine_id, service, model, SUM(turns) AS turns,
+      SUM(input_tokens) AS input, SUM(cached_input_tokens) AS cached, SUM(output_tokens) AS output, SUM(reasoning_tokens) AS reasoning
+      FROM usage WHERE ${where.join(' AND ')} GROUP BY day, user_id, machine_id, service, model ORDER BY day`).all(...values)
+      .map(row => ({day: String(row.day), userId: row.user_id === null ? null : String(row.user_id), machineId: String(row.machine_id), service: row.service as Service, model: String(row.model),
+        turns: Number(row.turns), inputTokens: row.input === null ? null : Number(row.input), cachedInputTokens: row.cached === null ? null : Number(row.cached),
+        outputTokens: row.output === null ? null : Number(row.output), reasoningTokens: row.reasoning === null ? null : Number(row.reasoning)}));
   }
 
   close() {this.db.close();}

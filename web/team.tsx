@@ -1,11 +1,12 @@
 import {useEffect,useState,type ReactNode} from 'react';
 import type {Json} from '../src/shared/types';
 import {relativeTime} from './thread-menu';
+import {UsagePanel} from './usage';
 
 export type TeamRole='owner'|'admin'|'member';
 export type TeamUser={id:string;name:string;role:TeamRole};
 export type TeamCall=(action:`team.${string}`,payload?:Json)=>Promise<any>;
-type Tab='mine'|'members'|'machines'|'activity';
+type Tab='mine'|'members'|'machines'|'usage'|'activity';
 
 export const ROLE_LABELS:Record<TeamRole,string>={owner:'所有者',admin:'管理员',member:'成员'};
 const isAdmin=(user:TeamUser)=>user.role==='owner'||user.role==='admin';
@@ -159,15 +160,16 @@ function Activity({team,admin,machines}:{team:TeamCall;admin:boolean;machines:Ma
   </Section>;
 }
 
-/** The team page: everyone manages their own devices and sees their activity; admins also manage members and computers. */
+/** The team page: everyone manages their own devices and sees their usage and activity; admins also manage members and computers and see everyone's. */
 export function TeamPanel({me,team,logout,copy,machines}:{me:TeamUser;team:TeamCall;logout:()=>void;copy:(text:string)=>Promise<void>;machines:Map<string,string>}){
   const admin=isAdmin(me),[tab,setTab]=useState<Tab>('mine');
-  const tabs:[Tab,string][]=admin?[['mine','我的'],['members','成员'],['machines','电脑'],['activity','记录']]:[['mine','我的'],['activity','记录']];
+  const tabs:[Tab,string][]=admin?[['mine','我的'],['members','成员'],['machines','电脑'],['usage','用量'],['activity','记录']]:[['mine','我的'],['usage','用量'],['activity','记录']];
   return <div className="team-panel">
     <div className="team-tabs" role="tablist">{tabs.map(([id,label])=><button type="button" role="tab" key={id} aria-selected={tab===id} className={tab===id?'selected':''} onClick={()=>setTab(id)}>{label}</button>)}</div>
     {tab==='mine'&&<Devices team={team} me={me} logout={logout} copy={copy}/>}
     {tab==='members'&&admin&&<Members team={team} me={me} copy={copy}/>}
     {tab==='machines'&&admin&&<Machines team={team} copy={copy}/>}
+    {tab==='usage'&&<UsagePanel team={team} admin={admin}/>}
     {tab==='activity'&&<Activity team={team} admin={admin} machines={machines}/>}
   </div>;
 }

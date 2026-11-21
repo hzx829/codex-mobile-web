@@ -26,6 +26,10 @@ export interface SessionView {
   owner?: TeamMember | null; lastSender?: TeamMember | null;
 }
 export interface TeamMember { id: string; name: string }
+/** One model's tokens in a turn. Input includes cached input; output includes reasoning where the model reports it. */
+export interface UsageTokens { model: string; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number }
+/** One finished turn, sent by the connector to a team relay. No `models` when its tokens are unknown (Antigravity). */
+export interface UsageEvent { id: string; ts: number; service: BridgeService; threadId: string; turnId: string; opId?: string; actor?: {userId: string; name?: string}; models: UsageTokens[] }
 export class BridgeError extends Error {
   constructor(public code: string, message: string, public uncertain = false) { super(message); }
 }

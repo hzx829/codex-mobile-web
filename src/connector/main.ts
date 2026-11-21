@@ -17,6 +17,7 @@ import { ArtifactViewer } from './claude-artifacts.js';
 import { GUEST_ENTRYPOINT, NoDesktop, preflight, returnLogins, useGuestHomes } from './guest.js';
 import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './guest-checks.js';
 import { setWorkspace } from './project.js';
+import { recordClaudeTurn } from './usage-meter.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -60,7 +61,9 @@ if(available.includes('claude')){
   // A borrowed computer keeps Claude Code's default (ask when needed).
   const configuredMode=PERMISSION_MODES.find(mode=>mode===config.claudePermissionMode);
   const defaultMode=guest?'default':configuredMode||'bypassPermissions';
-  const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,new ClaudeRuntime(sdkQuery,undefined,undefined,entrypoint,defaultMode));
+  const claudeRuntime=new ClaudeRuntime(sdkQuery,undefined,undefined,entrypoint,defaultMode);
+  claudeRuntime.on('turn',(session,result,opId)=>recordClaudeTurn(ledger,session.id,session.usageBaseline,result,opId));
+  const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,claudeRuntime);
   // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
   // A guest's profile lives in the guest folder, so clearing the guest data removes that sign-in too.
   claudeCode.artifacts=new ArtifactViewer(guest?guest.root:config.dataDir);
@@ -81,6 +84,17 @@ const services=new ServiceRouter(bridges,request=>{
 },()=>control.updating);
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
 let proxyBackpressure:NodeJS.Timeout|undefined;
+// Finished turns go to a team relay in batches; each stays in the ledger until the relay confirms it.
+let usageRelay=false,usageSending=false;
+function flushUsage(){
+  if(!usageRelay||usageSending||socket?.readyState!==WebSocket.OPEN)return;
+  const events=ledger.pendingUsage(200);if(!events.length)return;
+  usageSending=true;
+  try{send({type:'usage',events});}catch{usageSending=false;}
+}
+ledger.onUsage=()=>setImmediate(flushUsage);
+// A batch the relay never confirmed (for example lost while it restarted) is sent again.
+setInterval(()=>{usageSending=false;flushUsage();},60_000).unref();
 const dirtyIds=new Set<string|null>();
 function send(value:Json){if(socket?.readyState===WebSocket.OPEN){const frame=JSON.stringify(value);if(Buffer.byteLength(frame)>MAX_FRAME||socket.bufferedAmount>MAX_FRAME)throw new BridgeError('too_large','会话内容较大，请减少历史范围');socket.send(frame);}}
 browserPreview.on('message',(message:Json)=>{try{
@@ -102,8 +116,9 @@ function connect() {
   ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname(),services:available,...guest?{guest:true}:{}}));
   ws.on('message',async data=>{
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
-    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');console.log('电脑已连接中继');return;}
+    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');usageRelay=Array.isArray(m.features)&&m.features.includes('team');usageSending=false;console.log('电脑已连接中继');flushUsage();return;}
     if(!ready)return;
+    if(m.type==='usage.ack'){if(Array.isArray(m.ids))ledger.ackUsage(m.ids);usageSending=false;flushUsage();return;}
     if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
     if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
     if(m.type!=='request')return;
@@ -118,7 +133,7 @@ function connect() {
   });
   ws.on('error',()=>{});
   ws.on('close',code=>{
-    clearInterval(proxyBackpressure);proxyBackpressure=undefined;
+    clearInterval(proxyBackpressure);proxyBackpressure=undefined;usageSending=false;
     void browserPreview.stop();
     clearTimeout(authTimer);clearInterval(pulse);if(stopping)return;
     if(code===4401||code===4409){

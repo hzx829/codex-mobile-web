@@ -1,6 +1,6 @@
 # 团队账号、会话归属与用量统计：设计（草案）
 
-状态：方案已确认（§11），P1 已实现并通过自动测试，未做真机和公网部署验收；P2 用量统计未开始。日期：2026-11-21。本设计推翻了 [DESIGN.md §7](../../DESIGN.md#7-自托管与最小访问控制) 中“不增加账号、邀请制、逐设备撤销”的决定，该节和 [PRIVACY.md](../../PRIVACY.md) 已同步。启用步骤见 [DEPLOY.md](../../DEPLOY.md#团队成员可选)，P1 的实际范围见 §12。
+状态：方案已确认（§11），P1 和 P2 已实现并通过自动测试，未做真机和公网部署验收。日期：2026-11-21。本设计推翻了 [DESIGN.md §7](../../DESIGN.md#7-自托管与最小访问控制) 中“不增加账号、邀请制、逐设备撤销”的决定，该节和 [PRIVACY.md](../../PRIVACY.md) 已同步。启用步骤见 [DEPLOY.md](../../DEPLOY.md#团队成员可选)，实际范围见 §12（P1）和 §13（P2）。
 
 ## 1 现状与约束
 
@@ -121,12 +121,12 @@ flowchart LR
 
 | 服务 | 来源 | 每轮用量的算法 | 待验证 |
 | --- | --- | --- | --- |
-| Codex（连接器自起的 app-server） | `thread/tokenUsage/updated` 的 `total` | 一轮开始和 `turn/completed` 时的 `total` 相减，得到输入、缓存输入、输出、推理 token | 一轮中是否每次模型调用都推送；压缩后 `total` 是否会回落 |
+| Codex（连接器自起的 app-server） | `thread/tokenUsage/updated`，带 `turnId` | 这一轮第一条更新的 `total − last` 是开始前的总数，`turn/completed` 前最后一条的 `total` 是结束时的总数，两者相减 | 压缩后 `total` 是否会回落（回落时按 0 计） |
 | Codex（桌面 IPC 会话） | 桌面快照的 `latestTokenUsageInfo` | 同上，用快照前后差值 | 桌面路径能否稳定拿到一轮结束时的快照 |
 | Claude Code | SDK `result` 消息的 `modelUsage` | SDK 文档写明它在流式会话里是**累计值**，每条 result 带到目前为止的总数，所以与上一条相减；续接或分叉的会话从记录里的旧总数继续，所以每个会话要保存上一次的累计值，没有记录时第一条 result 只作基线不计入 | 续接时的基线；`/clear` 后清零的处理 |
 | Antigravity | 无用量接口 | 只统计轮次 | — |
 
-统计项：发起的轮次、新建会话数、各类 token、运行时长、活跃天数。不折算金额（§11）。
+统计项：轮次、输入 token（含缓存命中）、缓存命中、输出 token（Codex 含推理）、推理 token。不折算金额（§11），也不统计运行时长。
 
 **订阅账号的说明**：ChatGPT、Claude 订阅登录时，额度属于电脑上的那个账号，全员共用。token 数表示各人占了多少比例。
 
@@ -151,8 +151,8 @@ flowchart LR
 ### 6.4 统计页
 
 - 成员看自己的；管理员看全员。
-- 时间：今天、7 天、30 天、自定义；粒度：按日。
-- 维度：成员 × 服务 × 模型 × 电脑，表格加按日堆叠柱状图。
+- 时间：今天、7 天、30 天；粒度：按日。
+- 维度：成员 × 服务 × 模型 × 电脑。页面上是三个汇总数、每天 token 的柱状图、按成员和按应用 · 模型的表；CSV 含全部维度。
 - 导出 CSV。
 - 数据量很小（几个人、每天几百轮），直接在 SQLite 上按需 `GROUP BY`，不做预聚合。
 
@@ -180,8 +180,9 @@ machine_access (user_id, machine_id, PRIMARY KEY(user_id, machine_id))
 threads      (machine_id, service, thread_id, owner_id NULL, parent_thread_id, title, created_at, updated_at,
               PRIMARY KEY(machine_id, service, thread_id))
 activity     (id, ts, user_id, device_id, machine_id, service, action, thread_id, op_id, state)
-usage        (event_id PRIMARY KEY, ts, machine_id, service, thread_id, turn_id, user_id NULL, model, provider,
-              input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, duration_ms)
+usage        (event_id, model, ts, machine_id, service, thread_id, turn_id, user_id NULL, turns,
+              input_tokens NULL, cached_input_tokens NULL, output_tokens NULL, reasoning_tokens NULL,
+              PRIMARY KEY(event_id, model))  -- 一轮一个或多个模型各一行，只有第一行的 turns 为 1
 ```
 
 连接器账本（`operations.sqlite`）新增：`operations.actor`、`usage_outbox(id, payload, created)`、`claude_usage_cursor(session_id, totals, updated)`。
@@ -228,3 +229,23 @@ usage        (event_id PRIMARY KEY, ts, machine_id, service, thread_id, turn_id,
 - Claude Code 和 Antigravity 的会话页暂不显示创建人，列表上有标记。
 
 测试：`test/team.test.ts`（邀请换令牌、一次性与过期、最后一位所有者、电脑授权、伪造 actor 被覆盖、归属与列表标注、停用立即断开、电脑专用 Token、连接器记录 actor、邀请链接解析）。全部 236 个测试通过。
+
+## 13 P2 实现记录（2026-11-21）
+
+已实现：
+
+- 连接器 `src/connector/usage-meter.ts`：Codex 每轮差值、Claude Code 累计值的差值和基线规则。`ledger.ts` 加 `usage_outbox`（未确认的轮次，最多留 30 天）和 `claude_usage_cursor`（每个 Claude Code 会话上一轮结束时的累计值）。每一轮的发起人取自开始这一轮的操作的 actor（§5.3），所以排队消息算给排队的人。
+- Codex：`control.ts` 在发起新一轮时记下操作 ID；连接器自己的 app-server 会话按 `thread/tokenUsage/updated` 算 token；桌面会话在发送时记下桌面快照里的总数，等快照里这一轮结束时再取总数相减。在电脑上直接开始的桌面轮次连接器看不到，不计入；app-server 里不是手机发起的轮次记为“电脑本机”。
+- Claude Code：`claude-runtime.ts` 在空闲时收到的消息上记下操作 ID，每条 `result` 发出 `turn` 事件。新建的会话从 0 开始；续接的会话从保存的累计值开始，没有保存过就只把第一轮当基线、不计 token；从某条消息改写（`resumeAt`）后同样只当基线；累计值变小（清空过会话）或崩溃时报 0 的一轮不计 token。轮次都照常计入。
+- Antigravity：发送和新建成功时记一轮，没有 token。
+- 上报：`main.ts` 在中继 `ready.features` 含 `team` 时每批最多 200 条发 `usage`，收到 `usage.ack` 后删除并继续；60 秒内没有确认的批次会重发。中继 `addUsage` 按事件 ID 去重，已存过和格式不对的事件也确认，免得连接器一直重发。
+- 中继：`usage` 表与 `team.usage` 查询，按客户端时区分日汇总。成员只能查自己，管理员可按成员筛选。会话没有归属时，第一条带发起人的用量顺便补上归属。
+- 网页：团队面板新增“用量”页，每人都能打开；数据图用单一蓝色柱（`#2a78d6`，已用调色板校验脚本检查对白底的对比度）。
+
+与上文的差别：
+
+- 时间范围只有今天、7 天、30 天，没有自定义。
+- 不统计运行时长、活跃天数和新建会话数。
+- 会话内显示每条消息的发送人仍未做。
+
+测试：`test/usage-stats.test.ts`（Codex 差值、Claude 基线与清零、Codex app-server 和桌面两条路径、Claude 轮次与发起操作、中继去重与按成员查询、网页的数字格式、日期范围和 CSV）。全部 242 个测试通过。在浏览器里用本机临时中继和 74 条模拟轮次检查过桌面宽度和手机宽度下的用量页。

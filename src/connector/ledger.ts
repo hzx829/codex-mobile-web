@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { BridgeError, type Json } from '../shared/types.js';
+import { BridgeError, type Json, type UsageEvent } from '../shared/types.js';
 import type {FileAttachment} from '../shared/attachments.js';
 
 export type UploadRecord=FileAttachment&{threadId:string;cwd:string};
@@ -75,6 +75,10 @@ export class Ledger {
       UPDATE ${table} SET state='uncertain', error='连接器在发送时重启，请核实会话；不会自动重发' WHERE state='sending';
       UPDATE operations SET state='uncertain', result=json_object('error',json_object('code','interrupted','message','连接器在发送时重启，请核实会话；不会自动重发')) WHERE id IN (SELECT id FROM ${table} WHERE state='uncertain');`);
     if(!this.db.prepare('PRAGMA table_info(operations)').all().some(column=>column.name==='actor'))this.db.exec('ALTER TABLE operations ADD COLUMN actor TEXT');
+    // Finished turns waiting for a team relay to confirm them, and each Claude Code session's running token total.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS usage_outbox (id TEXT PRIMARY KEY, payload TEXT NOT NULL, created INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS claude_usage_cursor (session_id TEXT PRIMARY KEY, totals TEXT NOT NULL, updated INTEGER NOT NULL);`);
+    this.db.prepare('DELETE FROM usage_outbox WHERE created < ?').run(Date.now()-30*86400_000);
     this.db.exec("UPDATE operations SET state='uncertain' WHERE state='pending';");
     this.db.prepare(`DELETE FROM operations WHERE updated < ? ${QUEUE_TABLES.map(table=>`AND id NOT IN (SELECT id FROM ${table})`).join(' ')}`).run(Date.now()-7*86400_000);
     this.codexQueue=new MessageQueue(this,'queued_messages');
@@ -89,6 +93,22 @@ export class Ledger {
     const row=this.db.prepare('SELECT actor FROM operations WHERE id=?').get(id);
     try{return row?.actor?actorOf(JSON.parse(String(row.actor))):undefined;}catch{return undefined;}
   }
+  /** Called after a turn is recorded, so the connector can send it to the relay. */
+  onUsage?:()=>void;
+  /** Keeps a finished turn until the relay confirms it; the sender comes from the operation that started the turn. */
+  recordUsage(event:Omit<UsageEvent,'ts'|'actor'>&{ts?:number}) {
+    const actor=event.opId?this.actor(event.opId):undefined;
+    const full:UsageEvent={...event,ts:event.ts??Date.now(),...actor?{actor:{userId:actor.userId,...actor.name?{name:actor.name}:{}}}:{}};
+    this.db.prepare('INSERT OR IGNORE INTO usage_outbox VALUES (?,?,?)').run(full.id,JSON.stringify(full),Date.now());
+    this.onUsage?.();
+  }
+  pendingUsage(limit=200):UsageEvent[] {return this.db.prepare('SELECT payload FROM usage_outbox ORDER BY created, id LIMIT ?').all(limit).map(row=>JSON.parse(String(row.payload)));}
+  ackUsage(ids:unknown[]) {const remove=this.db.prepare('DELETE FROM usage_outbox WHERE id=?');for(const id of ids)if(typeof id==='string')remove.run(id);}
+  claudeCursor(sessionId:string):Record<string,any>|undefined {
+    const row=this.db.prepare('SELECT totals FROM claude_usage_cursor WHERE session_id=?').get(sessionId);
+    try{return row?JSON.parse(String(row.totals)):undefined;}catch{return undefined;}
+  }
+  setClaudeCursor(sessionId:string,totals:Json) {this.db.prepare('INSERT INTO claude_usage_cursor VALUES (?,?,?) ON CONFLICT(session_id) DO UPDATE SET totals=excluded.totals, updated=excluded.updated').run(sessionId,JSON.stringify(totals),Date.now());}
   owns(id:string){return Boolean(this.db.prepare('SELECT id FROM managed WHERE id=?').get(id));}
   upload(id:string):UploadRecord|undefined {return this.db.prepare('SELECT id, thread_id AS threadId, cwd, name, size FROM file_uploads WHERE id=?').get(id) as UploadRecord|undefined;}
   addUpload(file:UploadRecord){this.db.prepare('INSERT INTO file_uploads VALUES (?,?,?,?,?)').run(file.id,file.threadId,file.cwd,file.name,file.size);}
