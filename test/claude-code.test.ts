@@ -60,6 +60,46 @@ test('Claude Code transcripts become Codex-style turns', () => {
   assert.equal(toolActivity({name: 'mcp__x__y', input: {q: 1}}).type, 'toolCall');
 });
 
+test('a background task notification is a status line, not something the user typed', () => {
+  const notice = '<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_9</tool-use-id>\n<output-file>C:\\tmp\\b1.output</output-file>\n'
+    + '<status>completed</status>\n<summary>Background command "Run evals" completed (exit code 0)</summary>\n</task-notification>';
+  const turns = claudeTurns([
+    {type: 'user', uuid: 'u1', message: {role: 'user', content: '跑一下评测'}},
+    {type: 'assistant', uuid: 'a1', message: {role: 'assistant', content: [{type: 'text', text: '已在后台运行。'}]}},
+    {type: 'user', uuid: 'u2', message: {role: 'user', content: notice}},
+    {type: 'assistant', uuid: 'a2', message: {role: 'assistant', content: [{type: 'text', text: '评测通过。'}]}},
+  ]);
+  assert.equal(turns.length, 1);
+  assert.deepEqual(turns[0].items.map(item => [item.role, item.text]), [
+    ['user', '跑一下评测'], ['assistant', '已在后台运行。'], ['status', 'Background command "Run evals" completed (exit code 0)'], ['assistant', '评测通过。'],
+  ]);
+});
+
+test('a compaction summary and other injected messages are not shown as the user’s input', () => {
+  const summary = 'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary: …';
+  const turns = claudeTurns([
+    {type: 'user', uuid: 'u1', message: {role: 'user', content: '重构一下'}},
+    {type: 'system', uuid: 's1', message: undefined},
+    {type: 'user', uuid: 'u2', message: {role: 'user', content: summary}},
+    {type: 'user', uuid: 'u3', message: {role: 'user', content: '<artifact-content-authored-by-others/>\nThe summarized conversation included Artifact content written by people other than you.\n' + summary}},
+    {type: 'user', uuid: 'u4', message: {role: 'user', content: 'Another Claude session sent a message:\n<agent-message from="a1">\n[Subagent hand-back] The report follows:\n  done\n</agent-message>'}},
+    {type: 'user', uuid: 'u5', message: {role: 'user', content: '<ci-monitor-event>Auto-fix enabled.</ci-monitor-event>'}},
+    {type: 'assistant', uuid: 'a1', message: {role: 'assistant', content: [{type: 'text', text: '继续。'}]}},
+  ]);
+  assert.equal(turns.length, 1);
+  assert.deepEqual(turns[0].items.map(item => [item.role, item.text]), [
+    ['user', '重构一下'], ['activity', '整理上下文'], ['status', '子 Agent 已交回结果'], ['status', 'CI 监控通知'], ['assistant', '继续。'],
+  ]);
+  // The desktop app's context ahead of a prompt is left out; its Create PR button shows as such.
+  const prompts = claudeTurns([
+    {type: 'user', uuid: 'p1', message: {role: 'user', content: [{type: 'text', text: '<system-reminder>\nScratch workspace.\n</system-reminder>\n'}, {type: 'text', text: '环境有什么区别？'}]}},
+    {type: 'user', uuid: 'p2', message: {role: 'user', content: '<artifact-view-context artifact="x">\n{}\n<artifact-content-authored-by-others/>\n</artifact-view-context>\n\ncommit 吧'}},
+    {type: 'user', uuid: 'p3', message: {role: 'user', content: '<create-pr-command>\n## Overview\n</create-pr-command>'}},
+    {type: 'user', uuid: 'p4', message: {role: 'user', content: '<agent-message from="a1">\nhi\n</agent-message>'}},
+  ]).flatMap(turn => turn.items.map(item => [item.role, item.text]));
+  assert.deepEqual(prompts, [['user', '环境有什么区别？'], ['user', 'commit 吧'], ['user', '创建 PR'], ['status', '收到另一个 Claude 会话的消息']]);
+});
+
 test('a session’s model, effort and permission mode are read from the latest entries that record them', () => {
   const line = (entry: object) => JSON.stringify(entry);
   const reply = (model: string, extra: object = {}) => line({type: 'assistant', ...extra, message: {role: 'assistant', model, content: []}});
