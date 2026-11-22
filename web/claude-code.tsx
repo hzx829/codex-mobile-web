@@ -60,6 +60,8 @@ const RECOMMENDED_EFFORT='medium';
 function load(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
 /** The last model chosen for new sessions; "default" was a list entry before the list dropped it. */
 function storedModel(machine:string){const value=load(`claude:${machine}:model`);return value==='default'?'':value;}
+/** The model list last read from this computer, so the composer names the model before the list is read again. */
+function storedModels(machine:string):Json[]|null{try{const list=JSON.parse(load(`claude:${machine}:models`)||'null');return Array.isArray(list)?list:null;}catch{return null;}}
 function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
 
 /** Claude Code sessions on the connected computer: live view, composer, approvals and questions. */
@@ -73,9 +75,9 @@ export function ClaudeCodePanel(props:Props){
   // A saved session keeps its own model and effort until changed here; the last choice only seeds new sessions.
   const [model,setModel]=useState(()=>creating?storedModel(machine):''),[effort,setEffort]=useState(()=>creating?load(`claude:${machine}:effort`):''),[mode,setMode]=useState('');
   const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null),[menuPoint,setMenuPoint]=useState<MenuPoint|null>(null),[statusPoint,setStatusPoint]=useState<MenuPoint|null>(null);
-  const [models,setModels]=useState<Json[]|null>(null),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]),[defaultMode,setDefaultMode]=useState('');
+  const [models,setModels]=useState<Json[]|null>(()=>storedModels(machine)),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]),[defaultMode,setDefaultMode]=useState('');
   const request=useRef(call);request.current=call;
-  const alive=useRef(true),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
+  const alive=useRef(true),modelsRead=useRef(false),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
   useComposerHeight(composer,draft,true);
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   function edit(text:string){setDraft(text);store(`${scope}:draft`,text);}
@@ -214,12 +216,19 @@ export function ClaudeCodePanel(props:Props){
     stick.current=true;
     await mutate('claude.edit',{conversationId,turnId,text,...settings,...(external?{confirmIdle:true}:{})});
   }
+  /** Read once per page; the composer needs the names before the picker opens. */
   async function openModels(){
-    if(models||!connected)return;
-    setModelsError('');
-    try{const result=await request.current('claude.models',{cwd:view?.cwd||startPath||undefined});if(alive.current)setModels(result.models||[]);}
-    catch(e:any){if(alive.current)setModelsError(e?.message||'模型列表读取失败');}
+    if(modelsRead.current||!connected)return;
+    modelsRead.current=true;setModelsError('');
+    try{
+      const result=await request.current('claude.models',{cwd:view?.cwd||startPath||undefined}),list=result.models||[];
+      store(`claude:${machine}:models`,JSON.stringify(list));
+      if(alive.current)setModels(list);
+    }catch(e:any){modelsRead.current=false;if(alive.current)setModelsError(e?.message||'模型列表读取失败');}
   }
+  // A new session reads it at once; an open one waits for its project, which can change the list.
+  const modelsCwd=creating?'':view?.cwd;
+  useEffect(()=>{if(creating||modelsCwd)void openModels();},[connected,modelsCwd]);
   // A model without effort keeps the last level for the next model that has it.
   function chooseModel(value:ModelSelection){setModel(value.model);setEffort(value.effort);store(`claude:${machine}:model`,value.model);if(value.effort)store(`claude:${machine}:effort`,value.effort);}
 
