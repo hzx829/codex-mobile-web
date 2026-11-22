@@ -25,6 +25,7 @@ import {belongsToThread,defaultPreviewUrl,openThreadPreview,previewUrlKey} from 
 import {PreviewPane,useCompactPreview} from './preview-pane';
 import {fileReference,isArtifactUrl,samePreviewTarget,type PreviewTarget} from './preview-target';
 import {ArtifactPanel} from './artifact-view';
+import {rememberPage,type PaneAction} from './artifact-pane';
 import {home,initialLocation,rememberLocation,parseLocation,type Route} from './route-state';
 import {useComposerAttachments} from './composer-attachments';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
@@ -134,6 +135,15 @@ function App(){
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
   const call=(action:RequestAction,payload:Json={},target=machine)=>client.current!.request(action,payload,target);
   const stillHere=()=>current.current.service==='codex'&&current.current.machine===machine&&current.current.selected===selected;
+  // The claude.ai page a Claude Code conversation has open is remembered with it, as is closing the pane.
+  const notePage=(url:string)=>{if(service==='claude'&&remoteConversation)rememberPage(machine,remoteConversation,url);};
+  // Pages Claude opens come up beside the chat; on a phone the sheet would cover the reply, so the turn's card stays the way in.
+  const showPage=useStableEvent((page:PaneAction)=>{
+    const tab=previewState.tabs.find(item=>item.target.kind==='artifact'&&item.target.url===page.url);
+    if(!tab){if(page.open&&!compactPreview)showPreview({kind:'artifact',machineId:machine,url:page.url,title:page.title||undefined,fresh:page.fresh});return;}
+    setPreviewState(old=>({tabs:old.tabs.map(item=>item.id===tab.id&&item.target.kind==='artifact'?{...item,target:{...item.target,fresh:page.fresh??item.target.fresh}}:item),activeId:page.open&&!compactPreview?tab.id:old.activeId}));
+    if(page.open&&!compactPreview)notePage(page.url);
+  });
   function closePreview(){browserSequence.current++;if(browserState?.filePath)closeBrowser();setPreviewState({tabs:[],activeId:null});}
   const leavePreview=useStableEvent(()=>{if(browserState)closeBrowser();});
   useLayoutEffect(()=>{
@@ -146,9 +156,10 @@ function App(){
       const existing=tabs.find(tab=>samePreviewTarget(tab.target,next));return existing
       ?{tabs:tabs.map(tab=>tab.id===existing.id?{...tab,target:next}:tab),activeId:existing.id}
       :{tabs:[...tabs,{id,target:next}],activeId:id};});
+    if(next.kind==='artifact')notePage(next.url);
     setSheet(null);
   }
-  function closePreviewTab(id:number){browserSequence.current++;const target=previewState.tabs.find(tab=>tab.id===id)?.target;if(target?.kind==='file'&&target.file?.path&&target.file.path===browserState?.filePath)closeBrowser();setPreviewState(old=>{const index=old.tabs.findIndex(tab=>tab.id===id);if(index<0)return old;const tabs=old.tabs.filter(tab=>tab.id!==id);return {tabs,activeId:old.activeId===id?tabs[Math.min(index,tabs.length-1)]?.id??null:old.activeId};});}
+  function closePreviewTab(id:number){browserSequence.current++;const target=previewState.tabs.find(tab=>tab.id===id)?.target;if(target?.kind==='artifact'){const left=previewState.tabs.filter(tab=>tab.id!==id).map(tab=>tab.target).filter(item=>item.kind==='artifact').at(-1);notePage(left?.url||'');}if(target?.kind==='file'&&target.file?.path&&target.file.path===browserState?.filePath)closeBrowser();setPreviewState(old=>{const index=old.tabs.findIndex(tab=>tab.id===id);if(index<0)return old;const tabs=old.tabs.filter(tab=>tab.id!==id);return {tabs,activeId:old.activeId===id?tabs[Math.min(index,tabs.length-1)]?.id??null:old.activeId};});}
   function fail(e:any){setError(e?.message||'操作失败，请重试');}
   function navigate(next:Route,replace=false){
     history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine},'',location.pathname);
@@ -476,7 +487,7 @@ function App(){
         try{if(!document.execCommand('copy'))throw Error('copy failed');}finally{input.remove();}
       }
   }
-  const markdownOpenFile=useStableEvent(openFile),markdownOpenPreview=useStableEvent((url:string)=>{if(isArtifactUrl(url))showPreview({kind:'artifact',machineId:machine,url});else void openBrowser(url);}),markdownFollowup=useStableEvent(insertFollowup);
+  const markdownOpenFile=useStableEvent(openFile),markdownOpenPreview=useStableEvent((url:string)=>{if(isArtifactUrl(url)){const old=previewState.tabs.map(tab=>tab.target).find(target=>target.kind==='artifact'&&target.url===url);showPreview(old?.kind==='artifact'?old:{kind:'artifact',machineId:machine,url});}else void openBrowser(url);}),markdownFollowup=useStableEvent(insertFollowup);
   const latestUserTurn=useMemo(()=>view?.turns.filter(turn=>turn.items.some(item=>item.role==='user')).at(-1)?.id,[view?.turns]);
   function fork(turn:TurnView){
     if(turn.status==='inProgress'){setNotice('请等这一轮结束后再分叉');return;}
@@ -540,8 +551,8 @@ function App(){
   const switcher=<ServiceSwitch active={service} available={available} disabled={busy||voiceBusy||imageLoading} select={selectService}/>;
   const previewPane=preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:preview.kind==='artifact'?'经电脑中转，手机不直接访问 claude.ai':undefined}
        tabs={previewState.tabs.map(tab=>({id:tab.id,title:previewTitle(tab.target)}))} activeTab={previewState.activeId}
-       selectTab={id=>setPreviewState(old=>({...old,activeId:id}))} closeTab={closePreviewTab}
-       compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint)} close={closePreview}>
+       selectTab={id=>{const target=previewState.tabs.find(tab=>tab.id===id)?.target;if(target?.kind==='artifact')notePage(target.url);setPreviewState(old=>({...old,activeId:id}));}} closeTab={closePreviewTab}
+       compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint)} close={()=>{if(previewState.tabs.some(tab=>tab.target.kind==='artifact'))notePage('');closePreview();}}>
        {previewState.tabs.map(({id,target})=><div key={id} id={`preview-panel-${id}`} aria-labelledby={`preview-tab-${id}`} className="preview-tab-panel" role="tabpanel" hidden={id!==previewState.activeId}>
          {target.kind==='file'&&(target.file?<Suspense fallback={<p className="preview-notice" role="status">正在加载查看器…</p>}><FilePreviewPanel allowFileUrls={fileOwner(target.threadId).service!=='codex'} key={target.request} file={target.file} connected={connected} line={target.line} openFile={path=>void openFile(path,target.machineId,target.threadId)}
            htmlPreview={browserState?.filePath===target.file.path&&belongsToThread(browserState,target.machineId,target.threadId)?<WebViewer session={browserState} onEnd={closeBrowser}/>:browserBusy?<p role="status">正在打开网页…</p>:null}
@@ -550,7 +561,7 @@ function App(){
            read={offset=>fileRequest('download',target.machineId,target.threadId,{path:target.file!.path,revision:target.file!.revision,offset})}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''),target.machineId,target.threadId)}>重试</button>}</div>)}
          {target.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer text={target.text} compact={compactPreview}/></Suspense>}
          {target.kind==='web'&&<WebViewer session={target.session} onEnd={closeBrowser}/>}
-         {target.kind==='artifact'&&<ArtifactPanel url={target.url} connected={connected&&target.machineId===machine} call={(action,payload)=>call(action,payload,target.machineId)}
+         {target.kind==='artifact'&&<ArtifactPanel url={target.url} fresh={target.fresh} connected={connected&&target.machineId===machine} call={(action,payload)=>call(action,payload,target.machineId)}
            onTitle={title=>setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.id===id&&tab.target.kind==='artifact'?{...tab,target:{...tab.target,title}}:tab)}))}/>}
          {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
        </div>)}
@@ -587,7 +598,7 @@ function App(){
           <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
         onNew={project=>{setClaudeNewCwd(project);if(id)navigate(withConversation(route,''));}}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
-      {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
+      {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} showPage={showPage} previewError={error}
         machine={machine} guest={guest} newCwd={id?null:claudeNewCwd} created={created} forked={forked}
         showDiff={turn=>{if(turn.diff)showPreview({kind:'diff',threadId:`claude:${id}`,turnId:turn.id,text:turn.diff});}} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')} actions={claudeActions}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}

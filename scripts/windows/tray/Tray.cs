@@ -89,7 +89,7 @@ sealed class TrayContext : ApplicationContext {
   readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
   readonly System.Windows.Forms.Timer healthTimer = new System.Windows.Forms.Timer();
   readonly JavaScriptSerializer json = new JavaScriptSerializer();
-  readonly MenuItem statusItem, openItem, copyItem, toggleItem, settingsItem, logsItem, autostartItem, exitItem;
+  readonly MenuItem statusItem, openItem, copyItem, toggleItem, settingsItem, signInItem, logsItem, autostartItem, exitItem;
   readonly Icon runningIcon, partialIcon, stoppedIcon, busyIcon, appIcon;
   DesktopWindow window;
   ServiceState state = ServiceState.Stopped;
@@ -97,7 +97,7 @@ sealed class TrayContext : ApplicationContext {
   string lastError;       // shown in the window until the next start
   string lastPosted;
   Dictionary<string, object> config;
-  bool quiet, expectRunning, balloonOpensLogs, checkingHealth, quitting;
+  bool quiet, expectRunning, balloonOpensLogs, checkingHealth, quitting, signingIn;
 
   public TrayContext(string root, bool background, EventWaitHandle show) {
     this.root = root;
@@ -118,12 +118,13 @@ sealed class TrayContext : ApplicationContext {
     copyItem = new MenuItem("复制连接链接", delegate {CopyLink();});
     toggleItem = new MenuItem("启动服务", delegate {ToggleService();});
     settingsItem = new MenuItem("连接设置…", delegate {OpenSettings();});
+    signInItem = new MenuItem("登录 claude.ai…", delegate {ClaudeSignIn();});
     logsItem = new MenuItem("查看日志", delegate {OpenLogs();});
     autostartItem = new MenuItem("登录时自动启动", delegate {SetAutostart(!File.Exists(StartupLink));});
     exitItem = new MenuItem("退出", delegate {Exit();});
     menu.MenuItems.AddRange(new[] {
       statusItem, new MenuItem("-"), openItem, copyItem, new MenuItem("-"),
-      toggleItem, settingsItem, logsItem, new MenuItem("-"), autostartItem, new MenuItem("-"), exitItem
+      toggleItem, settingsItem, signInItem, logsItem, new MenuItem("-"), autostartItem, new MenuItem("-"), exitItem
     });
     menu.Popup += delegate {autostartItem.Checked = File.Exists(StartupLink);};
 
@@ -213,6 +214,7 @@ sealed class TrayContext : ApplicationContext {
     else if (type == "open") DesktopWindow.OpenExternal(Text(message, "url"));
     else if (type == "copy") {try {Clipboard.SetText(Text(message, "text"));} catch (Exception) {}}
     else if (type == "pick") Pick(Text(message, "field"));
+    else if (type == "claudeSignIn") ClaudeSignIn();
     else if (type == "hide") {if (window != null) window.Close();}
   }
 
@@ -250,6 +252,33 @@ sealed class TrayContext : ApplicationContext {
       PostToWindow(message);
     } catch (Exception) {
     } finally {checkingHealth = false;}
+  }
+
+  // Viewing the pages Claude publishes needs the connector's own browser signed in to claude.ai, once per computer.
+  // The running connector opens the sign-in window on this screen; build/setup.mjs waits until the person is done.
+  async void ClaudeSignIn() {
+    if (signingIn) return;
+    if (state != ServiceState.Running) {Notify("服务未运行", "请先启动服务，再登录 claude.ai。", ToolTipIcon.Info, false); return;}
+    signingIn = true;
+    UpdateUi();
+    PostSignIn("started", null);
+    ProcessResult result = await RunNode(new[] {"--claude-signin"}, null, 16 * 60000);
+    signingIn = false;
+    UpdateUi();
+    bool done = result.Code == 0 && result.Output != null && result.Output.Contains("\"signedIn\":true");
+    string error = result.Code == 0 ? null : string.IsNullOrWhiteSpace(result.Error) ? "没能打开登录窗口" : result.Error.Trim();
+    if (done) Notify("已登录 claude.ai", "现在可以在手机或浏览器里查看 Claude 发布的页面。", ToolTipIcon.None, false);
+    else if (error != null) Notify("没能登录 claude.ai", error, ToolTipIcon.Warning, false);
+    PostSignIn(done ? "done" : error != null ? "failed" : "closed", error);
+    CheckHealth();
+  }
+
+  void PostSignIn(string status, string error) {
+    Dictionary<string, object> message = new Dictionary<string, object>();
+    message["type"] = "claudeSignIn";
+    message["state"] = status;
+    if (error != null) message["error"] = error;
+    PostToWindow(message);
   }
 
   async Task LoadConfig() {
@@ -545,6 +574,7 @@ sealed class TrayContext : ApplicationContext {
     toggleItem.Enabled = idle;
     copyItem.Enabled = state == ServiceState.Running;
     settingsItem.Enabled = idle;
+    signInItem.Enabled = idle && !signingIn && state == ServiceState.Running;
     autostartItem.Enabled = idle;
     exitItem.Enabled = idle;
     PostState();

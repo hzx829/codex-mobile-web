@@ -4,11 +4,22 @@ import {createServer} from 'node:http';
 import {mkdir, mkdtemp, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {ArtifactViewer, artifactSlug, findBrowser} from '../src/connector/claude-artifacts.js';
+import {ArtifactViewer, artifactSlug, findBrowser, profileFolder} from '../src/connector/claude-artifacts.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 
 // A 1x1 PNG.
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+
+test('Chrome is used before Edge, and each browser has its own profile folder', {skip: process.platform !== 'win32' && 'Windows paths'}, () => {
+  const env = {ProgramFiles: 'C:\\PF', 'ProgramFiles(x86)': 'C:\\PF86', LOCALAPPDATA: 'C:\\Local'};
+  const chrome = join('C:\\Local', 'Google', 'Chrome', 'Application', 'chrome.exe'), edge = join('C:\\PF86', 'Microsoft', 'Edge', 'Application', 'msedge.exe');
+  assert.equal(findBrowser(env, path => path === chrome || path === edge), chrome);
+  assert.equal(findBrowser(env, path => path === edge), edge);
+  assert.equal(findBrowser({...env, CLAUDE_ARTIFACT_BROWSER: 'D:\\x.exe'}, () => true), 'D:\\x.exe');
+  assert.equal(profileFolder(edge), 'claude-browser');
+  assert.equal(profileFolder('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'), 'claude-browser');
+  assert.equal(profileFolder(chrome), 'claude-browser-chrome');
+});
 
 test('artifact links are limited to claude.ai Artifacts', () => {
   assert.equal(artifactSlug('https://claude.ai/artifact/FR2QT5upk4yhRE2SLNe2oM'), 'FR2QT5upk4yhRE2SLNe2oM');

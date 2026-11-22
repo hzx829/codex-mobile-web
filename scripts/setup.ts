@@ -8,6 +8,8 @@ import {resolveCodex} from '../src/connector/app-server.js';
 import {defaultRelay,prepareSettings,savedSettings} from './setup-config.js';
 import {connectionPage} from './connection-page.js';
 import {relayStatus} from './setup-status.js';
+import {bridgeRequest} from './bridge-client.js';
+import {setTimeout as delay} from 'node:timers/promises';
 
 const args=process.argv.slice(2),value=(key:string)=>{const i=args.indexOf(key);return i>=0?args[i+1]:undefined;};
 try {
@@ -18,6 +20,14 @@ try {
   } else if(args.includes('--status')) {
     // Polled by the desktop window while it is open; prints JSON and never changes anything.
     process.stdout.write(JSON.stringify(await relayStatus(old)));
+  } else if(args.includes('--claude-signin')) {
+    // Asks the running connector to put its browser's claude.ai sign-in window on this computer's screen, and waits for the person.
+    // The connector owns that browser profile, so this never starts a second browser on it.
+    let state=await bridgeRequest('claude.artifact.login',{op:'desktop'},60000);
+    if(!state.desktop)throw new Error('这台电脑上的连接器还不支持，请先更新');
+    for(const end=Date.now()+15*60000;!state.signedIn&&state.open&&Date.now()<end;){await delay(2000);state=await bridgeRequest('claude.artifact.login',{op:'status'},60000);}
+    if(!state.signedIn&&state.open)await bridgeRequest('claude.artifact.login',{op:'close'}).catch(()=>{});
+    process.stdout.write(JSON.stringify({signedIn:Boolean(state.signedIn)}));
   } else {
     let input:any={};
     if(args.includes('--settings-stdin')) {

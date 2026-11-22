@@ -225,9 +225,9 @@ test('claude.ai pages are named from the raw transcript and repeated on the newe
   assert.deepEqual([...titles], [[page, '持仓决策看板']]);
   const turns = claudeTurns(branch.map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles);
   assert.equal(turns.length, 2);
-  assert.deepEqual(turns[0].pages, [{url: page, title: '持仓决策看板'}]);
+  assert.deepEqual(turns[0].pages, [{url: page, title: '持仓决策看板', changed: 't2', shown: 't2'}]);
   assert.deepEqual(turns[1].pages, [{url: page, title: '持仓决策看板', earlier: true}]);
   // A page the newest turn already shows is not repeated, and a turn with no pages anywhere gets none.
-  assert.deepEqual(claudeTurns(branch.slice(0, 3).map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles).at(-1)?.pages, [{url: page, title: '持仓决策看板'}]);
+  assert.deepEqual(claudeTurns(branch.slice(0, 3).map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles).at(-1)?.pages, [{url: page, title: '持仓决策看板', changed: 't2', shown: 't2'}]);
   assert.equal(claudeTurns([{type: 'user', uuid: 'u', message: {content: 'hi'}}]).at(-1)?.pages, undefined);
 });

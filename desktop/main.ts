@@ -6,7 +6,7 @@ type Mode = 'all' | 'connector' | 'relay';
 type Config = {mode?: Mode; relayUrl?: string; token?: string; codexBin?: string; codexHome?: string; claudeBin?: string; localRelay?: string};
 type Service = 'running' | 'partial' | 'stopped' | 'starting' | 'stopping' | 'saving';
 type HostState = {service: Service; configured: boolean; error?: string | null; autostart: boolean; config?: Config | null};
-type Health = {relay: 'ok' | 'unreachable' | 'unauthorized'; connector: 'online' | 'offline' | 'unknown'; services?: string[]; codexVersion?: string; desktopOnline?: boolean};
+type Health = {relay: 'ok' | 'unreachable' | 'unauthorized'; connector: 'online' | 'offline' | 'unknown'; services?: string[]; codexVersion?: string; desktopOnline?: boolean; claudeSignIn?: 'yes' | 'no' | 'unknown'};
 type Settings = {mode: Mode; relayUrl: string; token: string; codexBin: string; codexHome: string; claudeBin: string};
 type PathField = 'codexBin' | 'codexHome' | 'claudeBin';
 type FromHost =
@@ -15,12 +15,13 @@ type FromHost =
   | {type: 'dialog'; name: 'stop' | 'exit'}
   | {type: 'screen'; name: 'settings' | 'status'}
   | {type: 'picked'; field: PathField; path: string}
-  | {type: 'saveResult'; ok: boolean; error?: string};
+  | {type: 'saveResult'; ok: boolean; error?: string}
+  | {type: 'claudeSignIn'; state: 'started' | 'done' | 'closed' | 'failed'; error?: string};
 type ToHost =
   | {type: 'ready'} | {type: 'start'} | {type: 'stop'} | {type: 'exit'; stop: boolean}
   | {type: 'save'; settings: Settings} | {type: 'autostart'; enabled: boolean}
   | {type: 'logs'} | {type: 'open'; url: string} | {type: 'copy'; text: string}
-  | {type: 'pick'; field: PathField} | {type: 'hide'};
+  | {type: 'pick'; field: PathField} | {type: 'hide'} | {type: 'claudeSignIn'};
 
 declare global {interface Window {chrome?: {webview?: {postMessage(message: unknown): void; addEventListener(type: 'message', listener: (event: {data: unknown}) => void): void}}}}
 
@@ -35,6 +36,10 @@ let draftMode: Mode = 'all';
 let saving = false;
 let qrFor = '';
 let toastTimer = 0;
+// Signing the connector's browser in to claude.ai: offered once the service runs, until done or declined.
+let signIn: 'idle' | 'started' | 'failed' = 'idle', signInError = '';
+const SIGNIN_DECLINED = 'claude-signin-declined';
+const declined = () => {try {return localStorage.getItem(SIGNIN_DECLINED) === '1';} catch {return false;}};
 
 function send(message: ToHost) {
   if (host) host.postMessage(message);
@@ -108,7 +113,8 @@ function renderStatus() {
       setDot('codex-dot', h.codexVersion ? 'ok' : 'idle');
       for (const service of ['claude', 'antigravity']) {
         const found = !!h.services?.includes(service);
-        setText(`${service}-value`, found ? '已检测到' : '未检测到'); setDot(`${service}-dot`, found ? 'ok' : 'idle');
+        const page = service === 'claude' && found ? h.claudeSignIn === 'yes' ? ' · 已登录 claude.ai' : h.claudeSignIn === 'no' ? ' · 未登录 claude.ai' : '' : '';
+        setText(`${service}-value`, (found ? '已检测到' : '未检测到') + page); setDot(`${service}-dot`, found ? 'ok' : 'idle');
       }
     } else {
       setText('codex-value', h.relay === 'ok' ? '连接器未上线' : '—'); setDot('codex-dot', h.relay === 'ok' ? 'bad' : 'idle');
@@ -117,6 +123,14 @@ function renderStatus() {
     }
   }
   for (const id of ['relay-value', 'codex-value', 'claude-value', 'antigravity-value']) $(id).classList.toggle('muted', !running);
+
+  const needsSignIn = h?.connector === 'online' && !!h.services?.includes('claude') && h.claudeSignIn === 'no';
+  $('claude-signin').hidden = !(running && (signIn !== 'idle' || needsSignIn && !declined()));
+  setText('claude-signin-text', signIn === 'started' ? '已在这台电脑的屏幕上打开登录窗口，请在那里登录 claude.ai。登录完成后窗口会自动关闭。'
+    : signIn === 'failed' ? `没能登录：${signInError}` : '登录 claude.ai 后，才能在手机或浏览器里查看 Claude 发布的页面。只需登录一次，用的是连接器自己单独的浏览器档案。');
+  ($('claude-signin-go') as HTMLButtonElement).hidden = signIn === 'started';
+  ($('claude-signin-go') as HTMLButtonElement).textContent = signIn === 'failed' ? '重试' : '登录';
+  ($('claude-signin-skip') as HTMLButtonElement).hidden = signIn === 'started';
 
   $('autostart').setAttribute('aria-checked', String(state.autostart));
   ($('autostart') as HTMLButtonElement).disabled = busy();
@@ -231,6 +245,11 @@ function receive(message: FromHost) {
     if (message.name === 'settings') openSettings(); else show('status');
   } else if (message.type === 'picked') {
     ($(message.field) as HTMLInputElement).value = message.path;
+  } else if (message.type === 'claudeSignIn') {
+    signIn = message.state === 'started' ? 'started' : message.state === 'failed' ? 'failed' : 'idle';
+    signInError = message.error || '';
+    if (message.state === 'done') {if (health) health = {...health, claudeSignIn: 'yes'}; toast('已登录 claude.ai');}
+    render();
   } else if (message.type === 'saveResult') {
     saving = false;
     if (message.ok) show('status');
@@ -244,6 +263,13 @@ $('cancel').addEventListener('click', () => show('status'));
 $('primary').addEventListener('click', () => send({type: 'start'}));
 $('stop').addEventListener('click', confirmStop);
 $('logs').addEventListener('click', () => send({type: 'logs'}));
+$('claude-signin-go').addEventListener('click', () => send({type: 'claudeSignIn'}));
+$('claude-signin-skip').addEventListener('click', () => {
+  try {localStorage.setItem(SIGNIN_DECLINED, '1');} catch {}
+  signIn = 'idle';
+  render();
+  toast('以后可以从托盘菜单“登录 claude.ai”');
+});
 $('autostart').addEventListener('click', () => send({type: 'autostart', enabled: !state.autostart}));
 $('copy').addEventListener('click', () => {const href = link(state.config); if (href) {send({type: 'copy', text: href}); toast('已复制连接链接');}});
 $('open-web').addEventListener('click', () => {const href = link(state.config); if (href) send({type: 'open', url: href});});
@@ -292,12 +318,15 @@ function mock(message: ToHost) {
   if (message.type === 'ready') {
     const first = params.get('state') === 'first';
     update({service: first ? 'stopped' : (params.get('state') as Service) || 'running', configured: !first, autostart: true, config: first ? {localRelay: config.localRelay, relayUrl: config.localRelay, mode: 'all'} : config, error: params.get('error')});
-    if (!first) later(() => receive({type: 'health', health: {relay: 'ok', connector: 'online', services: ['codex', 'claude', 'antigravity'], codexVersion: '0.146.0', desktopOnline: true}}));
+    if (!first) later(() => receive({type: 'health', health: {relay: 'ok', connector: 'online', services: ['codex', 'claude', 'antigravity'], codexVersion: '0.146.0', desktopOnline: true, claudeSignIn: params.get('signin') === 'yes' ? 'yes' : 'no'}}));
   } else if (message.type === 'start') {
     update({service: 'starting', error: null});
     later(() => {update({service: 'running'}); later(() => receive({type: 'health', health: {relay: 'ok', connector: 'online', services: ['codex', 'claude'], codexVersion: '0.146.0', desktopOnline: false}}));});
   } else if (message.type === 'stop') {
     update({service: 'stopping'}); later(() => update({service: 'stopped'}));
+  } else if (message.type === 'claudeSignIn') {
+    receive({type: 'claudeSignIn', state: 'started'});
+    later(() => receive(params.has('signin-fails') ? {type: 'claudeSignIn', state: 'failed', error: '连接器未在线'} : {type: 'claudeSignIn', state: 'done'}), 1800);
   } else if (message.type === 'autostart') update({autostart: message.enabled});
   else if (message.type === 'save') {
     update({service: 'saving'});

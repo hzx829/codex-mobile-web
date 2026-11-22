@@ -6,6 +6,8 @@ export type RelayStatus = {
   services?: string[];
   codexVersion?: string;
   desktopOnline?: boolean;
+  /** Whether the connector's own browser is signed in to claude.ai, which viewing Claude's published pages needs. */
+  claudeSignIn?: 'yes' | 'no' | 'unknown';
 };
 
 /** Read-only health check for the desktop window: same handshake as the phone, never creates work. */
@@ -39,6 +41,12 @@ export function relayStatus(config: {relayUrl?: string; token?: string; machineI
         ws.send(JSON.stringify({type: 'request', id: 'info', machineId: config.machineId, action: 'info', payload: {}}));
       } else if (message.type === 'response' && message.id === 'info') {
         if (!message.error) result = {...result, codexVersion: message.result?.runtime?.version, desktopOnline: Boolean(message.result?.desktopOnline)};
+        if (!result.services?.includes('claude')) {finish(result); return;}
+        ws.send(JSON.stringify({type: 'request', id: 'signin', machineId: config.machineId, action: 'claude.artifact.login', payload: {op: 'check'}}));
+      } else if (message.type === 'response' && message.id === 'signin') {
+        // Older connectors do not answer this; the status then says nothing about the sign-in.
+        const value = message.result?.signedIn;
+        if (!message.error && message.result?.available !== false && (value === 'yes' || value === 'no' || value === 'unknown')) result = {...result, claudeSignIn: value};
         finish(result);
       }
     });

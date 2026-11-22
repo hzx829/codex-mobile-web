@@ -72,6 +72,11 @@ function changesArtifact(block: Block) {
   if (block.name === 'ArtifactData') return Boolean(artifactUrl(str(input.url))) && !['get', 'list', 'query'].includes(action);
   return false;
 }
+/** Calls that put the page in front of the user in Claude's own app: a publish of the page (not an asset upload) and an explicit open. */
+function showsArtifact(block: Block) {
+  const input = block.input || {}, action = str(input.action);
+  return block.name === 'Artifact' && (action === 'open' || (!action || action === 'publish') && input.asset !== true);
+}
 
 /**
  * Groups a Claude Code transcript into Codex-style turns: a turn starts with each prompt the user typed;
@@ -137,7 +142,7 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
   const turns: TurnView[] = [];
   const tools = new Map<string, MessageItem>();
   // claude.ai Artifacts a turn created or changed, shown under the turn like Codex's file-change card.
-  const pageCalls = new Map<string, {turn: TurnView; input: Record<string, unknown>}>();
+  const pageCalls = new Map<string, {turn: TurnView; input: Record<string, unknown>; id: string; shown: boolean}>();
   const pageTitles = new Map<string, string>(titles);
   const toolTurns = new Map<string, TurnView>();
   let turn: TurnView | undefined;
@@ -168,15 +173,19 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
   }
   return turns;
 
-  function addPage(turn: TurnView, input: Record<string, unknown>, result: string) {
+  function addPage(turn: TurnView, input: Record<string, unknown>, result: string, id: string, shown: boolean) {
     const typeUrl = str(input.type_url);
     const url = artifactUrl(str(input.url)) || [...result.matchAll(ARTIFACT_URL)].map(match => match[0]).find(found => found !== typeUrl);
     if (!url) return;
     if (str(input.title)) pageTitles.set(url, str(input.title).slice(0, 200));
     const pages = turn.pages ??= [];
     const page = pages.find(item => item.url === url);
-    if (!page) pages.push({url, title: pageTitles.get(url) || ''});
-    else if (pageTitles.has(url)) page.title = pageTitles.get(url)!;
+    if (!page) pages.push({url, title: pageTitles.get(url) || '', changed: id, ...(shown ? {shown: id} : {})});
+    else {
+      if (pageTitles.has(url)) page.title = pageTitles.get(url)!;
+      page.changed = id;
+      if (shown) page.shown = id;
+    }
   }
 
   function take(entry: ClaudeMessage) {
@@ -197,7 +206,7 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
           const patch = patches?.get(block.tool_use_id), owner = toolTurns.get(block.tool_use_id);
           if (patch && owner && !block.is_error && (owner.diff?.length || 0) + patch.length <= MAX_TURN_DIFF) owner.diff = (owner.diff || '') + patch;
           const call = pageCalls.get(block.tool_use_id);
-          if (call && !block.is_error) addPage(call.turn, call.input, resultText(block.content));
+          if (call && !block.is_error) addPage(call.turn, call.input, resultText(block.content), call.id, call.shown);
         } else if (block.type === 'text' && block.text?.trim()) {
           if (interrupted.test(block.text.trim())) {stopped = true;continue;}
           const command = commandText(block.text);
@@ -233,7 +242,7 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
         if (!item.files) delete item.files;
         target.items.push(item);
         if (block.id) {tools.set(block.id, item);toolTurns.set(block.id, target);}
-        if (block.id && changesArtifact(block)) pageCalls.set(block.id, {turn: target, input: block.input || {}});
+        if (block.id && changesArtifact(block)) pageCalls.set(block.id, {turn: target, input: block.input || {}, id: block.id, shown: showsArtifact(block)});
       }
     });
   }

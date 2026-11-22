@@ -24,6 +24,7 @@ import {uploadAttachments,type UploadProgress} from './file-upload';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import type {Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
 import {SenderScope} from './senders';
+import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
 
 type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;guest?:boolean;
@@ -32,7 +33,7 @@ type Props={
   /** Opens a session copied from this one. */
   forked:(id:string)=>void;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;
-  openFile:(path:string)=>void;openPreview:(url:string)=>void;showFiles:()=>void;showImage:(url:string,title:string)=>void;
+  openFile:(path:string)=>void;openPreview:(url:string)=>void;showPage:(page:PaneAction)=>void;showFiles:()=>void;showImage:(url:string,title:string)=>void;
   copyText:(text:string)=>Promise<void>;clearPreviewError:()=>void;
   /** Codex-style extras: a turn's file changes, voice input and the session menu (rename, copy, archive). */
   showDiff:(turn:TurnView)=>void;voiceMode:VoiceProvider;actions?:(thread:Json)=>ThreadActions;
@@ -115,6 +116,16 @@ export function ClaudeCodePanel(props:Props){
     return()=>{active=false;clearTimeout(timer);document.removeEventListener('visibilitychange',watch);};
   },[connected,conversationId,view?.revision]);
   useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,outgoing]);
+  // claude.ai pages follow Claude's own app: the conversation's page comes back with it, and a publish or an open call brings a page up.
+  const pagesSeen=useRef<Map<string,string>|null>(null),showPage=useStableEvent(props.showPage);
+  useEffect(()=>{
+    if(!view?.turns||!conversationId)return;
+    if(!pagesSeen.current){
+      paneActions(view.turns,pagesSeen.current=new Map(),true);
+      const page=pageToRestore(view.turns,savedPage(machine,conversationId));
+      if(page)showPage(page);
+    }else for(const page of paneActions(view.turns,pagesSeen.current))showPage(page);
+  },[view,conversationId,machine,showPage]);
   // A sent message shows at once, until the conversation has it (or a while after the computer accepted it).
   useEffect(()=>{if(outgoing&&optimisticDelivered(outgoing,{turns:view?.turns||[]} as unknown as SessionView))setOutgoing(null);},[view,outgoing]);
   useEffect(()=>{if(!outgoing?.acceptedAt)return;const timer=setTimeout(()=>setOutgoing(null),OPTIMISTIC_ACCEPTED_MS);return()=>clearTimeout(timer);},[outgoing?.acceptedAt]);

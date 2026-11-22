@@ -15,8 +15,10 @@ import {downloadProjectFile, readProjectFile} from './project.js';
  * the page's DOM with its styles, images and fonts inlined and every script removed. The phone
  * downloads that file over the relay and shows it in a sandboxed frame.
  *
- * Signing in is done from the phone too: the phone sees screenshots of the computer's browser
- * and sends taps, text and keys to it.
+ * Signing in happens in that same profile, either at the computer (the connector puts a sign-in window on its
+ * screen) or from the phone, which sees screenshots of the computer's browser and sends taps, text and keys to it.
+ * The connector never reads another browser's profile: those are locked while that browser runs, and Chrome
+ * refuses remote debugging on its default profile.
  */
 
 const ARTIFACT = /^https:\/\/claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9_-]{8,64})\/?(?:[?#].*)?$/;
@@ -33,14 +35,22 @@ const MAX_RESOURCE = 8 * 1024 * 1024, MAX_TOTAL = 40 * 1024 * 1024;
 export function findBrowser(env = process.env, exists = existsSync): string | undefined {
   if (env.CLAUDE_ARTIFACT_BROWSER) return env.CLAUDE_ARTIFACT_BROWSER;
   const pf = env['ProgramFiles'] || 'C:\\Program Files', pf86 = env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', local = env.LOCALAPPDATA || '';
+  // Chrome first, as the browser most people already use; Edge is there on every Windows computer.
   const candidates = process.platform === 'win32' ? [
-    join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'), join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'), join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
     ...(local ? [join(local, 'Google', 'Chrome', 'Application', 'chrome.exe')] : []),
+    join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'), join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
   ] : process.platform === 'darwin' ? [
-    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  ] : ['/usr/bin/microsoft-edge', '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  ] : ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge'];
   return candidates.find(path => exists(path));
+}
+/**
+ * Each browser keeps its own profile folder: a profile is encrypted for the browser that made it, so one made by Edge
+ * cannot be handed to Chrome. Edge keeps the folder's first name, so computers already signed in with it stay signed in.
+ */
+export function profileFolder(executable: string) {
+  return /msedge|microsoft[ -]edge/i.test(executable) ? 'claude-browser' : 'claude-browser-chrome';
 }
 
 type Message = {id?: number; method?: string; params?: Json; result?: Json; error?: {message?: string}; sessionId?: string};
@@ -201,21 +211,23 @@ export class ArtifactViewer {
   private idle?: NodeJS.Timeout;
   private jobs = new Map<string, Promise<Snapshot>>();
   private login?: {targetId: string; sessionId: string; width: number; height: number};
+  /** The sign-in window on the computer's own screen. */
+  private desk?: {targetId: string; off: () => void};
   private visible = false;
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private dataDir: string, private executable = () => findBrowser(), private frameHost = FRAME_HOST,
     private idleMs = 3 * 60_000, private now = Date.now) {}
-  private get profile() {return join(this.dataDir, 'claude-browser');}
   private snapshots(slug: string) {return join(this.dataDir, 'claude-artifacts', slug);}
 
   private launch(visible: boolean): Promise<Browser> {
     return (async () => {
       const exe = this.executable();
       if (!exe) throw new BridgeError('unavailable', '电脑上没有找到 Edge 或 Chrome，无法中转 claude.ai 页面。可在连接器环境变量 CLAUDE_ARTIFACT_BROWSER 指定浏览器。');
-      await mkdir(this.profile, {recursive: true});
-      const portFile = join(this.profile, 'DevToolsActivePort');
+      const profile = join(this.dataDir, profileFolder(exe));
+      await mkdir(profile, {recursive: true});
+      const portFile = join(profile, 'DevToolsActivePort');
       await rm(portFile, {force: true});
-      const child = spawn(exe, [`--user-data-dir=${this.profile}`, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--no-first-run',
+      const child = spawn(exe, [`--user-data-dir=${profile}`, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--no-first-run',
         '--no-default-browser-check', '--disable-sync', '--hide-crash-restore-bubble', '--mute-audio',
         ...(visible ? ['--window-position=-32000,-32000', '--window-size=1200,900'] : ['--headless=new']), 'about:blank'], {stdio: 'ignore', windowsHide: !visible});
       child.on('error', () => {});
@@ -250,7 +262,7 @@ export class ArtifactViewer {
   }
   /** Closes the browser, and ends its process if it has not exited within two seconds. */
   private async stop(browser: Browser) {
-    this.browser = undefined;this.login = undefined;
+    this.browser = undefined;this.login = undefined;this.desk?.off();this.desk = undefined;
     await browser.cdp.send('Browser.close', {}, undefined, 2000).catch(() => {});
     for (let i = 0; i < 20 && running(browser.pid); i++) await delay(100);
     browser.cdp.close();
@@ -260,7 +272,7 @@ export class ArtifactViewer {
   private rest() {
     clearTimeout(this.idle);
     this.idle = setTimeout(() => {
-      if (this.jobs.size || this.login) return this.rest();
+      if (this.jobs.size || this.login || this.desk) return this.rest();
       void this.browser?.then(browser => this.stop(browser), () => {});
     }, this.idleMs);
     this.idle.unref?.();
@@ -298,6 +310,7 @@ export class ArtifactViewer {
     let job = this.jobs.get(variant + slug);
     if (!job) {
       job = this.serial(() => this.capture(String(p.url), width, dark)).then(async result => {
+        void this.note('html' in result);
         if ('html' in result) {
           await mkdir(dir, {recursive: true});
           await writeFile(file, result.html);
@@ -481,12 +494,87 @@ export class ArtifactViewer {
     return /<head[^>]*>/i.test(html) ? html.replace(/<head([^>]*)>/i, `<head$1>${head}`) : html.replace(/^<!doctype html>/i, `<!doctype html>${head}`);
   }
 
-  /** Sign-in from the phone: screenshots of a claude.ai tab in the connector's browser, and input sent back to it. */
+  /**
+   * Whether the connector's browser is signed in, as last seen, kept in a small file so asking does not start the browser.
+   * `unknown`: a profile from before this was recorded, which may well be signed in.
+   */
+  async known(): Promise<Json> {
+    const exe = this.executable();
+    if (!exe) return {desktop: true, available: false, signedIn: 'no'};
+    const folder = profileFolder(exe);
+    const saved = await readFile(join(this.dataDir, 'claude-signin.json'), 'utf8').then(text => JSON.parse(text), () => null);
+    if (saved?.profile === folder) return {desktop: true, available: true, signedIn: saved.signedIn ? 'yes' : 'no'};
+    return {desktop: true, available: true, signedIn: existsSync(join(this.dataDir, folder)) ? 'unknown' : 'no'};
+  }
+  private async note(signedIn: boolean) {
+    const exe = this.executable();
+    if (!exe) return;
+    await writeFile(join(this.dataDir, 'claude-signin.json'), JSON.stringify({profile: profileFolder(exe), signedIn, at: this.now()})).catch(() => {});
+  }
+  private async signedIn(cdp: Cdp) {
+    const {cookies = []} = await cdp.send('Storage.getCookies').catch((): Json => ({}));
+    return (cookies as Json[]).some(cookie => cookie.name === 'sessionKey' && /(^|\.)claude\.ai$/.test(String(cookie.domain)));
+  }
+  private async closeDesk(browser?: Browser) {
+    const desk = this.desk;
+    if (!desk) return;
+    this.desk = undefined;desk.off();
+    await browser?.cdp.send('Target.closeTarget', {targetId: desk.targetId}).catch(() => {});
+  }
+
+  /**
+   * Sign-in at the computer: an ordinary window of the connector's browser, on the computer's screen, at claude.ai's
+   * sign-in page. `start` opens it; without it this reports whether the window is still open and whether sign-in is done.
+   */
+  private async deskSignIn(start: boolean): Promise<Json> {
+    if (start) {
+      this.visible = true;
+      const browser = await this.open(), {cdp} = browser;
+      await this.closeDesk(browser);
+      const bounds = {left: 80, top: 60, width: 1100, height: 820};
+      const {targetId} = await cdp.send('Target.createTarget', {url: LOGIN_URL, newWindow: true, ...bounds});
+      // The browser's first window sits off-screen; this one must not inherit that.
+      const {windowId} = await cdp.send('Browser.getWindowForTarget', {targetId}).catch((): Json => ({}));
+      if (windowId !== undefined) {
+        await cdp.send('Browser.setWindowBounds', {windowId, bounds: {windowState: 'normal'}}).catch(() => {});
+        await cdp.send('Browser.setWindowBounds', {windowId, bounds}).catch(() => {});
+      }
+      await cdp.send('Target.activateTarget', {targetId}).catch(() => {});
+      // A window the person closes themselves must not keep the browser running.
+      await cdp.send('Target.setDiscoverTargets', {discover: true}).catch(() => {});
+      const off = cdp.on(message => {
+        if (message.method !== 'Target.targetDestroyed' || message.params?.targetId !== targetId || this.desk?.targetId !== targetId) return;
+        this.desk = undefined;off();this.rest();
+      });
+      this.desk = {targetId: String(targetId), off};
+    }
+    const browser = await this.browser?.catch(() => undefined);
+    if (!browser || browser.cdp.closed) {this.desk = undefined;return {desktop: true, open: false, signedIn: false};}
+    const {targetInfos = []} = this.desk ? await browser.cdp.send('Target.getTargets').catch((): Json => ({})) : {};
+    const target = (targetInfos as Json[]).find(info => info.targetId === this.desk?.targetId);
+    if (!target) await this.closeDesk();
+    let path = '';
+    try {path = target ? new URL(String(target.url)).pathname : '';} catch {}
+    // Signed in once the session cookie is there and claude.ai has moved on from its sign-in page.
+    const signedIn = await this.signedIn(browser.cdp) && !(target && (/^\/(login|magic-link|oauth)/.test(path) || !/(^|\.)claude\.ai$/.test(new URL(String(target.url)).hostname)));
+    if (signedIn && target) await this.closeDesk(browser);
+    await this.note(signedIn);
+    this.rest();
+    return {desktop: true, open: Boolean(this.desk), signedIn};
+  }
+
+  /**
+   * Sign-in to claude.ai in the connector's browser. `desktop`/`status`: in a window on the computer's screen.
+   * The other operations work it from the phone: screenshots of a claude.ai tab, and input sent back to it.
+   */
   async signIn(p: Json): Promise<Json> {
     const op = p.op;
+    if (op === 'check') return this.known();
+    if (op === 'desktop' || op === 'status') return this.serial(() => this.deskSignIn(op === 'desktop'));
     if (op === 'close') return this.serial(async () => {
       const browser = await this.browser?.catch(() => undefined);
       if (browser && this.login) await browser.cdp.send('Target.closeTarget', {targetId: this.login.targetId}).catch(() => {});
+      await this.closeDesk(browser);
       this.login = undefined;this.rest();
       return {closed: true};
     });
@@ -533,6 +621,7 @@ export class ArtifactViewer {
         cdp.send('Network.getCookies', {urls: ['https://claude.ai/']}, login.sessionId).catch(() => ({cookies: []})),
       ]);
       const signedIn = (cookies.cookies || []).some((cookie: Json) => cookie.name === 'sessionKey') && !/\/login/.test(String(href));
+      await this.note(signedIn);
       this.rest();
       return {image: `data:image/jpeg;base64,${data}`, url: String(href), signedIn, width: login.width, height: login.height};
     });

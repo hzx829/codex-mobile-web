@@ -6,7 +6,7 @@ export type PreviewTarget =
   | {kind:'diff'; threadId:string; turnId:string; text:string}
   | {kind:'image'; url:string; title:string}
   | {kind:'web'; session:PreviewSession}
-  | {kind:'artifact'; machineId:string; url:string; title?:string};
+  | {kind:'artifact'; machineId:string; url:string; title?:string; fresh?:string};
 
 /** claude.ai Artifact pages, which the computer renders and relays; the phone never opens claude.ai itself. */
 export function isArtifactUrl(value:string){return /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]{8,64}\/?(?:[?#].*)?$/.test(value);}
