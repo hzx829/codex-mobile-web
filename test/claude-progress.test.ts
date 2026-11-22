@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, writeFile, utimes} from 'node:fs/promises';
+import {mkdtemp, mkdir, rm, writeFile, utimes} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {applyPlan, entryTimestamp, nextStep, readPeerStatuses} from '../src/connector/claude-progress.js';
@@ -74,8 +74,13 @@ test('Claude Code’s own session reports say which sessions are busy; reports o
     await report(12, 'a', 'idle', 0);
     await report(13, 'c', 'busy', 5);
     await writeFile(join(root, 'sessions', '14.json'), '{broken');
-    const statuses = await readPeerStatuses(root, pid => pid !== 13);
-    assert.deepEqual(Object.fromEntries(statuses), {a: {status: 'busy', updatedAt: 1}, b: {status: 'waiting', waitingFor: 'permission', updatedAt: 1}});
+    await report(15, 'd', 'idle', 2, {entrypoint: 'claude-desktop'});
+    // A later report from a process this connector started does not hide the desktop app still holding the session.
+    await report(16, 'd', 'busy', 9, {entrypoint: 'codex-mobile-web'});
+    const statuses = await readPeerStatuses(root, pid => pid !== 13, 'codex-mobile-web');
+    assert.deepEqual(Object.fromEntries(statuses), {a: {status: 'busy', updatedAt: 1, pid: 10}, b: {status: 'waiting', waitingFor: 'permission', updatedAt: 1, pid: 11},
+      d: {status: 'idle', updatedAt: 2, pid: 15, entrypoint: 'claude-desktop'}});
+    assert.equal((await readPeerStatuses(root, pid => pid !== 13)).get('d')?.pid, 16);
     assert.equal((await readPeerStatuses(join(root, 'missing'))).size, 0);
   } finally {await removeTestTemp(root);}
 });
@@ -127,6 +132,12 @@ test('a session the desktop app is running stays running through a long call, an
     await status('idle');clock += 1000;
     const idle = await bridge.handle('claude.read', {conversationId: sid});
     assert.equal(idle.running, false);assert.equal(idle.external, false);assert.equal(idle.externalStatus, '');
+    // Still open in the app, which keeps its own copy and will not show what the phone adds.
+    assert.deepEqual(idle.heldBy, {app: 'Claude 桌面 app', pid: process.pid});
+    assert.match(idle.notice, /Claude 桌面 app里开着.*不会显示/);
+    await rm(join(config, 'sessions', `${process.pid}.json`));clock += 1000;
+    const closed = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(closed.heldBy, undefined);assert.equal(closed.notice, '');assert.notEqual(closed.revision, idle.revision);
   } finally {
     bridge?.close();
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;

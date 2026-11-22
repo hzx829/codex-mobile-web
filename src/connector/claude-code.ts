@@ -12,7 +12,7 @@ import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './
 import {CLAUDE_EFFORTS, ClaudeRuntime, PERMISSION_MODES, type ClaudeEffort, type ClaudeResponse, type LiveSession, type PermissionMode, type QueryFn} from './claude-runtime.js';
 import {claudeArtifactTitles, claudePatches, claudeRecordedSettings, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
-import {entryTimestamp, readPeerStatuses, type PeerStatus} from './claude-progress.js';
+import {entryTimestamp, holderName, readPeerStatuses, type PeerStatus} from './claude-progress.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
 import {claudeUserText, sendersByText} from './message-senders.js';
 
@@ -56,6 +56,11 @@ function permissionMode(value: unknown): PermissionMode | undefined {
   if (!PERMISSION_MODES.includes(value as PermissionMode)) throw new BridgeError('invalid', '权限模式无效');
   return value as PermissionMode;
 }
+/**
+ * A session open in another program runs the phone's messages in this connector's own process; that program keeps its own
+ * copy of the conversation and does not reload it (Claude Code's cross-session messages arrive as a peer's, not the user's).
+ */
+const heldNotice = (app: string) => `这条会话在${app}里开着。手机发的消息由连接器在另一个进程里运行，${app}不会显示，那边的 Claude 也看不到。回到电脑上继续前，请重启${app}或重新打开这条会话，否则那边会接着旧的内容写下去。`;
 type SessionSettings = {model: string; effort: ClaudeEffort | ''; permissionMode: PermissionMode | ''};
 type ChosenSettings = {model?: string; effort?: ClaudeEffort; permissionMode?: PermissionMode};
 /**
@@ -203,15 +208,19 @@ export class ClaudeCodeBridge {
     const elsewhere = !guestWorkspace() && !live && info !== null;
     // The process holding it (the desktop app, a terminal) reports whether a turn is under way, however long a call takes;
     // without that report, recent transcript writes are the only sign.
-    const peer = elsewhere ? (await this.peerStatuses()).get(id) : undefined;
+    // Another program with the session open, even idle: it keeps its own copy of the conversation and never sees what
+    // this connector's processes add, so the phone is told.
+    const holder = !guestWorkspace() && info !== null ? (await this.peerStatuses()).get(id) : undefined;
+    const peer = elsewhere ? holder : undefined;
     const external = elsewhere && (peer ? peer.status !== 'idle' : this.now() - Number(info!.mtimeMs) < ACTIVE_MS && this.ownWrites.get(id) !== info!.mtimeNs);
     const marker = live ? live.version : external ? peer?.status || 'external' : '-';
-    return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${marker}:${this.queueVersions.get(id) || 0}`, external, peer: external ? peer : undefined, exists: Boolean(info)};
+    return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${marker}:${this.queueVersions.get(id) || 0}:${holder?.pid ?? ''}`, external,
+      peer: external ? peer : undefined, holder, exists: Boolean(info)};
   }
 
   /** Claude Code's own reports of the sessions its processes hold, read at most twice a second. */
   private peerStatuses() {
-    if (!this.peers || this.now() - this.peers.at > 500) this.peers = {at: this.now(), value: readPeerStatuses(this.root).catch(() => new Map())};
+    if (!this.peers || this.now() - this.peers.at > 500) this.peers = {at: this.now(), value: readPeerStatuses(this.root, undefined, this.runtime.ownEntrypoint).catch(() => new Map())};
     return this.peers.value;
   }
 
@@ -301,13 +310,16 @@ export class ClaudeCodeBridge {
       controlled: Boolean(live), external, permissionMode: settings.permissionMode,
       // 'busy' or 'waiting' as the process holding it reports; 'recent' when only recent transcript writes suggest it.
       externalStatus: external ? current.peer?.status || 'recent' : '', ...(current.peer?.waitingFor ? {waitingFor: current.peer.waitingFor} : {}),
+      // The program that has the session open on the computer; what the phone adds runs in another process it never shows.
+      ...(current.holder ? {heldBy: {app: holderName(current.holder.entrypoint), pid: current.holder.pid}} : {}),
       defaultPermissionMode: this.runtime.defaultMode, canBypass: Boolean(live?.canBypass), requests: live?.pending || [], error: live?.error || '',
       queuedMessages: (this.queue?.queued(id) || []).map(message => ({id: message.id, text: message.payload.text || '',
         imageCount: message.payload.images?.length || 0, imageBytes: (message.payload.images || []).reduce((sum: number, url: string) => sum + imageBytes(url), 0),
         state: message.state, error: message.error})),
       turns: recent.reverse(), truncated: recent.length < turns.length, contextUsage, suggestion,
-      notice: !external ? '' : current.peer?.status === 'waiting' ? `电脑上的 Claude Code 正在等待电脑上的操作${current.peer.waitingFor ? `（${current.peer.waitingFor}）` : ''}。`
-        : current.peer && this.queue ? '电脑上的 Claude Code 正在运行这条会话。手机发送的消息会排队，等那边这一轮结束后发送。'
+      notice: !external ? current.holder ? heldNotice(holderName(current.holder.entrypoint)) : ''
+        : current.peer?.status === 'waiting' ? `电脑上的 Claude Code 正在等待电脑上的操作${current.peer.waitingFor ? `（${current.peer.waitingFor}）` : ''}。`
+        : current.peer && this.queue ? `${holderName(current.peer.entrypoint)}正在运行这条会话。手机发送的消息会排队，等那边这一轮结束后发送；${holderName(current.peer.entrypoint)}不会显示这些消息。`
         : '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。',
     };
   }

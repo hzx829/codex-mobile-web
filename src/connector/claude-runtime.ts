@@ -157,6 +157,8 @@ export class ClaudeRuntime extends EventEmitter {
     /** The mode a session runs in when the phone does not choose one. */
     readonly defaultMode: PermissionMode = 'default') {super();}
 
+  /** The entrypoint this connector's own Claude Code processes are recorded with. */
+  get ownEntrypoint() {return this.entrypoint || DEFAULT_ENTRYPOINT;}
   get(id: string) {return this.live.get(id);}
   get busy() {return [...this.live.values()].some(session => session.running || session.requests.size || session.inbox.size);}
 

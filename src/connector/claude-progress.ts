@@ -69,7 +69,16 @@ export function entryTimestamp(transcript: string, uuid: string): string {
 }
 
 /** What a Claude Code process reports about the session it holds: a turn under way, blocked on a dialog, or done. */
-export type PeerStatus = {status: 'busy' | 'waiting' | 'idle'; waitingFor?: string; updatedAt: number};
+/** `entrypoint`: the program holding it (`claude-desktop`, `cli`, an IDE); `pid`: that process. */
+export type PeerStatus = {status: 'busy' | 'waiting' | 'idle'; waitingFor?: string; updatedAt: number; pid: number; entrypoint?: string};
+
+/** The program a session is open in, as people call it. */
+export function holderName(entrypoint?: string) {
+  if (entrypoint === 'claude-desktop') return 'Claude 桌面 app';
+  if (entrypoint === 'cli') return '终端里的 Claude Code';
+  if (entrypoint === 'claude-vscode') return 'VS Code 里的 Claude Code';
+  return '电脑上的另一个 Claude Code';
+}
 
 function processAlive(pid: number) {
   try {process.kill(pid, 0);return true;} catch (error) {return (error as NodeJS.ErrnoException).code === 'EPERM';}
@@ -79,7 +88,9 @@ function processAlive(pid: number) {
  * Each running Claude Code process (the desktop app, a terminal, an IDE) keeps `<config>/sessions/<pid>.json` with the
  * session it holds and its status. A file whose process has exited can be left behind; it is ignored.
  */
-export async function readPeerStatuses(root: string, alive = processAlive): Promise<Map<string, PeerStatus>> {
+export async function readPeerStatuses(root: string, alive = processAlive,
+  /** The connector's own entrypoint: the processes it started report too, and are not someone else holding the session. */
+  own?: string): Promise<Map<string, PeerStatus>> {
   const dir = join(root, 'sessions'), statuses = new Map<string, PeerStatus>();
   const names = (await readdir(dir).catch(() => [] as string[])).filter(name => /^\d+\.json$/.test(name));
   await Promise.all(names.map(async name => {
@@ -87,10 +98,12 @@ export async function readPeerStatuses(root: string, alive = processAlive): Prom
     try {entry = JSON.parse(await readFile(join(dir, name), 'utf8'));} catch {return;}
     const status = entry?.status;
     if (typeof entry?.sessionId !== 'string' || !['busy', 'waiting', 'idle'].includes(status) || !Number.isSafeInteger(entry.pid) || !alive(entry.pid)) return;
+    if (own && entry.entrypoint === own) return;
     const updatedAt = Number(entry.statusUpdatedAt ?? entry.updatedAt) || 0, known = statuses.get(entry.sessionId);
     // Two processes can hold a session for a moment (a resume); the latest report wins.
     if (known && known.updatedAt > updatedAt) return;
-    statuses.set(entry.sessionId, {status, ...(typeof entry.waitingFor === 'string' && entry.waitingFor ? {waitingFor: entry.waitingFor.slice(0, 100)} : {}), updatedAt});
+    statuses.set(entry.sessionId, {status, ...(typeof entry.waitingFor === 'string' && entry.waitingFor ? {waitingFor: entry.waitingFor.slice(0, 100)} : {}), updatedAt,
+      pid: entry.pid, ...(typeof entry.entrypoint === 'string' && entry.entrypoint ? {entrypoint: entry.entrypoint.slice(0, 40)} : {})});
   }));
   return statuses;
 }

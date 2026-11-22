@@ -204,6 +204,7 @@ export function ClaudeCodePanel(props:Props){
     // been used there (or the connector is older): the phone says it has ended before continuing it.
     const forceIdle=external&&view?.externalStatus!=='busy'&&view?.externalStatus!=='waiting';
     if(forceIdle&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
+    if(!forceIdle&&!heldElsewhere())return;
     if(!keepCache())return;
     stick.current=true;
     // Queued messages appear in the queue; everything else appears in the conversation now.
@@ -226,9 +227,25 @@ export function ClaudeCodePanel(props:Props){
       requestAnimationFrame(()=>composer.current?.focus());
     });
   }
+  /**
+   * The session is open in another program on the computer (the desktop app, a terminal), which never shows what the phone
+   * adds. Asked once for each time that program opened it.
+   */
+  function heldElsewhere(){
+    const held=view?.heldBy,key=`claude:${machine}:held:${conversationId}`;
+    if(!held?.app||load(key)===String(held.pid))return true;
+    if(!window.confirm(`这条会话在${held.app}里开着。手机发的消息会由连接器在另一个进程里运行，${held.app}不会显示，那边的 Claude 也看不到。
+
+回到电脑上继续前，请重启${held.app}或重新打开这条会话，否则那边会接着旧的内容写下去。
+
+继续发送？`))return false;
+    store(key,String(held.pid));
+    return true;
+  }
   /** Rewrites a sent message: the session continues from the turn before it, as Codex does. */
   async function resend(turnId:string,text:string){
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
+    if(!external&&!heldElsewhere())return;
     if(!keepCache())return;
     const settings={...(model?{model}:{}),...(sentEffort?{effort:sentEffort}:{}),...(selectedMode&&(selectedMode!=='bypassPermissions'||bypassLater)?{permissionMode:selectedMode}:{})};
     stick.current=true;
