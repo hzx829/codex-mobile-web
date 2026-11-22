@@ -44,7 +44,7 @@ import {submitTurn,editTurn} from './turn-request';
 import {modelDisplayName,reasoningLabel,resolveModelSelection} from '../src/shared/models';
 import {ModelButton,ModelPicker} from './model-picker';
 import {voiceProvider,voiceProviderLabel} from '../src/shared/voice';
-import {joinDictation,useVoiceInput} from './use-voice-input';
+import {useVoiceInput} from './use-voice-input';
 import {useStableEvent} from './use-event';
 import {TeamPanel,type TeamUser} from './team';
 import './style.css';
@@ -104,7 +104,8 @@ function App(){
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   const draftSave=useRef(new DraftSave(save));
   const [serviceTier,setServiceTier]=useState<string|null|undefined>(undefined);
-  const [voiceMode,setVoiceMode]=useState(()=>voiceProvider(load('voice-provider','codex')));
+  // Claude's streamed dictation is the default; an earlier choice of the system keyboard is kept.
+  const [voiceChoice,setVoiceChoice]=useState(()=>voiceProvider(load('voice-engine',load('voice-provider','')==='keyboard'?'keyboard':'claude')));
   const [threadMenu,setThreadMenu]=useState<{thread:Json;point:MenuPoint;machine:string;archived:boolean;compact?:boolean}|null>(null);
   const [modelPoint,setModelPoint]=useState<MenuPoint|null>(null),modelButton=useRef<HTMLButtonElement>(null);
   const [permissionPoint,setPermissionPoint]=useState<MenuPoint|null>(null),permissionButton=useRef<HTMLButtonElement>(null);
@@ -121,6 +122,8 @@ function App(){
   const browserBusy=browserRequest!==null,browserSession=!browserState?.filePath&&belongsToThread(browserState,machine,previewThread)?browserState:null;
   const activeMachine=machines.find(m=>m.id===machine),guest=Boolean(activeMachine?.guest);
   const available=activeMachine?.services;
+  // A computer without Claude Code dictates through Codex instead.
+  const voiceMode=voiceChoice==='claude'&&available&&!available.includes('claude')&&available.includes('codex')?'codex':voiceChoice;
   const connected=status==='online'&&Boolean(activeMachine)&&(!available||available.includes(service));
   const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived,service,connected}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),timelineContent=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),submitting=useRef(false);
@@ -211,8 +214,8 @@ function App(){
   const effectiveCwd=newChat?newCwd:view?.cwd||project;
   const voice=useVoiceInput(voiceMode,JSON.stringify([machine,selected,newChat,newChat?newCwd:'']),connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
-    transcribe:recording=>call('voice.transcribe',recording),
-    text:text=>editDraft(joinDictation(draft,text)),
+    request:(action,payload)=>call(action,payload),
+    draft:()=>draft,setDraft:editDraft,
     error:fail,
   });
   const voiceBusy=voice.state!=='idle',voiceLabel=voiceProviderLabel(voiceMode);
@@ -554,7 +557,7 @@ function App(){
      </PreviewPane>;
   const computerOptions=<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=><MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{computerName(m)}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>)}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}<p className="muted">{location.origin}</p></>;
   // One choice for Codex, Claude Code and Antigravity; transcription always runs through Codex on the computer.
-  const voiceOptions=<><label>识别方式<select value={voiceMode} onChange={e=>{const mode=voiceProvider(e.target.value);setVoiceMode(mode);save('voice-provider',mode);}}><option value="codex">Codex 识别</option><option value="keyboard">系统键盘</option></select></label><p className="muted">{voiceMode==='codex'?'点麦克风开始录音，再点结束，文字填入输入框。需要 HTTPS 和电脑上 Codex 的 ChatGPT 登录；Claude Code 和 Antigravity 也用它识别。录音经中继、电脑发送到语音服务。':'点麦克风打开输入框，再使用手机键盘上的听写。'}</p><p className="muted">选择保存在当前浏览器，三个应用共用。</p><button className="primary" onClick={()=>setSheet(null)}>完成</button></>;
+  const voiceOptions=<><label>识别方式<select value={voiceChoice} onChange={e=>{const mode=voiceProvider(e.target.value);setVoiceChoice(mode);save('voice-engine',mode);}}><option value="claude">Claude 识别（推荐）</option><option value="codex">Codex 识别</option><option value="keyboard">系统键盘</option></select></label><p className="muted">{voiceChoice==='claude'?'点麦克风开始说话，文字边说边出现，说完点 ✓，最后会再校对一遍。用电脑上 Claude Code 的 claude.ai 登录，与 Claude Code 自带的语音输入是同一个服务；需要 HTTPS。声音经中继、电脑实时发送到语音服务。':voiceChoice==='codex'?'点麦克风开始录音，说完点 ✓，整段识别后填入输入框。需要 HTTPS 和电脑上 Codex 的 ChatGPT 登录。录音经中继、电脑发送到语音服务。':'点麦克风打开输入框，再使用手机键盘上的听写。'}</p>{voiceMode!==voiceChoice&&<p className="muted">这台电脑没有 Claude Code，当前改用 Codex 识别。</p>}<p className="muted">选择保存在当前浏览器，三个应用共用。</p><button className="primary" onClick={()=>setSheet(null)}>完成</button></>;
   const teamItems=me&&<><MenuItem icon="team" onClick={()=>setSheet('team')}>团队<span className="menu-detail">{me.name}</span></MenuItem>
     <MenuItem icon="chat" onClick={()=>{setOnlyMine(!onlyMine);save('only-mine',!onlyMine);setSheet(null);}}>只看我的会话{onlyMine&&<Icon name="check" size={18}/>}</MenuItem></>;
   const teamPanel=me&&<TeamPanel me={me} team={(action,payload)=>client.current?client.current.team(action,payload):Promise.reject({message:'尚未连接中继'})} logout={logout} copy={copyText}

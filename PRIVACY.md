@@ -34,9 +34,9 @@ The connector returns selected model/provider metadata for display, not the full
 
 The web app connects to its own site's WebSocket endpoint. Chat Markdown images and external images become placeholders; Markdown file previews can read local images through the authenticated file interface. Clicking an external link opens that site.
 
-Voice input defaults to Codex transcription and can be switched to the system keyboard. Codex mode records after a microphone-button click and browser permission. While recording, audio is cut at pauses and each piece is uploaded as soon as it ends, before the dictation is finished; silent pieces are not uploaded. The audio travels through the relay and computer connector to `https://chatgpt.com/backend-api/transcribe`, using the computer's Codex ChatGPT login. The relay can read audio and transcripts; this account credential stays on the computer. Transcripts are appended to the draft, not automatically sent as tasks. This private desktop endpoint has no guarantee of cross-version compatibility. Keyboard mode does not record in this app; its privacy behavior depends on the keyboard provider.
+Voice input defaults to Claude transcription and can be switched to Codex transcription or the system keyboard. Both record only after a microphone-button click and browser permission. Claude mode streams audio while you speak: about every 200 ms the browser sends 16 kHz PCM through the relay and computer connector, which forwards it over a WebSocket to `wss://api.anthropic.com/api/ws/speech_to_text/voice_stream`, the dictation service Claude Code's own voice mode uses, signed in with the computer's Claude Code (claude.ai) login. The text heard so far returns with each send; tapping ✓ ends the stream and the service sends a final, corrected text. Codex mode records one clip and, after ✓, sends it whole through the relay and connector to `https://chatgpt.com/backend-api/transcribe`, using the computer's Codex ChatGPT login. The relay can read audio and transcripts; both account credentials stay on the computer, and the connector never renews or rewrites the Claude Code login itself (when it has expired it starts Claude Code briefly so Claude Code renews it). Transcripts go into the draft, not automatically sent as tasks. Both are private desktop endpoints with no guarantee of cross-version compatibility. Keyboard mode does not record in this app; its privacy behavior depends on the keyboard provider.
 
-The voice choice is saved as `voice-provider` in browser `localStorage`. Audio stays in browser, relay and connector memory and is not deliberately written to disk or the operation ledger. Cancelling releases capture and discards late results, but cannot recall audio already uploaded. Provider retention, OS memory, infrastructure logs and crash dumps are outside this guarantee.
+The voice choice is saved as `voice-engine` in browser `localStorage` (an earlier `voice-provider` of `keyboard` is carried over). Audio stays in browser, relay and connector memory and is not deliberately written to disk or the operation ledger. Cancelling releases capture and discards late results, but cannot recall audio already uploaded. Provider retention, OS memory, infrastructure logs and crash dumps are outside this guarantee.
 
 ### Storage and retention
 
@@ -123,9 +123,9 @@ Antigravity 面板沿用共享 Token。中继可读取转发的桌面对话标�
 
 网页连接本站的 WebSocket。聊天中的 Markdown 图片和外部图片显示为占位文本；Markdown 文件预览可通过已认证文件接口读取本地图片，不主动请求外部图片。点击外部链接会打开对应网站。
 
-语音默认使用 Codex 识别，可切换系统键盘。Codex 模式在点击麦克风并取得浏览器许可后录音；录音按停顿分段，每段一结束就上传，不等整次听写结束，静音段不上传。音频经中继、电脑连接器发送至 `https://chatgpt.com/backend-api/transcribe`，使用电脑上 Codex 的 ChatGPT 登录。中继可以读取录音和识别文字，这份账号凭据留在电脑端。识别文字追加到草稿，不自动发送任务。此服务为桌面私有接口，不保证跨版本兼容。键盘模式下本项目不录音，隐私行为取决于键盘服务商。
+语音默认使用 Claude 识别，可切换 Codex 识别或系统键盘；两种识别都在点击麦克风并取得浏览器许可后才录音。Claude 模式边说边传：浏览器约每 200 毫秒把 16 kHz PCM 音频经中继、电脑连接器发出，连接器通过 WebSocket 转发至 `wss://api.anthropic.com/api/ws/speech_to_text/voice_stream`，即 Claude Code 自带语音模式所用的听写服务，使用电脑上 Claude Code 的 claude.ai 登录；每次发送都带回目前听到的文字，点 ✓ 结束后服务再给出校对后的最终文字。Codex 模式录完整段，点 ✓ 后整段经中继、连接器发送至 `https://chatgpt.com/backend-api/transcribe`，使用电脑上 Codex 的 ChatGPT 登录。中继可以读取录音和识别文字；两份账号凭据都留在电脑端，连接器不自行续期或改写 Claude Code 的登录（过期时短暂启动 Claude Code，由它自己续期）。识别文字填入草稿，不自动发送任务。两者都是桌面私有接口，不保证跨版本兼容。键盘模式下本项目不录音，隐私行为取决于键盘服务商。
 
-语音方式保存在浏览器 `localStorage` 的 `voice-provider`。录音暂存在浏览器、中继及连接器内存，不主动保存到磁盘或操作记录。取消会释放麦克风并丢弃迟到结果，不能撤回已上传的录音；服务商保留策略、系统内存、基础设施日志及崩溃转储不在此保证范围。
+语音方式保存在浏览器 `localStorage` 的 `voice-engine`（之前在 `voice-provider` 选了系统键盘的会沿用）。录音暂存在浏览器、中继及连接器内存，不主动保存到磁盘或操作记录。取消会释放麦克风并丢弃迟到结果，不能撤回已上传的录音；服务商保留策略、系统内存、基础设施日志及崩溃转储不在此保证范围。
 
 ### 保存位置与保留时间
 

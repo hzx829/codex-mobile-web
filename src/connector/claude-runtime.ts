@@ -388,5 +388,18 @@ export class ClaudeRuntime extends EventEmitter {
     } finally {inbox?.close();try {probe?.close();} catch {}}
   }
 
+  /**
+   * Starts Claude Code briefly so it renews an expired claude.ai login itself, as it does before
+   * any request; dictation then reads the renewed login. Nothing is sent to a model.
+   */
+  async renewLogin(cwd = homedir()): Promise<void> {
+    const inbox = new Inbox(), executable = this.executable();
+    let probe: Query | undefined, timer: NodeJS.Timeout | undefined;
+    try {
+      probe = (await this.load())({prompt: inbox, options: {cwd, env: claudeEnv(this.entrypoint), ...(executable ? {pathToClaudeCodeExecutable: executable} : {}), stderr: () => {}}});
+      await Promise.race([probe.supportedModels(), new Promise(resolve => {timer = setTimeout(resolve, 20_000);})]);
+    } finally {clearTimeout(timer);inbox.close();try {probe?.close();} catch {}}
+  }
+
   close() {for (const session of [...this.live.values()]) {try {session.query.close();} catch {}this.closeSession(session);}}
 }

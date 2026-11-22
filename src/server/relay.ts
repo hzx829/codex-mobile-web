@@ -17,7 +17,7 @@ type Peer={role:'phone'|'connector';machine?:Machine;alive:boolean;watch?:{machi
 type Route={phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;threadId?:string;timer:NodeJS.Timeout;machineId:string;payload:Json;member?:Member};
 // Text frames compress well; file bytes and preview traffic are already dense or large.
 const COMPRESS_LIMIT=2*1024*1024;
-const DENSE_ACTIONS=new Set(['file.download','file.uploadChunk','claude.file.uploadChunk','antigravity.file.uploadChunk','voice.transcribe']);
+const DENSE_ACTIONS=new Set(['file.download','file.uploadChunk','claude.file.uploadChunk','antigravity.file.uploadChunk','voice.transcribe','voice.stream.audio']);
 const compress=promisify(gzip);
 export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3341,connectorTokens:ConnectorToken[] = [],team?:TeamStore) {
   if(connectorTokens.some(entry=>entry.token===token))throw new Error('连接器专用 Token 不能与主 Token 相同');

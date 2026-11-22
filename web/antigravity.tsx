@@ -1,6 +1,6 @@
 import {useEffect,useRef,useState} from 'react';
 import {useComposerAttachments} from './composer-attachments';
-import {joinDictation,useVoiceInput} from './use-voice-input';
+import {useVoiceInput} from './use-voice-input';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
 import {SheetPanel} from './sheet';
 import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
@@ -60,8 +60,8 @@ export function AntigravityPanel(props:Props){
   function sent(){edit('');setImages([]);setFiles([]);}
   const voice=useVoiceInput(props.voiceMode,key,connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
-    transcribe:recording=>request.current('voice.transcribe',recording),
-    text:text=>edit(joinDictation(draft,text)),
+    request:(action,payload)=>request.current(action,payload),
+    draft:()=>draft,setDraft:edit,
     error:failed,
   });
   const voiceBusy=voice.state!=='idle';

@@ -10,8 +10,8 @@ import {transcribeVoice} from '../src/connector/voice.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {MAX_FRAME} from '../src/shared/types.js';
-import {MAX_VOICE_BYTES,MAX_VOICE_DURATION_MS,MAX_VOICE_SESSION_MS,voiceProvider,type VoiceRecording} from '../src/shared/voice.js';
-import {createVoiceInput,joinDictation,type VoiceCallbacks,type VoiceState} from '../web/voice-input.js';
+import {MAX_VOICE_BYTES,MAX_VOICE_DURATION_MS,voiceProvider,type VoiceRecording} from '../src/shared/voice.js';
+import {applyDictation,createVoiceInput,joinDictation,type DictationSpan,type VoiceCallbacks,type VoiceState} from '../web/voice-input.js';
 import {Client} from '../web/client.js';
 
 const recording:VoiceRecording={audio:Buffer.from('recorded audio fixture').toString('base64'),mimeType:'audio/webm',durationMs:1200};
@@ -107,18 +107,8 @@ test('control routes dictation without creating a conversation or storing an ope
   }finally{control.close();}
 });
 
-/** `level` stands in for the microphone's loudness (0 is silence); without it the browser has no audio meter. */
-function captureFixture(t:TestContext,options:{permission?:Promise<any>;transcript?:Promise<{text:string}>;transcripts?:(index:number)=>Promise<{text:string}>;secure?:boolean;mime?:string;empty?:boolean;level?:{value:number}}={}){
-  if(options.level){
-    const level=options.level;
-    replaceGlobal(t,'AudioContext',class{
-      state='running';
-      createAnalyser(){return {fftSize:0,getByteTimeDomainData(samples:Uint8Array){samples.fill(128+Math.round(level.value*127));}};}
-      createMediaStreamSource(){return {connect(){}};}
-      resume(){return Promise.resolve();}
-      close(){this.state='closed';return Promise.resolve();}
-    });
-  }
+const drain=async()=>{for(let i=0;i<5;i++)await flush();};
+function captureFixture(t:TestContext,options:{permission?:Promise<any>;transcript?:Promise<{text:string}>;secure?:boolean;mime?:string;empty?:boolean}={}){
   const states:VoiceState[]=[],texts:string[]=[],errors:Error[]=[],uploads:VoiceRecording[]=[];
   let stopped=0,requested=0,keyboard=0;
   const track={stop(){stopped++;},onended:null as null|(()=>void)},stream={getTracks:()=>[track]};
@@ -134,19 +124,20 @@ function captureFixture(t:TestContext,options:{permission?:Promise<any>;transcri
   replaceGlobal(t,'isSecureContext',options.secure??true);
   replaceGlobal(t,'navigator',{mediaDevices:{getUserMedia:()=>{requested++;return options.permission||Promise.resolve(stream);}}});
   replaceGlobal(t,'MediaRecorder',Recorder);
-  const callbacks:VoiceCallbacks={state:state=>states.push(state),text:text=>texts.push(text),error:error=>errors.push(error),keyboard:()=>{keyboard++;},transcribe:async audio=>{uploads.push(audio);return options.transcripts?.(uploads.length-1)||options.transcript||{text:'  hello  '};}};
+  const callbacks:VoiceCallbacks={state:state=>states.push(state),text:text=>texts.push(text),live:()=>{throw new Error('Codex does not stream');},error:error=>errors.push(error),keyboard:()=>{keyboard++;},
+    transcribe:async audio=>{uploads.push(audio);return options.transcript||{text:'  hello  '};},stream:async()=>{throw new Error('Codex does not stream');}};
   const input=createVoiceInput('codex',callbacks);t.after(()=>input.cancel());
   return {input,callbacks,states,texts,errors,uploads,stream,track,Recorder,stopped:()=>stopped,requested:()=>requested,keyboard:()=>keyboard};
 }
 
-test('factory keeps keyboard input free of browser capture and remote requests',t=>{
+test('factory keeps keyboard input free of browser capture and remote requests; Claude is the default',t=>{
   const f=captureFixture(t,{secure:false});
-  assert.equal(voiceProvider('keyboard'),'keyboard');assert.equal(voiceProvider('invalid'),'codex');
+  assert.equal(voiceProvider('keyboard'),'keyboard');assert.equal(voiceProvider('codex'),'codex');assert.equal(voiceProvider('invalid'),'claude');assert.equal(voiceProvider(undefined),'claude');
   const keyboard=createVoiceInput('keyboard',f.callbacks);keyboard.start();keyboard.stop();keyboard.cancel();
   assert.equal(f.keyboard(),1);assert.equal(f.requested(),0);assert.equal(f.uploads.length,0);
 });
 
-test('capture picks the supported format, stops the microphone, and fills text only after stopping',async t=>{
+test('Codex capture records one clip, stops the microphone, and fills text only after stopping',async t=>{
   const f=captureFixture(t,{mime:'audio/mp4'});f.input.start();f.input.start();await flush();
   assert.equal(f.requested(),1);assert.deepEqual(f.states,['starting','recording']);assert.equal(f.uploads.length,0);
   f.input.stop();await flush();
@@ -167,14 +158,6 @@ test('cancelling capture discards audio; late transcription cannot change anothe
   const second=createVoiceInput('codex',f.callbacks);second.start();await flush();second.cancel();await flush();assert.equal(f.uploads.length,1);assert.equal(f.stopped(),2);
 });
 
-const drain=async()=>{for(let i=0;i<5;i++)await flush();};
-/** Mocked time jumps to the end of a tick, so the audio meter is stepped through it. */
-function advance(t:TestContext,ms:number){for(let passed=0;passed<ms;passed+=100)t.mock.timers.tick(100);}
-/** Speaks for a while, then pauses long enough to end the segment. */
-async function say(t:TestContext,level:{value:number},pauseMs=800){
-  level.value=0.5;advance(t,2000);level.value=0;advance(t,pauseMs);await drain();
-}
-
 test('dictated pieces join with a space between Latin words and nothing between Chinese ones',()=>{
   assert.equal(joinDictation('','你好'),'你好');assert.equal(joinDictation('  ','你好'),'你好');
   assert.equal(joinDictation('你好，','世界'),'你好，世界');assert.equal(joinDictation('fix the bug.','Then deploy'),'fix the bug. Then deploy');
@@ -182,57 +165,126 @@ test('dictated pieces join with a space between Latin words and nothing between 
   assert.equal(joinDictation('kept',''),'kept');
 });
 
-test('each pause turns into text while recording continues; silence is never uploaded',async t=>{
-  const level={value:0},f=captureFixture(t,{level,transcripts:async index=>({text:['你好，','世界'][index]})});
-  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await drain();
-  await say(t,level);
-  assert.deepEqual(f.texts,['你好，']);assert.equal(f.states.at(-1),'recording');assert.equal(f.stopped(),0);
-  await say(t,level,30_000);
-  assert.deepEqual(f.texts,['你好，','世界']);assert.equal(f.uploads.length,2);assert.equal(f.states.at(-1),'recording');
-  assert.ok(f.uploads.every(upload=>upload.durationMs<=3000));
-  f.input.stop();await drain();
-  assert.equal(f.uploads.length,2);assert.equal(f.stopped(),1);assert.equal(f.states.at(-1),'idle');assert.equal(f.errors.length,0);
-});
-
-test('speech without a pause is still cut, and transcripts arriving out of order are delivered in spoken order',async t=>{
-  const level={value:0.5},done:((value:{text:string})=>void)[]=[];
-  const f=captureFixture(t,{level,transcripts:()=>new Promise(resolve=>{done.push(resolve);})});
-  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await drain();
-  advance(t,45_000);await drain();assert.equal(f.uploads.length,2);
-  done[1]({text:'second'});await drain();assert.deepEqual(f.texts,[]);
-  done[0]({text:'first'});await drain();assert.deepEqual(f.texts,['first second']);
-  f.input.stop();await drain();assert.equal(f.uploads.length,3);assert.equal(f.states.at(-1),'transcribing');
-  f.input.cancel();done[2]({text:'late'});await drain();assert.deepEqual(f.texts,['first second']);assert.equal(f.states.at(-1),'idle');
-});
-
-test('a segment without words does not end the dictation; a dictation without any words says so',async t=>{
-  const level={value:0},empty=()=>Promise.reject({code:'voice_empty',message:'没有识别到文字，请重新录制'});
-  let wordless=false;
-  const f=captureFixture(t,{level,transcripts:index=>index===0||wordless?empty():Promise.resolve({text:'ok'})});
-  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await drain();
-  await say(t,level);assert.equal(f.errors.length,0);assert.equal(f.states.at(-1),'recording');
-  await say(t,level);f.input.stop();await drain();assert.deepEqual(f.texts,['ok']);assert.equal(f.errors.length,0);
-  const silent=createVoiceInput('codex',f.callbacks);silent.start();await drain();advance(t,5000);silent.stop();await drain();
-  assert.equal(f.uploads.length,2);assert.match(f.errors.at(-1)!.message,/没有录到/);
-  wordless=true;const mumble=createVoiceInput('codex',f.callbacks);mumble.start();await drain();
-  await say(t,level);mumble.stop();await drain();assert.equal(f.uploads.length,3);assert.match(f.errors.at(-1)!.message,/没有识别到/);assert.equal(f.states.at(-1),'idle');
-});
-
-test('a failed segment stops the dictation and keeps the text already delivered',async t=>{
-  const level={value:0},f=captureFixture(t,{level,transcripts:index=>index===0?Promise.resolve({text:'kept'}):Promise.reject({code:'voice_limit',message:'语音识别暂时达到限额'})});
-  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await drain();
-  await say(t,level);await say(t,level);
-  assert.deepEqual(f.texts,['kept']);assert.match((f.errors[0] as Error).message,/限额/);assert.equal(f.stopped(),1);assert.equal(f.states.at(-1),'idle');
-});
-
-test('session limit stops capture; interrupted tracks and insecure pages never upload',async t=>{
-  const f=captureFixture(t);t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await flush();
-  // Without an audio meter the recording is cut by time, never into more than one upload's limit.
-  advance(t,MAX_VOICE_SESSION_MS);await drain();assert.equal(f.stopped(),1);assert.equal(f.states.at(-1),'idle');
-  assert.ok(f.uploads.length>10);assert.ok(f.uploads.every(upload=>upload.durationMs<MAX_VOICE_DURATION_MS));
-  f.uploads.length=1;
+test('Codex recording limit stops capture; interrupted tracks and insecure pages never upload',async t=>{
+  const f=captureFixture(t);t.mock.timers.enable({apis:['setTimeout','Date']});f.input.start();await flush();
+  t.mock.timers.tick(MAX_VOICE_DURATION_MS);await flush();assert.equal(f.stopped(),1);assert.equal(f.uploads[0].durationMs,MAX_VOICE_DURATION_MS);
   const second=createVoiceInput('codex',f.callbacks);second.start();await flush();f.track.onended?.();await flush();assert.equal(f.uploads.length,1);assert.match(f.errors.at(-1)!.message,/中断/);
   replaceGlobal(t,'isSecureContext',false);const third=createVoiceInput('codex',f.callbacks);third.start();await flush();assert.equal(f.requested(),2);assert.match(f.errors.at(-1)!.message,/HTTPS/);
+});
+
+test('streamed text replaces what this dictation wrote and leaves the person\'s own edits alone',()=>{
+  let draft='已有内容。',span:DictationSpan=null;
+  const hear=(text:string)=>{({draft,span}=applyDictation(draft,span,text));return draft;};
+  assert.equal(hear(''),'已有内容。');
+  assert.equal(hear('帮我'),'已有内容。帮我');assert.equal(hear('帮我看一下'),'已有内容。帮我看一下');
+  // The final pass may correct earlier words.
+  assert.equal(hear('帮我看一下，'),'已有内容。帮我看一下，');
+  // Text typed before the dictated words stays, and the dictated words keep updating.
+  draft='已有内容。请帮我看一下，';
+  assert.equal(hear('帮我看一下，延迟'),'已有内容。请帮我看一下，延迟');
+  // The person fixes a dictated word; only words heard afterwards are added.
+  draft='已有内容。请帮我瞧一下，延迟';
+  assert.equal(hear('帮我看一下，延迟问题'),'已有内容。请帮我瞧一下，延迟问题');assert.equal(hear('帮我看一下，延迟问题，然后'),'已有内容。请帮我瞧一下，延迟问题，然后');
+  // A correction to words they took over is not applied over theirs.
+  assert.equal(hear('帮我看看，延迟问题，然后。'),'已有内容。请帮我瞧一下，延迟问题，然后');
+  let latin='fix the bug.',latinSpan:DictationSpan=null;
+  ({draft:latin,span:latinSpan}=applyDictation(latin,latinSpan,'Then'));({draft:latin}=applyDictation(latin,latinSpan,'Then deploy'));
+  assert.equal(latin,'fix the bug. Then deploy');
+});
+
+/** A browser with an audio worklet; `post` feeds captured PCM as the worklet would. */
+function streamFixture(t:TestContext,options:{open?:()=>Promise<any>;audio?:(payload:any)=>Promise<any>;close?:(payload:any)=>Promise<any>;worklet?:boolean;permission?:Promise<any>}={}){
+  const states:VoiceState[]=[],live:string[]=[],errors:Error[]=[],requests:{action:string;payload:any}[]=[],modules:string[]=[];
+  let stopped=0,closedContexts=0;
+  const track={stop(){stopped++;},onended:null as null|(()=>void)},stream={getTracks:()=>[track]};
+  class Port{
+    onmessage:((event:{data:any})=>void)|null=null;listeners:((event:{data:any})=>void)[]=[];tail:ArrayBuffer|null=null;
+    addEventListener(_type:string,listener:(event:{data:any})=>void){this.listeners.push(listener);}
+    emit(data:any){this.onmessage?.({data});for(const listener of this.listeners)listener({data});}
+    postMessage(message:any){if(message==='flush')queueMicrotask(()=>{if(this.tail)this.emit(this.tail);this.emit('flushed');});}
+  }
+  class Worklet{static latest:Worklet;port=new Port();constructor(){Worklet.latest=this;}connect(){}disconnect(){}}
+  class Context{
+    state='suspended';destination={};
+    audioWorklet=options.worklet===false?undefined:{addModule:async(url:string)=>{modules.push(url);}};
+    createGain(){return {gain:{value:1},connect(){}};}
+    createMediaStreamSource(){return {connect(){}};}
+    resume(){this.state='running';return Promise.resolve();}
+    close(){this.state='closed';closedContexts++;return Promise.resolve();}
+  }
+  replaceGlobal(t,'isSecureContext',true);
+  replaceGlobal(t,'navigator',{mediaDevices:{getUserMedia:()=>options.permission||Promise.resolve(stream)}});
+  replaceGlobal(t,'AudioContext',Context);replaceGlobal(t,'AudioWorkletNode',Worklet);
+  const callbacks:VoiceCallbacks={state:state=>states.push(state),text:()=>{throw new Error('streamed text replaces');},live:text=>live.push(text),error:error=>errors.push(error),keyboard:()=>{},
+    transcribe:async()=>{throw new Error('Claude streams');},
+    stream:async(action,payload)=>{
+      requests.push({action,payload});
+      if(action==='voice.stream.open')return options.open?options.open():{id:payload.id};
+      if(action==='voice.stream.audio')return options.audio?options.audio(payload):{text:`heard ${payload.seq}`};
+      if(action==='voice.stream.close')return options.close?options.close(payload):{text:'final text'};
+      return {cancelled:true};
+    }};
+  const input=createVoiceInput('claude',callbacks);t.after(()=>input.cancel());
+  const post=(...samples:number[])=>Worklet.latest.port.emit(new Int16Array(samples).buffer);
+  return {input,states,live,errors,requests,modules,post,Worklet,track,stopped:()=>stopped,closedContexts:()=>closedContexts};
+}
+
+test('Claude dictation streams PCM in order and fills the draft with the text so far',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  const f=streamFixture(t);f.input.start();await drain();
+  assert.deepEqual(f.states,['starting','recording']);assert.deepEqual(f.modules,['/pcm-worklet.js']);
+  const id=f.requests[0].payload.id;assert.equal(f.requests[0].action,'voice.stream.open');assert.match(id,/^[0-9a-f]{32}$/);
+  t.mock.timers.tick(200);await drain();assert.equal(f.requests.length,1,'nothing captured, nothing sent');
+  f.post(1,2);f.post(3);t.mock.timers.tick(200);await drain();
+  assert.deepEqual(f.requests[1],{action:'voice.stream.audio',payload:{id,seq:0,audio:Buffer.from(new Int16Array([1,2,3]).buffer).toString('base64')}});
+  assert.deepEqual(f.live,['heard 0']);
+  f.post(4);t.mock.timers.tick(200);await drain();assert.equal(f.requests[2].payload.seq,1);
+  // Stopping sends the worklet's last samples, then asks for the final text.
+  f.Worklet.latest.port.tail=new Int16Array([5]).buffer;f.input.stop();await drain();
+  assert.deepEqual(f.requests.slice(3).map(r=>[r.action,r.payload.seq]),[['voice.stream.audio',2],['voice.stream.close',3]]);
+  assert.deepEqual(f.live,['heard 0','heard 1','heard 2','final text']);
+  assert.equal(f.stopped(),1);assert.equal(f.closedContexts(),1);assert.equal(f.states.at(-1),'idle');assert.equal(f.errors.length,0);
+  assert.ok(!f.requests.some(r=>r.action==='voice.stream.cancel'),'a finished dictation is not cancelled');
+});
+
+test('Claude dictation shows only the newest answer and gathers audio while sends are slow',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  const answers:((value:any)=>void)[]=[];
+  const f=streamFixture(t,{audio:payload=>new Promise(resolve=>{answers[payload.seq]=resolve;})});f.input.start();await drain();
+  for(let i=0;i<6;i++){f.post(i);t.mock.timers.tick(200);await drain();}
+  // Four sends wait for answers; the rest of the audio waits to go in one piece.
+  assert.equal(f.requests.filter(r=>r.action==='voice.stream.audio').length,4);
+  answers[1]({text:'newer'});await drain();answers[0]({text:'older'});await drain();
+  assert.deepEqual(f.live,['newer']);
+  t.mock.timers.tick(200);await drain();
+  const merged=f.requests.filter(r=>r.action==='voice.stream.audio')[4].payload;
+  assert.equal(merged.seq,4);assert.deepEqual([...new Int16Array(new Uint8Array(Buffer.from(merged.audio,'base64')).buffer)],[4,5]);
+});
+
+test('Claude dictation failures keep the text already written and release the microphone',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  const f=streamFixture(t,{audio:payload=>payload.seq===0?Promise.resolve({text:'kept'}):Promise.reject({code:'voice_limit',message:'Claude 语音识别暂时达到限额'})});
+  f.input.start();await drain();f.post(1);t.mock.timers.tick(200);await drain();f.post(2);t.mock.timers.tick(200);await drain();
+  assert.deepEqual(f.live,['kept']);assert.match(f.errors[0].message,/限额/);assert.equal(f.stopped(),1);assert.equal(f.states.at(-1),'idle');
+  assert.equal(f.requests.at(-1)!.action,'voice.stream.cancel');
+  // A computer whose connector predates streaming says so.
+  const old=streamFixture(t,{open:()=>Promise.reject({code:'unsupported',message:'此操作暂不支持'})});old.input.start();await drain();
+  assert.match(old.errors[0].message,/连接器版本较旧/);
+  const unsupported=streamFixture(t,{worklet:false});unsupported.input.start();await drain();
+  assert.match(unsupported.errors[0].message,/切换识别方式/);assert.equal(unsupported.requests.length,0);
+});
+
+test('Claude dictation without words says so; cancelling tells the computer and ignores late answers',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  const silent=streamFixture(t,{close:async()=>({text:''})});silent.input.start();await drain();silent.input.stop();await drain();
+  assert.match(silent.errors[0].message,/没有录到声音/);
+  let answer!:(value:any)=>void;
+  const f=streamFixture(t,{audio:()=>new Promise(resolve=>{answer=resolve;})});f.input.start();await drain();
+  f.post(1);t.mock.timers.tick(200);await drain();f.input.cancel();answer({text:'too late'});await drain();
+  assert.deepEqual(f.live,[]);assert.equal(f.requests.at(-1)!.action,'voice.stream.cancel');assert.equal(f.stopped(),1);assert.equal(f.states.at(-1),'idle');
+  let grant!:(stream:any)=>void;
+  const pending=streamFixture(t,{permission:new Promise(resolve=>{grant=resolve;})});pending.input.start();pending.input.cancel();grant({getTracks:()=>[pending.track]});await drain();
+  assert.equal(pending.stopped(),1);assert.ok(!pending.requests.some(r=>r.action==='voice.stream.audio'));
 });
 
 test('microphone denial never uploads or changes the draft',async t=>{
@@ -283,4 +335,25 @@ test('voice requests allow slow uploads and transcription after the relay receip
   t.mock.timers.tick(60_000);await flush();assert.equal(failure,undefined);
   Socket.latest.receive({type:'received',id:request.id});t.mock.timers.tick(60_000);await flush();assert.equal(failure,undefined);
   Socket.latest.receive({type:'response',id:request.id,result:{text:'done'}});assert.deepEqual(await result,{text:'done'});
+});
+
+test('the audio worklet turns any device rate into 16 kHz 16-bit PCM about every 100 ms',async()=>{
+  const {runInNewContext}=await import('node:vm'),{readFileSync}=await import('node:fs');
+  const code=readFileSync(new URL('../web/public/pcm-worklet.js',import.meta.url),'utf8');
+  for(const rate of [48_000,44_100,16_000]){
+    let Processor:any;const posted:any[]=[];
+    runInNewContext(code,{sampleRate:rate,AudioWorkletProcessor:class{port={postMessage:(message:any)=>posted.push(message),onmessage:null as any};},registerProcessor:(name:string,value:any)=>{assert.equal(name,'pcm-16k');Processor=value;}});
+    const processor=new Processor();
+    // One second of a 440 Hz tone at half scale, in the 128-sample blocks a browser renders.
+    const input=Float32Array.from({length:rate},(_,i)=>0.5*Math.sin(2*Math.PI*440*i/rate));
+    for(let offset=0;offset<input.length;offset+=128)assert.equal(processor.process([[input.subarray(offset,offset+128)]]),true);
+    processor.port.onmessage({data:'flush'});
+    assert.equal(posted.at(-1),'flushed');
+    const chunks=posted.filter(message=>Object.prototype.toString.call(message)==='[object ArrayBuffer]').map(buffer=>new Int16Array(buffer));
+    assert.ok(chunks.slice(0,-1).every(chunk=>chunk.length===1600),'100 ms chunks');
+    const samples=chunks.reduce((sum,chunk)=>sum+chunk.length,0),peak=Math.max(...chunks.flatMap(chunk=>[...chunk]));
+    assert.ok(Math.abs(samples-16_000)<=1,`${rate}: ${samples} samples`);
+    assert.ok(peak>0.45*0x7fff&&peak<=0.5*0x7fff+1,`${rate}: peak ${peak}`);
+    assert.equal(processor.process([[]]),true,'a block without input keeps the node alive');
+  }
 });

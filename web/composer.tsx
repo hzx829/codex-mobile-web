@@ -48,7 +48,7 @@ export function Composer(props:Props){
     <FileAttachments files={attachments.files} disabled={props.locked||attachments.loading} remove={index=>attachments.setFiles(old=>old.filter((_,i)=>i!==index))}/>
     <ReadingStatus loading={attachments.loading}/>
     <UploadStatus progress={props.uploadProgress}/>
-    <VoiceStatus voice={props.voice}/>
+    <VoiceStatus voice={props.voice} mode={props.voiceMode}/>
     <textarea ref={props.input} aria-label="任务输入" placeholder={props.placeholder} value={props.draft} readOnly={props.readOnly} maxLength={props.maxLength} rows={1}
       onPaste={attachments.paste} onChange={e=>props.edit(e.target.value)} onKeyDown={e=>submitOnDesktop(e,props.submit)}/>
     <div className="composer-toolbar">

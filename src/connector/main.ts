@@ -18,6 +18,7 @@ import { GUEST_ENTRYPOINT, NoDesktop, preflight, returnLogins, useGuestHomes } f
 import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './guest-checks.js';
 import { setWorkspace } from './project.js';
 import { recordClaudeTurn } from './usage-meter.js';
+import { ClaudeVoiceAuth, ClaudeVoiceStreams } from './claude-voice.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -53,6 +54,9 @@ const control=new Control(ledger,undefined,guest?new NoDesktop():undefined);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
 const bridges:ServiceBridge[]=[];
+// Dictation streams through Claude Code's login on this computer; Claude Code renews that login when it has expired.
+let renewClaudeLogin=async()=>{};
+const voiceStreams=new ClaudeVoiceStreams(new ClaudeVoiceAuth(()=>renewClaudeLogin()));
 if(available.includes('claude')){
   // CLAUDE_CODE_ENTRYPOINT: by default 'codex-mobile-web', which the terminal's `claude --resume` list shows; `claudeEntrypoint`
   // overrides it. A guest's sessions use 'sdk-ts', which that list hides. See docs/claude-local/M1-RESULTS.md.
@@ -62,6 +66,7 @@ if(available.includes('claude')){
   const configuredMode=PERMISSION_MODES.find(mode=>mode===config.claudePermissionMode);
   const defaultMode=guest?'default':configuredMode||'bypassPermissions';
   const claudeRuntime=new ClaudeRuntime(sdkQuery,undefined,undefined,entrypoint,defaultMode);
+  renewClaudeLogin=()=>claudeRuntime.renewLogin(guest?.workspace);
   claudeRuntime.on('turn',(session,result,opId)=>recordClaudeTurn(ledger,session.id,session.usageBaseline,result,opId));
   const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,claudeRuntime);
   // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
@@ -122,6 +127,12 @@ function connect() {
     if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
     if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
     if(m.type!=='request')return;
+    const respond=(promise:Promise<Json>)=>promise.then(result=>{if(socket===ws)send({type:'response',id:m.id,result});},e=>{
+      const err=e instanceof BridgeError?e:new BridgeError('computer_error','电脑处理失败，请查看本机状态');
+      if(socket===ws)send({type:'response',id:m.id,error:{code:err.code,message:err.message,uncertain:err.uncertain}});
+    });
+    // Audio is taken in the order it arrives, before anything else can interleave.
+    if(typeof m.action==='string'&&m.action.startsWith('voice.stream.')){void respond(voiceStreams.handle(m.action,m.payload&&typeof m.payload==='object'?m.payload:{}));return;}
     try{
       // Operations started by this request record the team member the relay names as its sender.
       const result=await requestActor.run(actorOf(m.actor),async()=>m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
@@ -134,7 +145,7 @@ function connect() {
   ws.on('error',()=>{});
   ws.on('close',code=>{
     clearInterval(proxyBackpressure);proxyBackpressure=undefined;usageSending=false;
-    void browserPreview.stop();
+    void browserPreview.stop();voiceStreams.dropAll();
     clearTimeout(authTimer);clearInterval(pulse);if(stopping)return;
     if(code===4401||code===4409){
       console.error(code===4401?(guest?'连接 Token 不匹配，请检查中继配置':'连接 Token 不匹配，请在电脑更新配置'):'同一电脑连接已被替换');
@@ -177,4 +188,4 @@ if(guest&&process.env.BRIDGE_GUEST_CHECK!=='0'){
     void checkClaude(sdkQuery as unknown as ClaudeLoader,guest.workspace).then(result=>report('Claude Code',result));
   }
 }
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();services.close();socket?.close();control.close();process.exit(0);});
+for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();voiceStreams.close();services.close();socket?.close();control.close();process.exit(0);});
