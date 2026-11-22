@@ -58,6 +58,8 @@ const REMEMBER={session:'本会话允许',project:'本项目始终允许',user:'
 /** The level Claude Code marks as recommended; shown until one is chosen here. */
 const RECOMMENDED_EFFORT='medium';
 function load(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
+/** The last model chosen for new sessions; "default" was a list entry before the list dropped it. */
+function storedModel(machine:string){const value=load(`claude:${machine}:model`);return value==='default'?'':value;}
 function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
 
 /** Claude Code sessions on the connected computer: live view, composer, approvals and questions. */
@@ -69,7 +71,7 @@ export function ClaudeCodePanel(props:Props){
   const [draft,setDraft]=useState(()=>load(`${scope}:draft`)),[pending,setPending]=useState(()=>load(`${scope}:pending`));
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   // A saved session keeps its own model and effort until changed here; the last choice only seeds new sessions.
-  const [model,setModel]=useState(()=>creating?load(`claude:${machine}:model`):''),[effort,setEffort]=useState(()=>creating?load(`claude:${machine}:effort`):''),[mode,setMode]=useState('');
+  const [model,setModel]=useState(()=>creating?storedModel(machine):''),[effort,setEffort]=useState(()=>creating?load(`claude:${machine}:effort`):''),[mode,setMode]=useState('');
   const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null),[menuPoint,setMenuPoint]=useState<MenuPoint|null>(null),[statusPoint,setStatusPoint]=useState<MenuPoint|null>(null);
   const [models,setModels]=useState<Json[]|null>(null),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]),[defaultMode,setDefaultMode]=useState('');
   const request=useRef(call);request.current=call;
@@ -243,12 +245,14 @@ export function ClaudeCodePanel(props:Props){
   const title=creating?'新的 Claude Code 会话':view?.title||'正在打开…';
   const project=creating?(startPath?workspaceName(startPath):'选择项目'):view?.cwd?workspaceName(view.cwd):'Claude Code';
   // Codex-shaped entries for the shared picker. Older connectors list no effort levels: then only the model is chosen.
-  const pickerModels:Json[]=(models||[]).map(item=>({model:item.id,displayName:item.label,description:item.description,resolvedModel:item.resolvedModel,
+  // Claude Code lists its default as a model of its own; the recommended tag already says it, so the list leaves it out.
+  const defaultEntry=(models||[]).find(item=>item.id==='default');
+  const pickerModels:Json[]=(models||[]).filter(item=>item!==defaultEntry).map(item=>({model:item.id,displayName:item.label,description:item.description,resolvedModel:item.resolvedModel,
     supportedReasoningEfforts:(item.efforts||[]).map((level:string)=>({reasoningEffort:level})),
     ...(item.efforts?.includes(RECOMMENDED_EFFORT)?{defaultReasoningEffort:RECOMMENDED_EFFORT}:{})}));
   const tuning=!models||pickerModels.some(item=>item.supportedReasoningEfforts.length);
-  // What the session runs on now: its own model matched to the list, or Claude Code's default for a new one.
-  const listed=creating?pickerModels[0]:listedModel(pickerModels,view?.model);
+  // What the session runs on now: its own model matched to the list, or the model Claude Code's default resolves to for a new one.
+  const listed=creating?listedModel(pickerModels,defaultEntry?.resolvedModel)||pickerModels[0]:listedModel(pickerModels,view?.model);
   // As in Claude Code, effort is never "default": the session's own level, else the last one chosen here, else the recommended one.
   const currentModel={model:listed?.model||view?.model||'',effort:view?.effort||load(`claude:${machine}:effort`)||RECOMMENDED_EFFORT};
   const selection=resolveModelSelection(pickerModels,{model,effort},currentModel);
