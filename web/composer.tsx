@@ -22,7 +22,7 @@ type Props={
   /** Left of the model: the permission control, when the runtime has permission levels. */
   permission?:ReactNode;model?:ReactNode;
   /** A turn the phone can stop. With `queue`, a draft can still be sent to wait for it; otherwise only stopping is offered. */
-  running?:{stop:()=>void;disabled:boolean;queue:boolean};
+  running?:{stop:()=>void;disabled:boolean;queue:boolean;label?:string};
   send:{label:string;sending:boolean;disabled:boolean};
 };
 
@@ -57,7 +57,7 @@ export function Composer(props:Props){
       {props.model}
       <div className="composer-actions">
         <VoiceButton voice={props.voice} mode={props.voiceMode} connected={props.connected} disabled={props.voiceDisabled} starting={props.onVoiceStart}/>
-        {running&&<IconButton icon="stop" label="停止当前任务" className="black round stop" disabled={running.disabled} onClick={running.stop}/>}
+        {running&&<IconButton icon="stop" label={running.label||'停止当前任务'}className="black round stop" disabled={running.disabled} onClick={running.stop}/>}
         {showSend&&<SendMessageButton sending={send.sending} label={send.label} disabled={send.disabled}/>}
       </div>
     </div>

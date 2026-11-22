@@ -209,6 +209,22 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .followup { border: 1px solid var(--line-strong); background: #fff; font-size: 13px; line-height: 1.4; padding: 8px 13px; margin: 5px 0 12px; border-radius: 999px; color: var(--fg); }
 .turn-status { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--fg-3); font-size: 12px; margin: 2px 0 6px; }
 .turn-status:empty { display: none; }
+.plan-card { list-style: none; margin: 4px 0 10px; padding: 8px 12px; max-width: 560px; border: 1px solid var(--line-strong); border-radius: 14px; background: #fff; font-size: 13px; }
+.plan-step { display: flex; align-items: flex-start; gap: 9px; padding: 4px 0; color: var(--fg-3); }
+.plan-step.in_progress { color: var(--fg); font-weight: 500; }
+.plan-step.completed .plan-text { color: var(--fg-2); }
+.plan-mark { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-top: 2px; border-radius: 50%; border: 1.5px dashed var(--fg-3); box-sizing: border-box; }
+.plan-step.completed .plan-mark { border: 0; background: var(--fg-2); color: #fff; }
+.plan-step.in_progress .plan-mark { border: 1.5px solid var(--line-strong); border-top-color: var(--fg); }
+.plan-step.in_progress.running .plan-mark { animation: plan-spin .9s linear infinite; }
+@keyframes plan-spin { to { transform: rotate(360deg); } }
+.plan-text { min-width: 0; overflow-wrap: anywhere; }
+.running-step { display: flex; align-items: center; gap: 8px; margin: 2px 0 12px; font-size: 13px; min-width: 0; }
+.running-step-mark { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: #d97757; animation: pulse-dot 1.6s ease-in-out infinite; }
+.running-step-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.running-step-time { flex-shrink: 0; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .plan-step.in_progress.running .plan-mark, .running-step-mark { animation: none; } }
 .diff-card { display: flex; align-items: center; gap: 10px; width: 100%; max-width: 440px; margin: 4px 0 8px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 14px; background: #fff; font-size: 13px; color: var(--fg); text-align: left; }
 .diff-card > svg { color: var(--fg-2); }
 .diff-card-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }

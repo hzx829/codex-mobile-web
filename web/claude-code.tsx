@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import {ConversationStatus,ConversationTurn,PendingMessage,connectionLost} from './conversation';
+import {ConversationStatus,ConversationTurn,PendingMessage,RunningStep,connectionLost} from './conversation';
 import {ThreadMenu} from './thread-menu';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {optimisticDelivered,optimisticMessage,OPTIMISTIC_ACCEPTED_MS,type OptimisticMessage} from './optimistic';
@@ -198,13 +198,16 @@ export function ClaudeCodePanel(props:Props){
       await mutate('claude.create',{cwd:startPath,text,images,...settings},result=>{cleared();props.created(result.conversationId);},upload({cwd:startPath}));
       return;
     }
-    if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
+    // A turn the computer reports under way holds the message in its queue until it ends. Otherwise the session may just have
+    // been used there (or the connector is older): the phone says it has ended before continuing it.
+    const forceIdle=external&&view?.externalStatus!=='busy'&&view?.externalStatus!=='waiting';
+    if(forceIdle&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
     if(!keepCache())return;
     stick.current=true;
     // Queued messages appear in the queue; everything else appears in the conversation now.
     const message=queueNext?null:{...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,files.map(file=>file.name)),baseline:userIds(view)};
     if(message)setOutgoing(message);
-    const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(external?{confirmIdle:true}:{})},
+    const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(forceIdle?{confirmIdle:true}:{})},
       result=>{cleared();if(selectedMode==='bypassPermissions'&&oneShotBypass)setMode('');
         setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='sent_now'?'已立即发送':'');},upload({conversationId}));
     if(message)setOutgoing(old=>old!==message?old:accepted?{...message,acceptedAt:Date.now()}:null);
@@ -317,6 +320,7 @@ export function ClaudeCodePanel(props:Props){
         <SenderScope senders={turns.flatMap(turn=>turn.items.map(item=>item.sender))}>{turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source="connector"  latestUser={false} disabled={!canWrite}
           openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={editTurn} onFork={fork} onDiff={diff} onBlocked={setNotice} editBlocked={!view?.truncated&&turn.id===turns[0]?.id?FIRST_MESSAGE:undefined}/>)}</SenderScope>
         {outgoing&&<PendingMessage message={outgoing} openFile={openFile} openPreview={openPreview} onFollowup={followup}/>}
+        {running&&!outgoing&&<RunningStep turn={turns.at(-1)} waiting={view?.externalStatus==='waiting'?view.waitingFor||'':undefined}/>}
         {view&&!turns.length&&!running&&<p className="muted">这条会话还没有可显示的消息。</p>}
         {view?.error&&<ConversationStatus>{view.error}</ConversationStatus>}
       </>}
@@ -328,7 +332,6 @@ export function ClaudeCodePanel(props:Props){
       {(error||previewError)&&<div className="feedback error" role="alert"><span>{error||previewError}</span><IconButton icon="close" label="关闭提示" onClick={()=>{setError('');clearPreviewError();}}/></div>}
       {notice&&<div className="feedback" role="status">{notice}</div>}
       {pending&&!busy&&<div className="pending"><button onClick={()=>void check()} disabled={!connected}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先在会话和电脑上确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
-      {running&&view?.controlled&&<div className="running-status"><i className="dot online"/>Claude Code 正在处理</div>}
       {!creating&&<QueuedMessages messages={queued} disabled={!connected||busy||Boolean(pending)} canSteer={controlledRun} withdrawBlocked={voiceBusy||attachments.loading}
         attachmentsFull={message=>attachmentCount+message.imageCount>MAX_IMAGES||images.reduce((sum,url)=>sum+imageBytes(url),0)+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
         onSteer={queuedId=>void mutate('claude.steerQueued',{conversationId,queuedId},()=>setNotice('已追加到当前任务'))}
@@ -345,7 +348,9 @@ export function ClaudeCodePanel(props:Props){
           models={pickerModels} value={{model,effort}} current={currentModel}
           currentLabel={currentLabel} onChange={chooseModel}
           status={modelsError?<p role="alert">{modelsError} <button type="button" onClick={()=>void openModels()}>重试</button></p>:!models?<p role="status">正在读取模型…</p>:!models.length&&<p role="status">没有可选模型</p>}/>}
-        running={controlledRun?{stop:()=>void mutate('claude.stop',{conversationId}),disabled:!connected||busy||Boolean(pending),queue:true}:undefined}
+        running={controlledRun?{stop:()=>void mutate('claude.stop',{conversationId}),disabled:!connected||busy||Boolean(pending),queue:true}
+          // Run by the desktop app or a terminal: the phone cannot stop it, but shows it is running as that app does.
+          :running&&external?{stop:()=>{},disabled:true,queue:true,label:'这一轮在电脑上运行，请在电脑上停止'}:undefined}
         send={{label:queueNext?'完成后发送':'发送消息',sending:Boolean(pending&&busy),disabled:!canSend||!drafted||creating&&!startPath}}/>
       {pick.inputs}
     </footer>

@@ -12,6 +12,7 @@ import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './
 import {CLAUDE_EFFORTS, ClaudeRuntime, PERMISSION_MODES, type ClaudeEffort, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
 import {claudeArtifactTitles, claudePatches, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
+import {entryTimestamp, readPeerStatuses, type PeerStatus} from './claude-progress.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
 import {claudeUserText, sendersByText} from './message-senders.js';
 
@@ -87,6 +88,7 @@ export class ClaudeCodeBridge {
   private closed = false;
   /** Transcript versions this connector wrote itself (a rename), which must not look like a terminal at work. */
   private ownWrites = new Map<string, bigint>();
+  private peers?: {at: number; value: Promise<Map<string, PeerStatus>>};
   readonly runtime: ClaudeRuntime;
   /** Shows claude.ai Artifacts through this computer; unset where the connector has no browser profile. */
   artifacts?: ArtifactViewer;
@@ -182,8 +184,19 @@ export class ClaudeCodeBridge {
     if (path && guestWorkspace()) await checkProjectPath(path, this.root);
     const info = path ? await stat(path, {bigint: true}).catch(() => {this.paths.delete(id);return null;}) : null;
     if (!info && !live) throw new BridgeError('missing', 'Claude Code 会话已移动或删除，请刷新列表');
-    const external = !guestWorkspace() && !live && info !== null && this.now() - Number(info.mtimeMs) < ACTIVE_MS && this.ownWrites.get(id) !== info.mtimeNs;
-    return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${live ? live.version : external ? 'external' : '-'}:${this.queueVersions.get(id) || 0}`, external, exists: Boolean(info)};
+    const elsewhere = !guestWorkspace() && !live && info !== null;
+    // The process holding it (the desktop app, a terminal) reports whether a turn is under way, however long a call takes;
+    // without that report, recent transcript writes are the only sign.
+    const peer = elsewhere ? (await this.peerStatuses()).get(id) : undefined;
+    const external = elsewhere && (peer ? peer.status !== 'idle' : this.now() - Number(info!.mtimeMs) < ACTIVE_MS && this.ownWrites.get(id) !== info!.mtimeNs);
+    const marker = live ? live.version : external ? peer?.status || 'external' : '-';
+    return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${marker}:${this.queueVersions.get(id) || 0}`, external, peer: external ? peer : undefined, exists: Boolean(info)};
+  }
+
+  /** Claude Code's own reports of the sessions its processes hold, read at most twice a second. */
+  private peerStatuses() {
+    if (!this.peers || this.now() - this.peers.at > 500) this.peers = {at: this.now(), value: readPeerStatuses(this.root).catch(() => new Map())};
+    return this.peers.value;
   }
 
   private async info(id: string) {
@@ -219,7 +232,7 @@ export class ClaudeCodeBridge {
     const running = live ? live.running : external;
     // Edits keep their diffs only in the raw transcript; read it alongside the SDK's messages.
     const raw = current.exists ? await this.transcript(id).then(path => readFile(path, 'utf8'), () => '') : '';
-    const turns = claudeTurns(messages, running, claudePatches(raw, info?.cwd || live?.cwd || ''), claudeArtifactTitles(raw));
+    const turns = claudeTurns(messages, running, claudePatches(raw, info?.cwd || live?.cwd || ''), claudeArtifactTitles(raw), uuid => entryTimestamp(raw, uuid));
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
     const records = this.ledger?.senders('claude', id) || [];
     if (records.length) {
@@ -242,12 +255,16 @@ export class ClaudeCodeBridge {
     return {
       id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', effort: live?.effort || '', revision: current.revision, running,
       controlled: Boolean(live), external, permissionMode: live?.permissionMode || '',
+      // 'busy' or 'waiting' as the process holding it reports; 'recent' when only recent transcript writes suggest it.
+      externalStatus: external ? current.peer?.status || 'recent' : '', ...(current.peer?.waitingFor ? {waitingFor: current.peer.waitingFor} : {}),
       defaultPermissionMode: this.runtime.defaultMode, canBypass: Boolean(live?.canBypass), requests: live?.pending || [], error: live?.error || '',
       queuedMessages: (this.queue?.queued(id) || []).map(message => ({id: message.id, text: message.payload.text || '',
         imageCount: message.payload.images?.length || 0, imageBytes: (message.payload.images || []).reduce((sum: number, url: string) => sum + imageBytes(url), 0),
         state: message.state, error: message.error})),
       turns: recent.reverse(), truncated: recent.length < turns.length, contextUsage,
-      notice: external ? '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。' : '',
+      notice: !external ? '' : current.peer?.status === 'waiting' ? `电脑上的 Claude Code 正在等待电脑上的操作${current.peer.waitingFor ? `（${current.peer.waitingFor}）` : ''}。`
+        : current.peer && this.queue ? '电脑上的 Claude Code 正在运行这条会话。手机发送的消息会排队，等那边这一轮结束后发送。'
+        : '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。',
     };
   }
 
@@ -294,9 +311,10 @@ export class ClaudeCodeBridge {
       const projects = !offset && !search
         ? guestWorkspace() ? (await workspaceProjects(paths)).map(item => ({...item, id: item.path})) : paths.map(path => ({id: path, path}))
         : undefined;
-      const now = this.now();
+      const now = this.now(), peers = guestWorkspace() ? new Map<string, PeerStatus>() : await this.peerStatuses();
+      const elsewhere = (info: SessionInfo) => {const peer = peers.get(info.sessionId);return peer ? peer.status !== 'idle' : !guestWorkspace() && now - info.lastModified < ACTIVE_MS;};
       return {data: page.map(info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,
-        running: this.runtime.get(info.sessionId)?.running ?? (!guestWorkspace() && now - info.lastModified < ACTIVE_MS)})), hasMore: matches.length > offset + PAGE, projects,
+        running: this.runtime.get(info.sessionId)?.running ?? elsewhere(info)})), hasMore: matches.length > offset + PAGE, projects,
         defaultPermissionMode: this.runtime.defaultMode};
     }
     if (action === 'claude.operation') {
@@ -367,8 +385,10 @@ export class ClaudeCodeBridge {
         try {
           const text = await this.attach(sessionScope(id), input.text, input.files);
           let session = this.runtime.get(id);
-          // Behind a running turn, or behind messages already waiting, a plain send waits its turn on this computer.
-          if (delivery === 'queue' && this.queue && (session?.running || session?.requests.size || this.queue.queued(id).length)) {
+          // Behind a running turn (here, or one the desktop app or a terminal reports under way), or behind messages already
+          // waiting, a plain send waits its turn on this computer. Recent writes alone are a guess, which the phone confirms instead.
+          const behind = session ? session.running || session.requests.size > 0 : delivery === 'queue' && Boolean(this.queue) && Boolean((await this.revision(id)).peer);
+          if (delivery === 'queue' && this.queue && (behind || this.queue.queued(id).length)) {
             await this.info(id);
             this.queue.enqueue(textRequired(p.opId, '操作标识', 100), id, {text, images: input.images, model, ...(effort ? {effort} : {}), permissionMode: mode});
             this.queueChanged(id);

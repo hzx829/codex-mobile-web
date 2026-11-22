@@ -1,5 +1,6 @@
 import {isAbsolute, relative} from 'node:path';
-import type {MessageItem, TurnView} from '../shared/types.js';
+import type {MessageItem, PlanStep, TurnView} from '../shared/types.js';
+import {applyPlan, isPlanTool} from './claude-progress.js';
 
 /** A message as returned by the Agent SDK's getSessionMessages. */
 export type ClaudeMessage = {type: string; uuid: string; message?: unknown; parent_tool_use_id?: string | null};
@@ -10,6 +11,7 @@ const MAX_TOOL_TEXT = 4000;
 const MAX_INLINE_IMAGE = 2 * 1024 * 1024;
 const fileTools = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const searchTools = new Set(['Grep', 'Glob', 'LS']);
+const PLAN_MARKS: Record<PlanStep['status'], string> = {completed: '[x]', in_progress: '[~]', pending: '[ ]'};
 
 function clip(text: string, max = MAX_TOOL_TEXT) {return text.length > max ? text.slice(0, max) + '\n…' : text;}
 const str = (value: unknown) => typeof value === 'string' ? value : '';
@@ -138,9 +140,15 @@ export function claudeArtifactTitles(transcript: string): Map<string, string> {
 }
 
 /** `titles`: names known from elsewhere (the raw transcript, a saved snapshot), used where the messages give none. */
-export function claudeTurns(messages: ClaudeMessage[], running = false, patches?: Map<string, string>, titles?: Map<string, string>): TurnView[] {
+export function claudeTurns(messages: ClaudeMessage[], running = false, patches?: Map<string, string>, titles?: Map<string, string>,
+  /** When the transcript entry with this uuid was written (ISO), or ''. */
+  timeOf?: (uuid: string) => string): TurnView[] {
   const turns: TurnView[] = [];
   const tools = new Map<string, MessageItem>();
+  // Calls still waiting for their result, in call order: the latest is what a running turn is doing.
+  const open = new Map<string, {item: MessageItem; turn: TurnView; entry: string; text: string}>();
+  // A plan carries across turns: the desktop app's update_plan can change the last one by step number.
+  let plan: PlanStep[] | undefined;
   // claude.ai Artifacts a turn created or changed, shown under the turn like Codex's file-change card.
   const pageCalls = new Map<string, {turn: TurnView; input: Record<string, unknown>; id: string; shown: boolean}>();
   const pageTitles = new Map<string, string>(titles);
@@ -159,6 +167,10 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
   for (const item of turns) item.canFork = Boolean(item.anchor) && item.status !== 'inProgress';
   const last = turns.at(-1);
   if (last && running && last.status === 'completed') {last.status = 'inProgress';last.canFork = false;}
+  if (last?.status === 'inProgress') {
+    const call = [...open.values()].findLast(value => value.turn === last), at = timeOf?.(call?.entry || last.anchor || '');
+    last.step = {text: call?.text || '', ...(call ? {type: call.item.type, item: call.item.id} : {}), ...(at ? {startedAt: at} : {})};
+  }
   // A page named after it first appeared takes that name everywhere.
   for (const item of turns) for (const page of item.pages || []) page.title = pageTitles.get(page.url) || page.title;
   // Pages published in earlier turns are repeated on the newest one, latest first, so the session's pages stay in reach.
@@ -203,6 +215,7 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
           const output = clip(resultText(block.content).trim());
           if (tool && output) tool.text = tool.text ? `${tool.text}\n${output}` : output;
           if (tool && block.is_error) tool.text = `${tool.text}\n（失败）`;
+          open.delete(block.tool_use_id);
           const patch = patches?.get(block.tool_use_id), owner = toolTurns.get(block.tool_use_id);
           if (patch && owner && !block.is_error && (owner.diff?.length || 0) + patch.length <= MAX_TURN_DIFF) owner.diff = (owner.diff || '') + patch;
           const call = pageCalls.get(block.tool_use_id);
@@ -241,7 +254,18 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
         const item: MessageItem = {id, role: 'activity', ...toolActivity(block)};
         if (!item.files) delete item.files;
         target.items.push(item);
-        if (block.id) {tools.set(block.id, item);toolTurns.set(block.id, target);}
+        if (isPlanTool(block.name)) {
+          const next = applyPlan(plan, block.name, block.input);
+          if (next) {
+            plan = target.plan = next;
+            item.type = 'plan';
+            item.text = next.map(step => `${PLAN_MARKS[step.status]} ${step.text}`).join('\n');
+          }
+        }
+        if (block.id) {
+          tools.set(block.id, item);toolTurns.set(block.id, target);
+          open.set(block.id, {item, turn: target, entry: entry.uuid, text: (str(block.input?.description) || '').trim().slice(0, 200)});
+        }
         if (block.id && changesArtifact(block)) pageCalls.set(block.id, {turn: target, input: block.input || {}, id: block.id, shown: showsArtifact(block)});
       }
     });

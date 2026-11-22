@@ -12,7 +12,12 @@ export interface BridgeRequest { id: string; action: RequestAction; payload: Jso
 /** `sender`: the team member who sent a user message from the phone, when the connector recorded it. */
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[]; sender?: TeamMember }
 /** `anchor`: the last transcript entry of the turn, where a Claude Code fork ends. `pages`: claude.ai Artifacts the turn published; on the newest turn also those of earlier turns (`earlier`). `changed`: the turn's latest call that changed the page; `shown`: its latest call that put the page in front of the user. */
-export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string; anchor?: string; pages?: {url: string; title: string; earlier?: boolean; changed?: string; shown?: string}[] }
+export interface TurnView { id: string; status: string; items: MessageItem[]; canFork: boolean; diff?: string; error?: string; revision?: string; anchor?: string; pages?: {url: string; title: string; earlier?: boolean; changed?: string; shown?: string}[];
+  /** The plan as the turn left it (Claude Code's plan tools). */
+  plan?: PlanStep[];
+  /** On a turn under way: what it is doing now. `item`: the activity item of the call still running; `startedAt`: when that began (ISO). */
+  step?: {text: string; type?: string; item?: string; startedAt?: string} }
+export interface PlanStep { text: string; status: 'pending' | 'in_progress' | 'completed' }
 export interface TurnCursor { before: string; native?: string }
 export const turnFinished=(status:unknown)=>status==='completed'||status==='interrupted'||status==='failed';
 export interface ContextUsage { usedTokens: number; windowTokens: number | null }

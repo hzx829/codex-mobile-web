@@ -1,5 +1,5 @@
-import {memo,useMemo,useRef,useState,type ReactNode} from 'react';
-import {turnFinished,type TurnView,type SessionView,type MessageItem,type TeamMember} from '../src/shared/types';
+import {memo,useEffect,useMemo,useRef,useState,type ReactNode} from 'react';
+import {turnFinished,type TurnView,type SessionView,type MessageItem,type PlanStep,type TeamMember} from '../src/shared/types';
 import {SafeMarkdown} from './content';
 import {groupItems} from './activity';
 import {Icon} from './icons';
@@ -41,10 +41,35 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
       const body=<><SafeMarkdown text={item.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}</>;
       return item.role==='user'?<UserMessage key={item.id} sender={item.sender} text={item.text} editReason={editReason} disabled={disabled} blocked={onBlocked} copy={()=>onCopy(item.text)} resend={text=>onEdit(turn.id,item.id,text)}>{body}</UserMessage>:<article className={`message ${item.role}`} key={item.id}>{body}</article>;
     }))}
+    {turn.plan&&<PlanCard steps={turn.plan} running={turn.status==='inProgress'}/>}
     {turn.status!=='completed'&&<div className="turn-status">{statusLabel[turn.status]||turn.status}</div>}{turn.diff&&<DiffCard diff={turn.diff} open={()=>onDiff(turn)}/>}{turn.pages?.map(page=><button type="button" key={page.url} className="diff-card" onClick={()=>openPreview(page.url)} aria-label={`查看页面 ${page.title}`}><Icon name="browser" size={18}/><span className="diff-card-title">{page.title||'claude.ai 页面'}</span>{page.earlier&&<span className="diff-card-note">之前的轮次</span>}<span className="diff-card-open">查看<Icon name="chevron" size={14}/></span></button>)}{turn.error&&<p className="error">{turn.error}</p>}
     {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/><IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/></div>}
   </section>;
 });
+/** The plan as the turn left it, as Claude's own app shows it: done, under way, still to do. */
+function PlanCard({steps,running}:{steps:PlanStep[];running:boolean}){
+  const done=steps.filter(step=>step.status==='completed').length;
+  return <ol className="plan-card" aria-label={`计划：已完成 ${done}/${steps.length} 步`}>{steps.map((step,index)=><li key={index} className={`plan-step ${step.status}${running?' running':''}`}>
+    <span className="plan-mark" aria-hidden="true">{step.status==='completed'&&<Icon name="check" size={12}/>}</span>
+    <span className="plan-text">{step.text}{step.status!=='pending'&&<span className="visually-hidden">{step.status==='completed'?'（已完成）':'（进行中）'}</span>}</span>
+  </li>)}</ol>;
+}
+/** "6分钟17秒", as Claude's own app counts a step's time. */
+export function elapsedLabel(ms:number){
+  const total=Math.max(0,Math.floor(ms/1000)),hours=Math.floor(total/3600),minutes=Math.floor(total/60)%60,seconds=total%60;
+  return hours?`${hours}小时${minutes}分钟`:minutes?`${minutes}分钟${seconds}秒`:`${seconds}秒`;
+}
+/** What a running turn is doing now and for how long: the running call's own description, else what kind of call it is. */
+export function RunningStep({turn,waiting}:{turn?:TurnView;waiting?:string}){
+  const step=turn?.status==='inProgress'?turn.step:undefined,since=step?.startedAt?Date.parse(step.startedAt):NaN;
+  const [now,setNow]=useState(Date.now);
+  useEffect(()=>{if(!Number.isFinite(since))return;setNow(Date.now());const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[since]);
+  const item=step?.item?turn!.items.find(entry=>entry.id===step.item):undefined;
+  const label=waiting!==undefined?`等待电脑上的操作${waiting?`（${waiting}）`:''}`:step?.text
+    ||(step?.type?[activityLabel[step.type]||'使用工具',item?.text.split('\n')[0].slice(0,80)].filter(Boolean).join(' '):'正在思考');
+  return <div className="running-step" role="status"><span className="running-step-mark" aria-hidden="true"/><span className="running-step-text shimmer">{label}</span>
+    {Number.isFinite(since)&&<span className="running-step-time" aria-hidden="true">{elapsedLabel(now-since)}</span>}</div>;
+}
 export function ActivityGroup({items,running,openFile}:{items:MessageItem[];running:boolean;openFile:(path:string)=>void}){
   const [open,setOpen]=useState(false);
   return <details className="activity-group" onToggle={e=>setOpen(e.currentTarget.open)}><summary><span className={running?'activity-label shimmer':'activity-label'}>{running?'正在处理':'运行记录'} · {items.length} 项</span><span className="activity-excerpt">{activityLabel[items.at(-1)!.type]||'任务活动'}</span><Icon name="chevron" size={14}/></summary>{open&&<div className="activity-list">{items.map(item=><ActivityItem key={item.id} item={item} openFile={openFile}/>)}</div>}</details>;
