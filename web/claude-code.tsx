@@ -188,6 +188,7 @@ export function ClaudeCodePanel(props:Props){
       return;
     }
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
+    if(!keepCache())return;
     stick.current=true;
     // Queued messages appear in the queue; everything else appears in the conversation now.
     const message=queueNext?null:{...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,files.map(file=>file.name)),baseline:userIds(view)};
@@ -212,6 +213,7 @@ export function ClaudeCodePanel(props:Props){
   /** Rewrites a sent message: the session continues from the turn before it, as Codex does. */
   async function resend(turnId:string,text:string){
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
+    if(!keepCache())return;
     const settings={...(model?{model}:{}),...(sentEffort?{effort:sentEffort}:{}),...(selectedMode&&(selectedMode!=='bypassPermissions'||bypassLater)?{permissionMode:selectedMode}:{})};
     stick.current=true;
     await mutate('claude.edit',{conversationId,turnId,text,...settings,...(external?{confirmIdle:true}:{})});
@@ -269,6 +271,15 @@ export function ClaudeCodePanel(props:Props){
   const sentEffort=models&&!selection.efforts.length?'':selection.effort;
   const currentLabel=modelDisplayName(listed,view?.model)||'默认模型';
   const modelLabel=modelDisplayName(selection.model,selection.id)||'默认模型',effortLabel=reasoningLabel(sentEffort);
+  // Prompt caches belong to one model, and an effort change drops the cached conversation too, so the next message
+  // reads the whole conversation again at full price. Only a change from what the session is known to run on is asked about.
+  const changedModel=Boolean(!creating&&model&&listed&&model!==listed.model);
+  const changedEffort=Boolean(!creating&&!changedModel&&view?.effort&&sentEffort&&sentEffort!==view.effort);
+  function keepCache(){
+    if(!turns.length||!changedModel&&!changedEffort)return true;
+    const change=changedModel?`模型从 ${currentLabel} 换成 ${modelLabel}`:`思考强度从 ${reasoningLabel(view?.effort||'')} 改成 ${effortLabel}`;
+    return window.confirm(`${change}后，这条会话已有的提示缓存将无法复用，下一条消息会按全价重新读取全部上下文，响应也会变慢。继续发送？`);
+  }
   const controlledRun=running&&Boolean(view?.controlled);
   return <main className="thread-panel" inert={inert}>
     <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}>
