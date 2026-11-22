@@ -11,6 +11,8 @@ type PickerProps={
   tuning?:boolean;
   /** The fast tier button; off for runtimes that tune effort only. */
   speed?:boolean;
+  /** The button that drops the choice and keeps the chat's own settings; off where every choice is concrete. */
+  resettable?:boolean;
   /** Without tuning: what "keep the current model" shows, and the dialog's name. */
   currentLabel?:string;label?:string;
   /** Loading, error or empty-list line under the models. */
@@ -21,9 +23,10 @@ export function ModelPicker({point,anchor,close,...props}:PickerProps&{point:Men
   return props.tuning===false?<ModelList {...props} point={point} anchor={anchor} close={close}/>:<TunedModelPicker {...props} point={point} anchor={anchor} close={close}/>;
 }
 
-function TunedModelPicker({point,anchor,models,value,current,disabled=false,onChange,close,status,speed=true}:PickerProps&{point:MenuPoint;anchor?:HTMLElement|null;close:()=>void}){
+function TunedModelPicker({point,anchor,models,value,current,disabled=false,onChange,close,status,speed=true,resettable=true}:PickerProps&{point:MenuPoint;anchor?:HTMLElement|null;close:()=>void}){
   const [expanded,setExpanded]=useState(false),modelButton=useRef<HTMLButtonElement>(null),listId=useId();
   const selected=resolveModelSelection(models,value,current),index=selected.efforts.indexOf(selected.effort);
+  const effortText=reasoningLabel(selected.effort),recommended=Boolean(selected.effort)&&selected.effort===selected.model?.defaultReasoningEffort;
   const overridden=Boolean(value.model||value.effort||value.serviceTier!==undefined);
   const progress=selected.efforts.length>1?Math.max(0,index)/(selected.efforts.length-1)*100:0;
   function choose(id:string){onChange(selectModel(models,value,current,id));setExpanded(false);modelButton.current?.focus({preventScroll:true});}
@@ -33,14 +36,14 @@ function TunedModelPicker({point,anchor,models,value,current,disabled=false,onCh
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z"/></svg>
       </button>}
       <div className="model-picker-current">
-        <strong aria-live="polite">{reasoningLabel(selected.effort)||'默认思考程度'}</strong>
+        <strong aria-live="polite">{effortText||'思考程度'}{recommended&&<small>推荐</small>}</strong>
         <button type="button" className="model-picker-model" ref={modelButton} disabled={disabled||!models.length} aria-expanded={expanded} aria-controls={listId} onClick={()=>setExpanded(!expanded)}><span>{modelDisplayName(selected.model,selected.id)||'选择模型'}</span><Icon name="chevron" size={13}/></button>
       </div>
-      <button className="model-picker-reset" type="button" aria-label="沿用当前聊天设置" title="沿用当前聊天设置" disabled={disabled||!overridden} onClick={()=>{onChange({model:'',effort:'',serviceTier:undefined});setExpanded(false);}}><Icon name="undo" size={18}/></button>
+      {!resettable?<span aria-hidden="true"/>:<button className="model-picker-reset" type="button" aria-label="沿用当前聊天设置" title="沿用当前聊天设置" disabled={disabled||!overridden} onClick={()=>{onChange({model:'',effort:'',serviceTier:undefined});setExpanded(false);}}><Icon name="undo" size={18}/></button>}
     </div>
     {selected.efforts.length>0&&<div className="model-picker-effort" style={{'--effort-progress':`${progress}%`} as CSSProperties}>
       <div className="model-picker-track" aria-hidden="true">{selected.efforts.map((effort,position)=><i key={effort} className={position<=index?'filled':''}/>)}</div>
-      <input className="model-picker-slider" type="range" aria-label="思考程度" aria-valuetext={reasoningLabel(selected.effort)||'默认思考程度'} min={0} max={Math.max(0,selected.efforts.length-1)} step={1} value={Math.max(0,index)} disabled={disabled||selected.efforts.length<2}
+      <input className="model-picker-slider" type="range" aria-label="思考程度" aria-valuetext={effortText?`${effortText}${recommended?'（推荐）':''}`:'未选择'} min={0} max={Math.max(0,selected.efforts.length-1)} step={1} value={Math.max(0,index)} disabled={disabled||selected.efforts.length<2}
         onClick={()=>{if(index<0&&selected.efforts.length)onChange({...value,effort:selected.efforts[0]});}} onChange={event=>onChange({...value,effort:selected.efforts[Number(event.target.value)]})}/>
     </div>}
     {expanded&&<div className="model-picker-options" id={listId} role="group" aria-label="模型">

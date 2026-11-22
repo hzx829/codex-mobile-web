@@ -55,6 +55,8 @@ const MODES:PermissionOption[]=[
 const modeLabel=(mode:string)=>MODES.find(m=>m.id===mode)?.label||mode;
 /** Where "remember" saves the rule, as the connector reports it; older connectors do not say. */
 const REMEMBER={session:'本会话允许',project:'本项目始终允许',user:'始终允许'} as const;
+/** The level Claude Code marks as recommended; shown until one is chosen here. */
+const RECOMMENDED_EFFORT='medium';
 function load(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
 function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
 
@@ -174,7 +176,7 @@ export function ClaudeCodePanel(props:Props){
     if(attachments.loading||voiceBusy)return;
     const text=draft.trim();
     if(!text&&!images.length&&!files.length)return;
-    const settings={...(model?{model}:{}),...(effort?{effort}:{}),...(selectedMode?{permissionMode:selectedMode}:{})};
+    const settings={...(model?{model}:{}),...(sentEffort?{effort:sentEffort}:{}),...(selectedMode?{permissionMode:selectedMode}:{})};
     if(creating){
       if(!startPath){setError('请选择项目');return;}
       stick.current=true;
@@ -206,7 +208,7 @@ export function ClaudeCodePanel(props:Props){
   /** Rewrites a sent message: the session continues from the turn before it, as Codex does. */
   async function resend(turnId:string,text:string){
     if(external&&!window.confirm('电脑上的 Claude Code 可能还在运行这条会话。确认那边已经结束，由手机继续？'))return;
-    const settings={...(model?{model}:{}),...(effort?{effort}:{}),...(selectedMode&&(selectedMode!=='bypassPermissions'||bypassLater)?{permissionMode:selectedMode}:{})};
+    const settings={...(model?{model}:{}),...(sentEffort?{effort:sentEffort}:{}),...(selectedMode&&(selectedMode!=='bypassPermissions'||bypassLater)?{permissionMode:selectedMode}:{})};
     stick.current=true;
     await mutate('claude.edit',{conversationId,turnId,text,...settings,...(external?{confirmIdle:true}:{})});
   }
@@ -216,7 +218,8 @@ export function ClaudeCodePanel(props:Props){
     try{const result=await request.current('claude.models',{cwd:view?.cwd||startPath||undefined});if(alive.current)setModels(result.models||[]);}
     catch(e:any){if(alive.current)setModelsError(e?.message||'模型列表读取失败');}
   }
-  function chooseModel(value:ModelSelection){setModel(value.model);setEffort(value.effort);store(`claude:${machine}:model`,value.model);store(`claude:${machine}:effort`,value.effort);}
+  // A model without effort keeps the last level for the next model that has it.
+  function chooseModel(value:ModelSelection){setModel(value.model);setEffort(value.effort);store(`claude:${machine}:model`,value.model);if(value.effort)store(`claude:${machine}:effort`,value.effort);}
 
   const copy=useStableEvent((text:string)=>void copyText(text).catch(()=>setError('复制失败，请长按选择文字')));
   // A fork is a new Claude Code session holding the transcript up to the end of this turn.
@@ -241,14 +244,18 @@ export function ClaudeCodePanel(props:Props){
   const project=creating?(startPath?workspaceName(startPath):'选择项目'):view?.cwd?workspaceName(view.cwd):'Claude Code';
   // Codex-shaped entries for the shared picker. Older connectors list no effort levels: then only the model is chosen.
   const pickerModels:Json[]=(models||[]).map(item=>({model:item.id,displayName:item.label,description:item.description,resolvedModel:item.resolvedModel,
-    supportedReasoningEfforts:(item.efforts||[]).map((level:string)=>({reasoningEffort:level}))}));
+    supportedReasoningEfforts:(item.efforts||[]).map((level:string)=>({reasoningEffort:level})),
+    ...(item.efforts?.includes(RECOMMENDED_EFFORT)?{defaultReasoningEffort:RECOMMENDED_EFFORT}:{})}));
   const tuning=!models||pickerModels.some(item=>item.supportedReasoningEfforts.length);
   // What the session runs on now: its own model matched to the list, or Claude Code's default for a new one.
   const listed=creating?pickerModels[0]:listedModel(pickerModels,view?.model);
-  const currentModel={model:listed?.model||view?.model||'',effort:view?.effort||''};
+  // As in Claude Code, effort is never "default": the session's own level, else the last one chosen here, else the recommended one.
+  const currentModel={model:listed?.model||view?.model||'',effort:view?.effort||load(`claude:${machine}:effort`)||RECOMMENDED_EFFORT};
   const selection=resolveModelSelection(pickerModels,{model,effort},currentModel);
+  // The level shown is the level sent; none for a model that takes no effort.
+  const sentEffort=models&&!selection.efforts.length?'':selection.effort;
   const currentLabel=modelDisplayName(listed,view?.model)||'默认模型';
-  const modelLabel=modelDisplayName(selection.model,selection.id)||'默认模型',effortLabel=reasoningLabel(effort||view?.effort||'');
+  const modelLabel=modelDisplayName(selection.model,selection.id)||'默认模型',effortLabel=reasoningLabel(sentEffort);
   const controlledRun=running&&Boolean(view?.controlled);
   return <main className="thread-panel" inert={inert}>
     <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}>
@@ -299,7 +306,7 @@ export function ClaudeCodePanel(props:Props){
         add={()=>setAdding(true)} addDisabled={!canWrite||attachments.loading}
         permission={<PermissionMenu options={MODES.filter(option=>option.id!=='bypassPermissions'||creating||!view?.controlled||bypassLater)} value={selectedMode}
           current={{id:effectiveMode,label:modeLabel(effectiveMode)}} disabled={!connected||busy} onChange={setMode}/>}
-        model={<ModelMenu label={modelLabel} details={effortLabel?[effortLabel]:[]} title="选择 Claude Code 模型" tuning={tuning} speed={false} disabled={!connected||busy} opened={()=>void openModels()}
+        model={<ModelMenu label={modelLabel} details={effortLabel?[effortLabel]:[]} title="选择 Claude Code 模型" tuning={tuning} speed={false} resettable={false} disabled={!connected||busy} opened={()=>void openModels()}
           models={pickerModels} value={{model,effort}} current={currentModel}
           currentLabel={currentLabel} onChange={chooseModel}
           status={modelsError?<p role="alert">{modelsError} <button type="button" onClick={()=>void openModels()}>重试</button></p>:!models?<p role="status">正在读取模型…</p>:!models.length&&<p role="status">没有可选模型</p>}/>}
