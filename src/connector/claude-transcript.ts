@@ -1,6 +1,6 @@
 import {isAbsolute, relative} from 'node:path';
 import type {MessageItem, PlanStep, TurnView} from '../shared/types.js';
-import {applyPlan, isPlanTool} from './claude-progress.js';
+import {applyPlan, isNextStepTool, isPlanTool, nextStep} from './claude-progress.js';
 
 /** A message as returned by the Agent SDK's getSessionMessages. */
 export type ClaudeMessage = {type: string; uuid: string; message?: unknown; parent_tool_use_id?: string | null};
@@ -305,6 +305,14 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
             plan = target.plan = next;
             item.type = 'plan';
             item.text = next.map(step => `${PLAN_MARKS[step.status]} ${step.text}`).join('\n');
+          }
+        }
+        if (isNextStepTool(block.name)) {
+          const card = nextStep(block.input);
+          if (card) {
+            target.nextStep = card;
+            item.type = 'nextStep';
+            item.text = [card.recap, card.ask, card.actions.map(action => `[${action.label}]`).join(' ')].filter(Boolean).join('\n\n');
           }
         }
         if (block.id) {

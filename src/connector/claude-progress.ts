@@ -1,6 +1,6 @@
 import {readdir, readFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import type {PlanStep} from '../shared/types.js';
+import type {NextStep, PlanStep} from '../shared/types.js';
 
 const str = (value: unknown) => typeof value === 'string' ? value : '';
 const PLAN_STATUSES = new Set(['pending', 'in_progress', 'completed']);
@@ -39,6 +39,22 @@ export function applyPlan(previous: PlanStep[] | undefined, name: unknown, input
     start.status = 'in_progress';
   }
   return steps;
+}
+
+/** The desktop app's closing card for a turn: a recap, a question for the user, and answers to offer as buttons. */
+export const isNextStepTool = (name: unknown) => name === 'mcp__ccd_turn__wrap_up';
+/** Answers that name only an app action, worded as the desktop app's buttons are. */
+const ACTION_LABELS: Record<string, string> = {commit: '提交', create_pr: '创建 PR', merge: '合并', verify: '验证', push: '推送'};
+const MAX_NEXT_ACTIONS = 4;
+
+export function nextStep(input: Record<string, unknown> | undefined): NextStep | undefined {
+  const recap = str(input?.recap).trim().slice(0, 2000), ask = str(input?.ask).trim().slice(0, 500);
+  const actions = (Array.isArray(input?.actions) ? input.actions : []).flatMap((action: any) => {
+    const label = (str(action?.label) || ACTION_LABELS[str(action?.action)] || str(action?.action)).trim().slice(0, 100);
+    return label ? [{label, ...(str(action?.action) ? {action: str(action.action).slice(0, 40)} : {})}] : [];
+  }).slice(0, MAX_NEXT_ACTIONS);
+  if (!recap && !ask && !actions.length) return undefined;
+  return {recap, ask, actions, ...(input?.blocked === true ? {blocked: true} : {})};
 }
 
 /** The time Claude Code wrote a transcript entry, found by its uuid in the raw transcript. */

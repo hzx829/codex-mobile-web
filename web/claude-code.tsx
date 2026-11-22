@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import {ConversationStatus,ConversationTurn,PendingMessage,RunningStep,connectionLost} from './conversation';
+import {ConversationStatus,ConversationTurn,NextStepCard,PendingMessage,RunningStep,connectionLost} from './conversation';
 import {ThreadMenu} from './thread-menu';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {optimisticDelivered,optimisticMessage,OPTIMISTIC_ACCEPTED_MS,type OptimisticMessage} from './optimistic';
@@ -188,10 +188,11 @@ export function ClaudeCodePanel(props:Props){
     return selected.length?async()=>({files:await uploadAttachments(request.current,{prefix:'claude.',scope},selected,value=>{if(alive.current)setUploadProgress(value);})}):undefined;
   }
   /** Behind a running turn the message waits on the computer; from the queue it can join the turn or interrupt it. */
-  async function send(){
+  /** `reply`: an answer tapped on a turn's closing card, sent on its own while the draft stays. */
+  async function send(reply?:string){
     if(attachments.loading||voiceBusy)return;
-    const text=draft.trim();
-    if(!text&&!images.length&&!files.length)return;
+    const text=reply??draft.trim(),sentImages=reply===undefined?images:[],sentFiles=reply===undefined?files:[];
+    if(!text&&!sentImages.length&&!sentFiles.length)return;
     const settings={...(model?{model}:{}),...(sentEffort?{effort:sentEffort}:{}),...(selectedMode?{permissionMode:selectedMode}:{})};
     if(creating){
       if(!startPath){setError('请选择项目');return;}
@@ -206,11 +207,11 @@ export function ClaudeCodePanel(props:Props){
     if(!keepCache())return;
     stick.current=true;
     // Queued messages appear in the queue; everything else appears in the conversation now.
-    const message=queueNext?null:{...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,images,files.map(file=>file.name)),baseline:userIds(view)};
+    const message=queueNext?null:{...optimisticMessage(scope,{turns:view?.turns||[]} as unknown as SessionView,text,sentImages,sentFiles.map(file=>file.name)),baseline:userIds(view)};
     if(message)setOutgoing(message);
-    const accepted=await mutate('claude.send',{conversationId,text,images,...settings,...(forceIdle?{confirmIdle:true}:{})},
-      result=>{cleared();if(selectedMode==='bypassPermissions'&&oneShotBypass)setMode('');
-        setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='sent_now'?'已立即发送':'');},upload({conversationId}));
+    const accepted=await mutate('claude.send',{conversationId,text,images:sentImages,...settings,...(forceIdle?{confirmIdle:true}:{})},
+      result=>{if(reply===undefined)cleared();if(selectedMode==='bypassPermissions'&&oneShotBypass)setMode('');
+        setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='sent_now'?'已立即发送':'');},reply===undefined?upload({conversationId}):undefined);
     if(message)setOutgoing(old=>old!==message?old:accepted?{...message,acceptedAt:Date.now()}:null);
   }
   function withdrawQueued(queuedId:string){
@@ -296,6 +297,12 @@ export function ClaudeCodePanel(props:Props){
     return window.confirm(`${change}后，这条会话已有的提示缓存将无法复用，下一条消息会按全价重新读取全部上下文，响应也会变慢。继续发送？`);
   }
   const controlledRun=running&&Boolean(view?.controlled);
+  // The latest turn's closing card, until it is answered or closed; closing is remembered for that turn on this device.
+  const lastTurn=turns.at(-1),nextKey=`claude:${machine}:next:${conversationId}`;
+  const [closedNext,setClosedNext]=useState('');
+  const nextStep=!creating&&!running&&!outgoing&&lastTurn?.status==='completed'&&lastTurn.nextStep&&closedNext!==lastTurn.id&&load(nextKey)!==lastTurn.id?lastTurn.nextStep:undefined;
+  // Claude Code's guess at the next prompt, offered while the composer is empty.
+  const suggestion=!creating&&!running&&!queued.length&&typeof view?.suggestion==='string'?view.suggestion:'';
   return <main className="thread-panel" inert={inert}>
     <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}>
       {!creating&&<>
@@ -321,6 +328,7 @@ export function ClaudeCodePanel(props:Props){
         <SenderScope senders={turns.flatMap(turn=>turn.items.map(item=>item.sender))}>{turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source="connector"  latestUser={false} disabled={!canWrite}
           openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={editTurn} onFork={fork} onDiff={diff} onBlocked={setNotice} editBlocked={!view?.truncated&&turn.id===turns[0]?.id?FIRST_MESSAGE:undefined}/>)}</SenderScope>
         {outgoing&&<PendingMessage message={outgoing} openFile={openFile} openPreview={openPreview} onFollowup={followup}/>}
+        {nextStep&&lastTurn&&<NextStepCard step={nextStep} disabled={!canWrite} reply={text=>void send(text)} close={()=>{setClosedNext(lastTurn.id);store(nextKey,lastTurn.id);}}/>}
         {running&&!outgoing&&<RunningStep turn={turns.at(-1)} waiting={view?.externalStatus==='waiting'?view.waitingFor||'':undefined}/>}
         {view&&!turns.length&&!running&&<p className="muted">这条会话还没有可显示的消息。</p>}
         {view?.error&&<ConversationStatus>{view.error}</ConversationStatus>}
@@ -340,7 +348,7 @@ export function ClaudeCodePanel(props:Props){
         onWithdraw={withdrawQueued} onCancel={queuedId=>void mutate('claude.cancelQueued',{conversationId,queuedId},()=>setNotice('已删除排队消息'))}/>}
       <Composer attachments={attachments} input={composer} draft={draft} edit={edit} maxLength={100_000} readOnly={Boolean(pending)} submit={()=>void send()}
         placeholder={creating?'想让 Claude Code 做什么？':queueNext?'当前任务完成后发送…':`在 ${machineName} 上继续…`}
-        locked={busy} showImage={showImage} uploadProgress={uploadProgress}
+        suggestion={suggestion} locked={busy} showImage={showImage} uploadProgress={uploadProgress}
         voice={voice} voiceMode={props.voiceMode} voiceDisabled={busy} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
         add={()=>setAdding(true)} addDisabled={!canWrite||attachments.loading}
         permission={<PermissionMenu options={MODES.filter(option=>option.id!=='bypassPermissions'||creating||!view?.controlled||bypassLater)} value={selectedMode}

@@ -16,8 +16,12 @@ export interface TurnView { id: string; status: string; items: MessageItem[]; ca
   /** The plan as the turn left it (Claude Code's plan tools). */
   plan?: PlanStep[];
   /** On a turn under way: what it is doing now. `item`: the activity item of the call still running; `startedAt`: when that began (ISO). */
-  step?: {text: string; type?: string; item?: string; startedAt?: string} }
+  step?: {text: string; type?: string; item?: string; startedAt?: string};
+  /** The closing card Claude's desktop app shows under a turn: what was done, what it asks, and answers to tap. */
+  nextStep?: NextStep }
 export interface PlanStep { text: string; status: 'pending' | 'in_progress' | 'completed' }
+/** `action`: an app action the answer stands for (commit, create_pr…); the label is what is sent as the reply. */
+export interface NextStep { recap: string; ask: string; actions: {label: string; action?: string}[]; blocked?: boolean }
 export interface TurnCursor { before: string; native?: string }
 export const turnFinished=(status:unknown)=>status==='completed'||status==='interrupted'||status==='failed';
 export interface ContextUsage { usedTokens: number; windowTokens: number | null }

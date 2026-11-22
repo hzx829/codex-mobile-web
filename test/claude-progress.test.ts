@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {mkdtemp, mkdir, writeFile, utimes} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {applyPlan, entryTimestamp, readPeerStatuses} from '../src/connector/claude-progress.js';
+import {applyPlan, entryTimestamp, nextStep, readPeerStatuses} from '../src/connector/claude-progress.js';
+import {ClaudeRuntime, type QueryFn} from '../src/connector/claude-runtime.js';
+import {appendFile} from 'node:fs/promises';
 import {claudeTurns} from '../src/connector/claude-transcript.js';
 import {ClaudeCodeBridge} from '../src/connector/claude-code.js';
 import {Ledger} from '../src/connector/ledger.js';
@@ -125,6 +127,81 @@ test('a session the desktop app is running stays running through a long call, an
     await status('idle');clock += 1000;
     const idle = await bridge.handle('claude.read', {conversationId: sid});
     assert.equal(idle.running, false);assert.equal(idle.external, false);assert.equal(idle.externalStatus, '');
+  } finally {
+    bridge?.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('the desktop app’s closing card becomes the turn’s next step, with answers to tap', () => {
+  assert.deepEqual(nextStep({recap: 'Done.', ask: 'Commit?', actions: [{action: 'commit'}, {label: 'Not yet'}, {label: ' '}], blocked: true}),
+    {recap: 'Done.', ask: 'Commit?', actions: [{label: '提交', action: 'commit'}, {label: 'Not yet'}], blocked: true});
+  assert.equal(nextStep({actions: []}), undefined);
+  const turns = claudeTurns([
+    {type: 'user', uuid: 'u1', message: {role: 'user', content: 'Commit and run'}},
+    {type: 'assistant', uuid: 'a1', message: {role: 'assistant', content: [{type: 'tool_use', id: 't1', name: 'mcp__ccd_turn__wrap_up',
+      input: {recap: 'Both runs gave valid receipts.', ask: 'Fix the anchor first?', actions: [{label: 'Fix anchor first'}, {label: 'Rerun as is'}]}}]}},
+    {type: 'user', uuid: 'r1', message: {role: 'user', content: [{type: 'tool_result', tool_use_id: 't1', content: 'Shown in the next-step box.'}]}},
+    {type: 'assistant', uuid: 'a2', message: {role: 'assistant', content: [{type: 'text', text: 'I recorded all of this.'}]}},
+  ]);
+  assert.deepEqual(turns[0].nextStep, {recap: 'Both runs gave valid receipts.', ask: 'Fix the anchor first?', actions: [{label: 'Fix anchor first'}, {label: 'Rerun as is'}]});
+  assert.equal(turns[0].items.find(item => item.id === 'a1:0')?.type, 'nextStep');
+});
+
+test('Claude Code’s guess at the next prompt is offered after a turn, and dropped once the session moves on', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-guess-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const config = join(root, 'config'), cwd = join(root, 'repo'), projects = join(config, 'projects', 'work');
+    await mkdir(projects, {recursive: true});await mkdir(cwd);
+    process.env.CLAUDE_CONFIG_DIR = config;
+    const options: any[] = [];
+    let release!: () => void;
+    const query: QueryFn = ({prompt, options: given}) => {
+      options.push(given);
+      const id = randomUUID(), file = join(projects, id + '.jsonl');
+      let parent: string | null = null;
+      const write = async (entry: object) => {
+        const uuid = randomUUID();
+        await appendFile(file, JSON.stringify({sessionId: id, cwd: given?.cwd, isSidechain: false, version: '2.1.0', ...entry, uuid, parentUuid: parent, timestamp: new Date().toISOString()}) + '\n');
+        parent = uuid;
+      };
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: id, model: 'claude-test', cwd: given?.cwd};
+        for await (const input of prompt) {
+          const text = (input.message.content as any[]).find(block => block.type === 'text')?.text || '';
+          await write({type: 'user', message: {role: 'user', content: text}});
+          await write({type: 'assistant', message: {id: 'r', role: 'assistant', model: 'claude-test', content: [{type: 'text', text: '测试都过了。'}]}});
+          yield {type: 'assistant', session_id: id, message: {}};
+          yield {type: 'result', subtype: 'success', session_id: id, errors: []};
+          yield {type: 'prompt_suggestion', session_id: id, suggestion: '提交吧'};
+        }
+      }
+      const generator = run() as any;
+      generator.close = () => release?.();
+      return generator;
+    };
+    const runtime = new ClaudeRuntime(async () => query, () => undefined, 60_000);
+    bridge = new ClaudeCodeBridge(ledger, config, undefined, Date.now, runtime);
+    const created = await bridge.handle('claude.create', {cwd, text: '跑一下测试', opId: opId()});
+    const id = created.conversationId;
+    assert.equal(options[0].promptSuggestions, true);
+    const deadline = Date.now() + 3000;
+    let view: any;
+    do {view = await bridge.handle('claude.read', {conversationId: id});} while (view.suggestion !== '提交吧' && Date.now() < deadline && await new Promise(resolve => setTimeout(resolve, 20)) === undefined);
+    assert.equal(view.suggestion, '提交吧');
+    // The process is released when idle; the guess stays while that turn is still the latest.
+    await runtime.shutdown(runtime.get(id)!);
+    const aged = new Date(Date.now() - 60_000);await utimes(join(projects, id + '.jsonl'), aged, aged);
+    assert.equal((await bridge.handle('claude.read', {conversationId: id})).suggestion, '提交吧');
+    // A turn sent from elsewhere (the terminal) makes it stale.
+    await appendFile(join(projects, id + '.jsonl'), JSON.stringify({type: 'user', sessionId: id, cwd, isSidechain: false, uuid: randomUUID(), parentUuid: null,
+      timestamp: new Date(Date.now() - 60_000).toISOString(), message: {role: 'user', content: '先别提交'}}) + '\n');
+    const old = new Date(Date.now() - 60_000);await utimes(join(projects, id + '.jsonl'), old, old);
+    assert.equal((await bridge.handle('claude.read', {conversationId: id})).suggestion, '');
   } finally {
     bridge?.close();
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;

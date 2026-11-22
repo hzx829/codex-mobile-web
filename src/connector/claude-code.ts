@@ -102,6 +102,8 @@ export class ClaudeCodeBridge {
   /** Transcript versions this connector wrote itself (a rename), which must not look like a terminal at work. */
   private ownWrites = new Map<string, bigint>();
   private peers?: {at: number; value: Promise<Map<string, PeerStatus>>};
+  /** Claude Code's guess at the next prompt, by session, with the turn it follows; it outlives the released process. */
+  private suggestions = new Map<string, {text: string; turn: string}>();
   readonly runtime: ClaudeRuntime;
   /** Shows claude.ai Artifacts through this computer; unset where the connector has no browser profile. */
   artifacts?: ArtifactViewer;
@@ -277,6 +279,11 @@ export class ClaudeCodeBridge {
       for (const turn of turns) for (const item of turn.items) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
     }
     await this.nameSavedPages(turns);
+    // Offered only while the turn it follows is still the latest, wherever the session went on since.
+    const latest = turns.at(-1)?.id || '';
+    if (live?.suggestion) this.suggestions.set(id, {text: live.suggestion, turn: latest});
+    else if (live?.running) this.suggestions.delete(id);
+    const guess = this.suggestions.get(id), suggestion = !running && guess?.turn === latest ? guess.text : '';
     const usage = (messages.findLast(entry => entry.type === 'assistant' && (entry.message as Json | undefined)?.usage)?.message as Json | undefined)?.usage;
     const usedTokens = usage ? ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens'].reduce((sum, key) => sum + (Number(usage[key]) || 0), 0) : 0;
     const contextUsage = usedTokens ? {usedTokens, windowTokens: live ? await this.runtime.contextWindow(live) : null} : null;
@@ -298,7 +305,7 @@ export class ClaudeCodeBridge {
       queuedMessages: (this.queue?.queued(id) || []).map(message => ({id: message.id, text: message.payload.text || '',
         imageCount: message.payload.images?.length || 0, imageBytes: (message.payload.images || []).reduce((sum: number, url: string) => sum + imageBytes(url), 0),
         state: message.state, error: message.error})),
-      turns: recent.reverse(), truncated: recent.length < turns.length, contextUsage,
+      turns: recent.reverse(), truncated: recent.length < turns.length, contextUsage, suggestion,
       notice: !external ? '' : current.peer?.status === 'waiting' ? `电脑上的 Claude Code 正在等待电脑上的操作${current.peer.waitingFor ? `（${current.peer.waitingFor}）` : ''}。`
         : current.peer && this.queue ? '电脑上的 Claude Code 正在运行这条会话。手机发送的消息会排队，等那边这一轮结束后发送。'
         : '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。',

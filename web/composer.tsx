@@ -24,6 +24,8 @@ type Props={
   /** A turn the phone can stop. With `queue`, a draft can still be sent to wait for it; otherwise only stopping is offered. */
   running?:{stop:()=>void;disabled:boolean;queue:boolean;label?:string};
   send:{label:string;sending:boolean;disabled:boolean};
+  /** A guess at the next message, shown in grey while the field is empty; Tab or the hint fills it in. */
+  suggestion?:string;
 };
 
 /**
@@ -36,6 +38,8 @@ export function Composer(props:Props){
   const drafted=Boolean(props.draft.trim()||attachments.count);
   // While a turn runs: stop alone without a draft; stop and "send when done" with one, if the runtime queues.
   const showSend=!running||running.queue&&(drafted||send.sending);
+  const suggestion=!props.draft&&!props.readOnly?props.suggestion||'':'';
+  const accept=()=>{props.edit(suggestion);props.input.current?.focus();};
   // Text that arrives from outside the textarea (dictation, a restored draft) would throw the caret to the end.
   // Someone correcting an earlier word keeps their place; otherwise the newest text is scrolled into view.
   const field=props.input.current,outside=Boolean(field&&field.value!==props.draft);
@@ -49,15 +53,16 @@ export function Composer(props:Props){
     <ReadingStatus loading={attachments.loading}/>
     <UploadStatus progress={props.uploadProgress}/>
     <VoiceStatus voice={props.voice} mode={props.voiceMode}/>
-    <textarea ref={props.input} aria-label="任务输入" placeholder={props.placeholder} value={props.draft} readOnly={props.readOnly} maxLength={props.maxLength} rows={1}
-      onPaste={attachments.paste} onChange={e=>props.edit(e.target.value)} onKeyDown={e=>submitOnDesktop(e,props.submit)}/>
+    <textarea ref={props.input} aria-label="任务输入" placeholder={suggestion||props.placeholder} value={props.draft} readOnly={props.readOnly} maxLength={props.maxLength} rows={1}
+      onPaste={attachments.paste} onChange={e=>props.edit(e.target.value)} onKeyDown={e=>{if(e.key==='Tab'&&!e.shiftKey&&suggestion){e.preventDefault();accept();return;}submitOnDesktop(e,props.submit);}}/>
+    {suggestion&&<button type="button" className="composer-suggestion" onClick={accept} aria-label={`填入建议：${suggestion}`}><kbd>Tab</kbd>填入建议</button>}
     <div className="composer-toolbar">
       <IconButton icon="plus" label="添加与选项" className="composer-add" disabled={props.addDisabled} onClick={props.add}/>
       {props.permission}
       {props.model}
       <div className="composer-actions">
         <VoiceButton voice={props.voice} mode={props.voiceMode} connected={props.connected} disabled={props.voiceDisabled} starting={props.onVoiceStart}/>
-        {running&&<IconButton icon="stop" label={running.label||'停止当前任务'}className="black round stop" disabled={running.disabled} onClick={running.stop}/>}
+        {running&&<IconButton icon="stop" label={running.label||'停止当前任务'} className="black round stop" disabled={running.disabled} onClick={running.stop}/>}
         {showSend&&<SendMessageButton sending={send.sending} label={send.label} disabled={send.disabled}/>}
       </div>
     </div>

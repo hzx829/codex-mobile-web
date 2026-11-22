@@ -100,6 +100,8 @@ export class LiveSession {
   closed = false;
   interrupting = false;
   hint = '';
+  /** Claude Code's guess at the user's next prompt, after the latest turn; '' once another turn starts. */
+  suggestion = '';
   /** Context window size, read once from Claude Code. */
   window?: number | null;
   /** Started with permission to skip prompts, so it can switch into "bypassPermissions" later. */
@@ -189,6 +191,8 @@ export class ClaudeRuntime extends EventEmitter {
       env: claudeEnv(this.entrypoint),
       systemPrompt: {type: 'preset', preset: 'claude_code'},
       canUseTool: (tool, input, context) => this.ask(session, tool, input, context),
+      // After each turn Claude Code predicts the user's next prompt, offered in the composer as Claude Code's own input does.
+      promptSuggestions: true,
       stderr: () => {}, // Native diagnostics can contain credentials; never forward them.
     }});} catch (error) {
       throw new BridgeError('unavailable', `Claude Code 无法启动：${(error as Error)?.message || '未知错误'}${hint ? '。' + hint : ''}`);
@@ -240,6 +244,10 @@ export class ClaudeRuntime extends EventEmitter {
           session.interrupting = false;
         } else if (m.type === 'assistant' || m.type === 'user' || m.type === 'stream_event') {
           session.running = true;
+        } else if (m.type === 'prompt_suggestion' && typeof m.suggestion === 'string') {
+          // It follows the turn's result; a turn started since makes it stale.
+          if (session.running) continue;
+          session.suggestion = m.suggestion.trim().slice(0, 1000);
         } else continue;
         this.touch(session);
       }
@@ -342,7 +350,7 @@ export class ClaudeRuntime extends EventEmitter {
     if (!session.running && opId) session.turnOpId = opId;
     else if (session.running && priority === 'now' && opId) session.nowOpId = opId;
     session.inbox.push(userMessage(text, images, session.running ? priority : undefined));
-    session.running = true;session.error = '';
+    session.running = true;session.error = '';session.suggestion = '';
     this.touch(session);
   }
 

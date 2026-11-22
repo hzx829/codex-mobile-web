@@ -1,5 +1,5 @@
 import {memo,useEffect,useMemo,useRef,useState,type ReactNode} from 'react';
-import {turnFinished,type TurnView,type SessionView,type MessageItem,type PlanStep,type TeamMember} from '../src/shared/types';
+import {turnFinished,type TurnView,type SessionView,type MessageItem,type NextStep,type PlanStep,type TeamMember} from '../src/shared/types';
 import {SafeMarkdown} from './content';
 import {groupItems} from './activity';
 import {Icon} from './icons';
@@ -9,7 +9,7 @@ import {diffSummary} from './diff-summary';
 import {SenderLabel} from './senders';
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const statusLabel:Record<string,string>={inProgress:'进行中',completed:'已完成',interrupted:'已停止',failed:'失败'};
-const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划',fileRead:'读取文件',codeSearch:'搜索代码',subagent:'子任务',toolCall:'使用工具'};
+const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划',fileRead:'读取文件',codeSearch:'搜索代码',subagent:'子任务',toolCall:'使用工具',nextStep:'下一步'};
 
 /** A sent message, shown until the conversation contains it. */
 export function PendingMessage({message,openFile,openPreview,onFollowup}:{message:OptimisticMessage;openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(text:string)=>void}){
@@ -49,10 +49,23 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
 /** The plan as the turn left it, as Claude's own app shows it: done, under way, still to do. */
 function PlanCard({steps,running}:{steps:PlanStep[];running:boolean}){
   const done=steps.filter(step=>step.status==='completed').length;
-  return <ol className="plan-card" aria-label={`计划：已完成 ${done}/${steps.length} 步`}>{steps.map((step,index)=><li key={index} className={`plan-step ${step.status}${running?' running':''}`}>
+  return <ol className="plan-card" aria-label={`计划：已完成 ${done}/${steps.length} 步`}>{steps.map((step,index)=><li key={index} className="plan-step" data-status={step.status} data-running={running||undefined}>
     <span className="plan-mark" aria-hidden="true">{step.status==='completed'&&<Icon name="check" size={12}/>}</span>
     <span className="plan-text">{step.text}{step.status!=='pending'&&<span className="visually-hidden">{step.status==='completed'?'（已完成）':'（进行中）'}</span>}</span>
   </li>)}</ol>;
+}
+/**
+ * The card Claude's desktop app shows when a turn ends: what was done, what it asks, and answers to tap.
+ * Tapping one sends it as the reply; the first is the suggested one.
+ */
+export function NextStepCard({step,disabled,reply,close}:{step:NextStep;disabled:boolean;reply:(text:string)=>void;close:()=>void}){
+  return <section className={`next-step${step.blocked?' blocked':''}`} aria-label="下一步">
+    <IconButton icon="close" label="关闭" className="next-step-close" onClick={close}/>
+    {step.recap&&<p className="next-step-recap">{step.recap}</p>}
+    {step.ask&&<p className="next-step-ask">{step.ask}</p>}
+    {step.actions.length>0&&<div className="next-step-actions">{step.actions.map((action,index)=>
+      <button type="button" key={index} className={index===0?'primary':''} disabled={disabled} onClick={()=>reply(action.label)}>{action.label}</button>)}</div>}
+  </section>;
 }
 /** "6分钟17秒", as Claude's own app counts a step's time. */
 export function elapsedLabel(ms:number){
