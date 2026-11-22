@@ -89,7 +89,9 @@
 docker compose -f compose.yaml -f compose.https.yaml exec relay node build/relay.mjs team invite --user <名字> --url https://你的域名
 ```
 
-`team list` 列出所有成员。直接用 Node 运行的中继，在程序目录用相同的 `BRIDGE_DATA` 运行 `node build/relay.mjs team …`。
+`team list` 列出所有成员。直接用 Node 运行的中继，以运行中继的系统用户、用相同的 `BRIDGE_DATA` 运行 `build/relay.mjs team …`，命令见 [DEPLOY.md](../../DEPLOY.md#团队成员可选)。
+
+设备丢了能这样找回，服务器上的团队数据库丢了就找不回来了。管理员要定期备份它，步骤见 [DEPLOY.md 的“备份和恢复”](../../DEPLOY.md#备份和恢复)。
 
 ## 常见问题
 

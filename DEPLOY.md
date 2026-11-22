@@ -83,14 +83,70 @@ Compose 部署运行 `docker compose -f compose.yaml -f compose.https.yaml up -d
    docker compose -f compose.yaml -f compose.https.yaml exec relay node build/relay.mjs team init --name 你的名字 --url https://codex.your-domain.com
    ```
 
-   直接用 Node 运行的实例，在程序目录用与中继相同的 `BRIDGE_DATA` 运行 `node build/relay.mjs team init …`。
+   直接用 Node 运行的实例，以运行中继的系统用户、用与中继相同的 `BRIDGE_DATA` 和 Node 运行 `build/relay.mjs team init …`，例如 systemd 服务：
+
+   ```sh
+   runuser -u codex-relay -- env BRIDGE_DATA=/var/lib/codex-mobile-relay /opt/codex-mobile-relay/runtime/node24/bin/node /opt/codex-mobile-relay/app/build/relay.mjs team init --name 你的名字 --url https://你的地址
+   ```
 3. 在手机或电脑浏览器打开输出的邀请链接，即以所有者身份登录。之后在“选项 → 团队 → 成员”添加成员，把生成的链接或二维码发给对方。每个邀请链接 24 小时内有效，只能用一次。
 4. 启用后，手机不能再用共享 Token 登录，已打开的网页会回到登录页。电脑连接器继续用原 Token 连接，不需要修改。若要给某台电脑换成专用 Token，在“团队 → 电脑”中生成，再在那台电脑的“修改连接配置”里替换；生成后，那台电脑就不能再用共享 Token 连接。
 5. 所有者的设备全部丢失时，在服务器上运行 `team invite --user <名字>` 重新生成邀请链接；`team list` 列出成员。
 
 “团队 → 用量”按人统计轮次和 token。只有更新后的电脑连接器才会上报，更新前完成的轮次不会补算。
 
-`relay.sqlite` 保存成员、设备、会话归属、操作记录和每轮用量，不保存消息正文。备份时先停止中继，再复制数据卷或该文件。
+### 备份和恢复
+
+`relay.sqlite` 保存成员、设备、会话归属、操作记录和每轮用量，不保存消息正文。所有者的设备丢了，可以用 `team invite` 找回；这个文件丢了，团队就没了：中继回到个人模式，手机又能用共享 Token 登录，所有人都要重新邀请，用量和操作记录也找不回来。所以要定期备份，并把备份放到服务器以外的地方。
+
+文件位置：Compose 部署在 `relay_data` 数据卷里，路径 `/data/relay.sqlite`；直接用 Node 运行的实例在 `BRIDGE_DATA` 目录下，没有设置时是程序目录下的 `.local/relay.sqlite`。
+
+**备份**不用停中继。数据库用 WAL 模式，最近的改动可能还在旁边的 `relay.sqlite-wal` 里，直接复制 `relay.sqlite` 会漏掉，要让 SQLite 导出一份完整副本。导出的目标文件不能已经存在。
+
+Compose 部署，在部署目录运行，得到当前目录下的 `relay-backup-<日期>.sqlite`：
+
+```sh
+docker compose -f compose.yaml -f compose.https.yaml exec relay node -e "new (require('node:sqlite').DatabaseSync)('/data/relay.sqlite').exec(\"VACUUM INTO '/data/backup.sqlite'\")"
+docker compose -f compose.yaml -f compose.https.yaml cp relay:/data/backup.sqlite ./relay-backup-$(date +%F).sqlite
+docker compose -f compose.yaml -f compose.https.yaml exec relay rm /data/backup.sqlite
+```
+
+直接用 Node 运行的实例，以运行中继的系统用户执行，避免数据目录里多出属于 root、中继打不开的文件。下例是 systemd 服务用户 `codex-relay`、数据目录 `/var/lib/codex-mobile-relay`，需要服务器有 `sqlite3` 命令：
+
+```sh
+cd /var/lib/codex-mobile-relay
+runuser -u codex-relay -- sqlite3 relay.sqlite ".backup 'backup.sqlite'"
+mv backup.sqlite /root/relay-backup-$(date +%F).sqlite
+```
+
+没有 `sqlite3` 时，把第二行换成用中继自己的 Node 24 运行上面 Compose 第一条命令里的 `node -e …`，路径改成数据目录。系统自带的旧版 Node 可能没有 `node:sqlite`。可以用 cron 每天运行一次，再把文件拷到别的机器。
+
+**恢复**：停止中继，把数据目录里的 `relay.sqlite`、`relay.sqlite-wal`、`relay.sqlite-shm` 移到别处（留着，以防恢复错了），把备份复制成 `relay.sqlite` 并交给运行中继的用户，再启动中继。
+
+Compose 部署（把备份文件名换成实际的）：
+
+```sh
+docker compose -f compose.yaml -f compose.https.yaml stop relay
+docker compose -f compose.yaml -f compose.https.yaml run --rm --no-deps -v "$PWD/relay-backup-2026-11-22.sqlite:/restore.sqlite:ro" --entrypoint sh relay -c 'mkdir -p /data/before-restore && (mv /data/relay.sqlite* /data/before-restore/ || true) && cp /restore.sqlite /data/relay.sqlite'
+docker compose -f compose.yaml -f compose.https.yaml start relay
+docker compose -f compose.yaml -f compose.https.yaml exec relay node build/relay.mjs team list
+```
+
+直接用 Node 运行的实例：
+
+```sh
+systemctl stop codex-mobile-relay
+cd /var/lib/codex-mobile-relay
+mkdir -p before-restore && mv relay.sqlite* before-restore/
+install -o codex-relay -g codex-relay -m 600 /root/relay-backup-2026-11-22.sqlite relay.sqlite
+systemctl start codex-mobile-relay
+runuser -u codex-relay -- env BRIDGE_DATA=/var/lib/codex-mobile-relay /opt/codex-mobile-relay/runtime/node24/bin/node /opt/codex-mobile-relay/app/build/relay.mjs team list
+```
+
+恢复后，数据回到备份那一刻：
+
+- 备份之后加入的成员、登录的设备要重新邀请；备份之后生成的电脑专用 Token 失效，那台电脑要重新生成，或改回共享 Token。
+- 备份之后移除的设备、停用的成员会重新生效，要到“团队”里再移除或停用一次。
+- 备份之后的用量会缺：电脑连接器在中继确认收到后就删掉了自己的副本，不会重发。
 
 ## 日常操作
 
