@@ -44,7 +44,7 @@ import {submitTurn,editTurn} from './turn-request';
 import {modelDisplayName,reasoningLabel,resolveModelSelection} from '../src/shared/models';
 import {ModelButton,ModelPicker} from './model-picker';
 import {voiceProvider,voiceProviderLabel} from '../src/shared/voice';
-import {useVoiceInput} from './use-voice-input';
+import {joinDictation,useVoiceInput} from './use-voice-input';
 import {useStableEvent} from './use-event';
 import {TeamPanel,type TeamUser} from './team';
 import './style.css';
@@ -212,7 +212,7 @@ function App(){
   const voice=useVoiceInput(voiceMode,JSON.stringify([machine,selected,newChat,newChat?newCwd:'']),connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
     transcribe:recording=>call('voice.transcribe',recording),
-    text:text=>{editDraft(draft.trim()?`${draft.trimEnd()}\n${text}`:text);setNotice('已填入输入框，确认后发送。');},
+    text:text=>editDraft(joinDictation(draft,text)),
     error:fail,
   });
   const voiceBusy=voice.state!=='idle',voiceLabel=voiceProviderLabel(voiceMode);

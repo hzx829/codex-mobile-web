@@ -3,7 +3,7 @@ import {ConversationStatus,ConversationTurn,PendingMessage,connectionLost} from 
 import {ThreadMenu} from './thread-menu';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {optimisticDelivered,optimisticMessage,OPTIMISTIC_ACCEPTED_MS,type OptimisticMessage} from './optimistic';
-import {useVoiceInput} from './use-voice-input';
+import {joinDictation,useVoiceInput} from './use-voice-input';
 import type {MenuPoint} from './popover';
 import type {ThreadActions} from './antigravity-sidebar';
 import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
@@ -115,7 +115,7 @@ export function ClaudeCodePanel(props:Props){
   const voice=useVoiceInput(props.voiceMode,scope,connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
     transcribe:recording=>request.current('voice.transcribe',recording),
-    text:text=>{edit(draft.trim()?`${draft.trimEnd()}\n${text}`:text);setNotice('已填入输入框，确认后发送。');},
+    text:text=>edit(joinDictation(draft,text)),
     error:failed,
   });
   const voiceBusy=voice.state!=='idle';

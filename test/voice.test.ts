@@ -10,8 +10,8 @@ import {transcribeVoice} from '../src/connector/voice.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {MAX_FRAME} from '../src/shared/types.js';
-import {MAX_VOICE_BYTES,MAX_VOICE_DURATION_MS,voiceProvider,type VoiceRecording} from '../src/shared/voice.js';
-import {createVoiceInput,type VoiceCallbacks,type VoiceState} from '../web/voice-input.js';
+import {MAX_VOICE_BYTES,MAX_VOICE_DURATION_MS,MAX_VOICE_SESSION_MS,voiceProvider,type VoiceRecording} from '../src/shared/voice.js';
+import {createVoiceInput,joinDictation,type VoiceCallbacks,type VoiceState} from '../web/voice-input.js';
 import {Client} from '../web/client.js';
 
 const recording:VoiceRecording={audio:Buffer.from('recorded audio fixture').toString('base64'),mimeType:'audio/webm',durationMs:1200};
@@ -107,7 +107,18 @@ test('control routes dictation without creating a conversation or storing an ope
   }finally{control.close();}
 });
 
-function captureFixture(t:TestContext,options:{permission?:Promise<any>;transcript?:Promise<{text:string}>;secure?:boolean;mime?:string;empty?:boolean}={}){
+/** `level` stands in for the microphone's loudness (0 is silence); without it the browser has no audio meter. */
+function captureFixture(t:TestContext,options:{permission?:Promise<any>;transcript?:Promise<{text:string}>;transcripts?:(index:number)=>Promise<{text:string}>;secure?:boolean;mime?:string;empty?:boolean;level?:{value:number}}={}){
+  if(options.level){
+    const level=options.level;
+    replaceGlobal(t,'AudioContext',class{
+      state='running';
+      createAnalyser(){return {fftSize:0,getByteTimeDomainData(samples:Uint8Array){samples.fill(128+Math.round(level.value*127));}};}
+      createMediaStreamSource(){return {connect(){}};}
+      resume(){return Promise.resolve();}
+      close(){this.state='closed';return Promise.resolve();}
+    });
+  }
   const states:VoiceState[]=[],texts:string[]=[],errors:Error[]=[],uploads:VoiceRecording[]=[];
   let stopped=0,requested=0,keyboard=0;
   const track={stop(){stopped++;},onended:null as null|(()=>void)},stream={getTracks:()=>[track]};
@@ -123,7 +134,7 @@ function captureFixture(t:TestContext,options:{permission?:Promise<any>;transcri
   replaceGlobal(t,'isSecureContext',options.secure??true);
   replaceGlobal(t,'navigator',{mediaDevices:{getUserMedia:()=>{requested++;return options.permission||Promise.resolve(stream);}}});
   replaceGlobal(t,'MediaRecorder',Recorder);
-  const callbacks:VoiceCallbacks={state:state=>states.push(state),text:text=>texts.push(text),error:error=>errors.push(error),keyboard:()=>{keyboard++;},transcribe:async audio=>{uploads.push(audio);return options.transcript||{text:'  hello  '};}};
+  const callbacks:VoiceCallbacks={state:state=>states.push(state),text:text=>texts.push(text),error:error=>errors.push(error),keyboard:()=>{keyboard++;},transcribe:async audio=>{uploads.push(audio);return options.transcripts?.(uploads.length-1)||options.transcript||{text:'  hello  '};}};
   const input=createVoiceInput('codex',callbacks);t.after(()=>input.cancel());
   return {input,callbacks,states,texts,errors,uploads,stream,track,Recorder,stopped:()=>stopped,requested:()=>requested,keyboard:()=>keyboard};
 }
@@ -156,9 +167,70 @@ test('cancelling capture discards audio; late transcription cannot change anothe
   const second=createVoiceInput('codex',f.callbacks);second.start();await flush();second.cancel();await flush();assert.equal(f.uploads.length,1);assert.equal(f.stopped(),2);
 });
 
-test('recording limit stops capture; interrupted tracks and insecure pages never upload',async t=>{
-  const f=captureFixture(t);t.mock.timers.enable({apis:['setTimeout','Date']});f.input.start();await flush();
-  t.mock.timers.tick(MAX_VOICE_DURATION_MS);await flush();assert.equal(f.stopped(),1);assert.equal(f.uploads[0].durationMs,MAX_VOICE_DURATION_MS);
+const drain=async()=>{for(let i=0;i<5;i++)await flush();};
+/** Mocked time jumps to the end of a tick, so the audio meter is stepped through it. */
+function advance(t:TestContext,ms:number){for(let passed=0;passed<ms;passed+=100)t.mock.timers.tick(100);}
+/** Speaks for a while, then pauses long enough to end the segment. */
+async function say(t:TestContext,level:{value:number},pauseMs=800){
+  level.value=0.5;advance(t,2000);level.value=0;advance(t,pauseMs);await drain();
+}
+
+test('dictated pieces join with a space between Latin words and nothing between Chinese ones',()=>{
+  assert.equal(joinDictation('','你好'),'你好');assert.equal(joinDictation('  ','你好'),'你好');
+  assert.equal(joinDictation('你好，','世界'),'你好，世界');assert.equal(joinDictation('fix the bug.','Then deploy'),'fix the bug. Then deploy');
+  assert.equal(joinDictation('第一行\n','第二行'),'第一行\n第二行');assert.equal(joinDictation('打开 README','然后'),'打开 README然后');
+  assert.equal(joinDictation('kept',''),'kept');
+});
+
+test('each pause turns into text while recording continues; silence is never uploaded',async t=>{
+  const level={value:0},f=captureFixture(t,{level,transcripts:async index=>({text:['你好，','世界'][index]})});
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await drain();
+  await say(t,level);
+  assert.deepEqual(f.texts,['你好，']);assert.equal(f.states.at(-1),'recording');assert.equal(f.stopped(),0);
+  await say(t,level,30_000);
+  assert.deepEqual(f.texts,['你好，','世界']);assert.equal(f.uploads.length,2);assert.equal(f.states.at(-1),'recording');
+  assert.ok(f.uploads.every(upload=>upload.durationMs<=3000));
+  f.input.stop();await drain();
+  assert.equal(f.uploads.length,2);assert.equal(f.stopped(),1);assert.equal(f.states.at(-1),'idle');assert.equal(f.errors.length,0);
+});
+
+test('speech without a pause is still cut, and transcripts arriving out of order are delivered in spoken order',async t=>{
+  const level={value:0.5},done:((value:{text:string})=>void)[]=[];
+  const f=captureFixture(t,{level,transcripts:()=>new Promise(resolve=>{done.push(resolve);})});
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await drain();
+  advance(t,45_000);await drain();assert.equal(f.uploads.length,2);
+  done[1]({text:'second'});await drain();assert.deepEqual(f.texts,[]);
+  done[0]({text:'first'});await drain();assert.deepEqual(f.texts,['first second']);
+  f.input.stop();await drain();assert.equal(f.uploads.length,3);assert.equal(f.states.at(-1),'transcribing');
+  f.input.cancel();done[2]({text:'late'});await drain();assert.deepEqual(f.texts,['first second']);assert.equal(f.states.at(-1),'idle');
+});
+
+test('a segment without words does not end the dictation; a dictation without any words says so',async t=>{
+  const level={value:0},empty=()=>Promise.reject({code:'voice_empty',message:'没有识别到文字，请重新录制'});
+  let wordless=false;
+  const f=captureFixture(t,{level,transcripts:index=>index===0||wordless?empty():Promise.resolve({text:'ok'})});
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await drain();
+  await say(t,level);assert.equal(f.errors.length,0);assert.equal(f.states.at(-1),'recording');
+  await say(t,level);f.input.stop();await drain();assert.deepEqual(f.texts,['ok']);assert.equal(f.errors.length,0);
+  const silent=createVoiceInput('codex',f.callbacks);silent.start();await drain();advance(t,5000);silent.stop();await drain();
+  assert.equal(f.uploads.length,2);assert.match(f.errors.at(-1)!.message,/没有录到/);
+  wordless=true;const mumble=createVoiceInput('codex',f.callbacks);mumble.start();await drain();
+  await say(t,level);mumble.stop();await drain();assert.equal(f.uploads.length,3);assert.match(f.errors.at(-1)!.message,/没有识别到/);assert.equal(f.states.at(-1),'idle');
+});
+
+test('a failed segment stops the dictation and keeps the text already delivered',async t=>{
+  const level={value:0},f=captureFixture(t,{level,transcripts:index=>index===0?Promise.resolve({text:'kept'}):Promise.reject({code:'voice_limit',message:'语音识别暂时达到限额'})});
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await drain();
+  await say(t,level);await say(t,level);
+  assert.deepEqual(f.texts,['kept']);assert.match((f.errors[0] as Error).message,/限额/);assert.equal(f.stopped(),1);assert.equal(f.states.at(-1),'idle');
+});
+
+test('session limit stops capture; interrupted tracks and insecure pages never upload',async t=>{
+  const f=captureFixture(t);t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});f.input.start();await flush();
+  // Without an audio meter the recording is cut by time, never into more than one upload's limit.
+  advance(t,MAX_VOICE_SESSION_MS);await drain();assert.equal(f.stopped(),1);assert.equal(f.states.at(-1),'idle');
+  assert.ok(f.uploads.length>10);assert.ok(f.uploads.every(upload=>upload.durationMs<MAX_VOICE_DURATION_MS));
+  f.uploads.length=1;
   const second=createVoiceInput('codex',f.callbacks);second.start();await flush();f.track.onended?.();await flush();assert.equal(f.uploads.length,1);assert.match(f.errors.at(-1)!.message,/中断/);
   replaceGlobal(t,'isSecureContext',false);const third=createVoiceInput('codex',f.callbacks);third.start();await flush();assert.equal(f.requested(),2);assert.match(f.errors.at(-1)!.message,/HTTPS/);
 });

@@ -1,6 +1,7 @@
 import {useEffect,useLayoutEffect,useRef,useState} from 'react';
 import type {VoiceProvider} from '../src/shared/voice';
 import {createVoiceInput,type VoiceInput,type VoiceState,type VoiceCallbacks} from './voice-input';
+export {joinDictation} from './voice-input';
 
 export function useVoiceInput(provider:VoiceProvider,scope:string,connected:boolean,callbacks:Omit<VoiceCallbacks,'state'>){
   const [state,setState]=useState<VoiceState>('idle'),active=useRef<VoiceInput|null>(null);

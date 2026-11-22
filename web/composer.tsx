@@ -1,4 +1,4 @@
-import {useRef,type ChangeEvent,type ReactNode,type RefObject} from 'react';
+import {useEffect,useLayoutEffect,useRef,type ChangeEvent,type ReactNode,type RefObject} from 'react';
 import {SendMessageButton,submitOnDesktop} from './chat-layout';
 import {IconButton} from './icon-button';
 import {MenuItem} from './sheet';
@@ -36,6 +36,13 @@ export function Composer(props:Props){
   const drafted=Boolean(props.draft.trim()||attachments.count);
   // While a turn runs: stop alone without a draft; stop and "send when done" with one, if the runtime queues.
   const showSend=!running||running.queue&&(drafted||send.sending);
+  // Text that arrives from outside the textarea (dictation, a restored draft) would throw the caret to the end.
+  // Someone correcting an earlier word keeps their place; otherwise the newest text is scrolled into view.
+  const field=props.input.current,outside=Boolean(field&&field.value!==props.draft);
+  const editing=outside&&document.activeElement===field&&field!.selectionStart<field!.value.length;
+  const caret=editing?[field!.selectionStart,field!.selectionEnd] as const:null;
+  useLayoutEffect(()=>{if(caret)props.input.current?.setSelectionRange(caret[0],caret[1]);});
+  useEffect(()=>{const el=props.input.current;if(el&&outside&&!caret)el.scrollTop=el.scrollHeight;});
   return <form className={`composer ${attachments.count?'with-images':''}${attachments.drop.dragging?' dragging':''}`} onSubmit={e=>{e.preventDefault();props.submit();}} {...attachments.drop.handlers}>
     <ImageAttachments images={attachments.images} disabled={props.locked||attachments.loading} show={props.showImage} remove={index=>attachments.setImages(old=>old.filter((_,i)=>i!==index))}/>
     <FileAttachments files={attachments.files} disabled={props.locked||attachments.loading} remove={index=>attachments.setFiles(old=>old.filter((_,i)=>i!==index))}/>
