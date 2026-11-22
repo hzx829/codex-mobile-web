@@ -139,6 +139,34 @@ export function claudeArtifactTitles(transcript: string): Map<string, string> {
   return titles;
 }
 
+/** What a session last ran with, as Claude Code (the CLI or the desktop app) records it in the transcript; '' where it says nothing. */
+export type ClaudeRecordedSettings = {model: string; effort: string; permissionMode: string};
+
+/** Where each setting is recorded. A setting the session view shows belongs here, so a session run elsewhere shows it too. */
+const RECORDED: {[K in keyof ClaudeRecordedSettings]: (entry: any) => string} = {
+  // The model of the latest reply; "<synthetic>" marks a message Claude Code wrote itself (an interruption, an API error).
+  model: entry => entry.type === 'assistant' && entry.message?.model !== '<synthetic>' ? str(entry.message?.model) : '',
+  effort: entry => entry.type === 'assistant' ? str(entry.effort) || str(entry.perTurnEffort) : '',
+  // Written on each prompt the user sends.
+  permissionMode: entry => entry.type === 'user' ? str(entry.permissionMode) : '',
+};
+const RECORDED_KEYS = Object.keys(RECORDED) as (keyof ClaudeRecordedSettings)[];
+
+/** Each setting's latest value, read from the end of the transcript; a subagent's entries do not count. */
+export function claudeRecordedSettings(transcript: string): ClaudeRecordedSettings {
+  const found: ClaudeRecordedSettings = {model: '', effort: '', permissionMode: ''};
+  const lines = transcript.split('\n');
+  for (let index = lines.length - 1; index >= 0 && RECORDED_KEYS.some(key => !found[key]); index--) {
+    const line = lines[index];
+    if (!/"(?:model|effort|perTurnEffort|permissionMode)":"/.test(line)) continue;
+    let entry: any;
+    try {entry = JSON.parse(line);} catch {continue;}
+    if (!entry || typeof entry !== 'object' || entry.isSidechain) continue;
+    for (const key of RECORDED_KEYS) if (!found[key]) found[key] = RECORDED[key](entry);
+  }
+  return found;
+}
+
 /** `titles`: names known from elsewhere (the raw transcript, a saved snapshot), used where the messages give none. */
 export function claudeTurns(messages: ClaudeMessage[], running = false, patches?: Map<string, string>, titles?: Map<string, string>,
   /** When the transcript entry with this uuid was written (ISO), or ''. */

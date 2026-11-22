@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp, mkdir, writeFile, utimes} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {claudeArtifactTitles, claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
+import {claudeArtifactTitles, claudeRecordedSettings, claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
 import {ClaudeCodeBridge} from '../src/connector/claude-code.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 import {Ledger} from '../src/connector/ledger.js';
@@ -58,6 +58,25 @@ test('Claude Code transcripts become Codex-style turns', () => {
   assert.equal(claudeTurns([{type: 'user', uuid: 'u', message: {content: 'hi'}}], true)[0].status, 'inProgress');
   assert.equal(toolActivity({name: 'TodoWrite', input: {todos: [{content: 'a', status: 'completed'}, {content: 'b', status: 'pending'}]}}).text, '[x] a\n[ ] b');
   assert.equal(toolActivity({name: 'mcp__x__y', input: {q: 1}}).type, 'toolCall');
+});
+
+test('a session’s model, effort and permission mode are read from the latest entries that record them', () => {
+  const line = (entry: object) => JSON.stringify(entry);
+  const reply = (model: string, extra: object = {}) => line({type: 'assistant', ...extra, message: {role: 'assistant', model, content: []}});
+  const transcript = [
+    line({type: 'user', permissionMode: 'default', message: {role: 'user', content: '先看看'}}),
+    reply('claude-sonnet-4-5', {effort: 'high', perTurnEffort: 'high'}),
+    line({type: 'user', permissionMode: 'auto', message: {role: 'user', content: '继续'}}),
+    line({type: 'api-request', body: {model: 'claude-haiku-4-5', output_config: {effort: 'low'}}}),
+    reply('claude-opus-5-5', {effort: 'xhigh', perTurnEffort: 'xhigh'}),
+    reply('claude-haiku-4-5', {isSidechain: true, effort: 'low'}),
+    reply('<synthetic>'),
+    line({type: 'user', message: {role: 'user', content: [{type: 'tool_result', tool_use_id: 't', content: 'ok'}]}}),
+  ].join('\n');
+  assert.deepEqual(claudeRecordedSettings(transcript), {model: 'claude-opus-5-5', effort: 'xhigh', permissionMode: 'auto'});
+  // An older transcript without them says nothing, rather than guessing.
+  assert.deepEqual(claudeRecordedSettings(reply('claude-opus-5-5')), {model: 'claude-opus-5-5', effort: '', permissionMode: ''});
+  assert.deepEqual(claudeRecordedSettings(''), {model: '', effort: '', permissionMode: ''});
 });
 
 test('connector lists, reads and watches Claude Code sessions from the local transcripts', async () => {
@@ -205,6 +224,67 @@ test('editing a message resumes the session from the turn before it, with diffs 
     assert.equal(starts.at(-1).resumeSessionAt, view.turns.at(-2).anchor);
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(sent.at(-1).message.content.at(-1).text, '只跑单元测试');
+  } finally {
+    bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('a session run in the desktop app shows its own settings and keeps them when the phone continues it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    // As the desktop app writes it: effort on each reply, the permission mode on each prompt.
+    const lines = transcript(cwd).trim().split('\n').map(line => {
+      const entry = JSON.parse(line);
+      if (entry.type === 'assistant') {Object.assign(entry, {effort: 'xhigh', perTurnEffort: 'xhigh'});entry.message.model = 'claude-opus-5-5';}
+      if (entry.type === 'user' && typeof entry.message.content === 'string' && !entry.message.content.startsWith('<')) entry.permissionMode = 'bypassPermissions';
+      return JSON.stringify(entry);
+    });
+    await writeFile(file, lines.join('\n') + '\n');
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const starts: any[] = [];
+    let fallback = 'claude-sonnet-4-5';
+    const query: QueryFn = ({prompt, options}) => {
+      // Reading the model list starts Claude Code briefly too; only resumes are kept.
+      if (options?.resume) starts.push(options);
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const _ of prompt) yield {type: 'result', subtype: 'success', session_id: sid, errors: []};
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      generator.supportedModels = async () => [{value: 'default', displayName: 'Default', description: '', resolvedModel: fallback}];
+      return generator;
+    };
+    const runtime = new ClaudeRuntime(async () => query, () => undefined, 60_000);
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, runtime);
+    const view = await bridge.handle('claude.read', {conversationId: sid});
+    assert.deepEqual([view.model, view.effort, view.permissionMode], ['claude-opus-5-5', 'xhigh', 'bypassPermissions']);
+
+    let n = 0;
+    const opId = () => `${Date.now()}:a1b2c3d4-0000-4000-8000-${String(++n).padStart(12, '0')}`;
+    // Claude Code's default is another model, so the session's own model, level and mode are named.
+    assert.equal((await bridge.handle('claude.send', {conversationId: sid, text: '继续', opId: opId()})).state, 'accepted');
+    assert.deepEqual([starts[0].resume, starts[0].model, starts[0].effort, starts[0].permissionMode, starts[0].allowDangerouslySkipPermissions],
+      [sid, 'claude-opus-5-5', 'xhigh', 'bypassPermissions', true]);
+    const live = await bridge.handle('claude.read', {conversationId: sid});
+    assert.deepEqual([live.model, live.effort, live.permissionMode], ['claude-opus-5-5', 'xhigh', 'bypassPermissions']);
+
+    // Editing restarts the session; what the phone picks wins, the rest is kept. A default resolving to the session's own
+    // model (here an alias with a context suffix) is left in use.
+    fallback = 'claude-opus-5-5[1m]';
+    (runtime as any).models = undefined;
+    const turn = live.turns.at(-1);
+    assert.equal((await bridge.handle('claude.edit', {conversationId: sid, opId: opId(), turnId: turn.id, text: '只跑单元测试', effort: 'high'})).state, 'accepted');
+    assert.deepEqual([starts[1].model, starts[1].effort, starts[1].permissionMode], [undefined, 'high', 'bypassPermissions']);
   } finally {
     bridge?.close();ledger.close();
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;

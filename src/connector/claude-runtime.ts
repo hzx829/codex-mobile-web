@@ -8,8 +8,9 @@ import {BridgeError, type Json} from '../shared/types.js';
 import type {ClaudeBaseline} from './usage-meter.js';
 
 export type QueryFn = (params: {prompt: AsyncIterable<SDKUserMessage>; options?: Options}) => Query;
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
-export const PERMISSION_MODES: readonly PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+// 'auto' is the desktop app's mode in which a classifier approves each call; a session it ran in keeps it here.
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions';
+export const PERMISSION_MODES: readonly PermissionMode[] = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'];
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export const CLAUDE_EFFORTS: readonly ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 

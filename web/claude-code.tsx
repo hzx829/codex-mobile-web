@@ -50,6 +50,7 @@ const MODES:PermissionOption[]=[
   {id:'default',label:'按需审批',description:'按 Claude Code 的规则，需要时请你审批'},
   {id:'acceptEdits',label:'自动接受编辑',description:'文件修改自动接受，命令仍需审批'},
   {id:'plan',label:'只做计划',description:'只读分析并给出计划，你确认后才执行'},
+  {id:'auto',label:'自动审批',description:'由 Claude Code 的分类器判断每一步，拿不准时再请你审批'},
   {id:'bypassPermissions',label:'跳过权限确认',description:'不再请求任何审批，直接执行（慎用）',elevated:true},
 ];
 /** A session without a mode of its own runs in the connector's default mode (older connectors: Claude Code's default). */

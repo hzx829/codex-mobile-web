@@ -9,8 +9,8 @@ import {imageBytes, validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
-import {CLAUDE_EFFORTS, ClaudeRuntime, PERMISSION_MODES, type ClaudeEffort, type ClaudeResponse, type PermissionMode, type QueryFn} from './claude-runtime.js';
-import {claudeArtifactTitles, claudePatches, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
+import {CLAUDE_EFFORTS, ClaudeRuntime, PERMISSION_MODES, type ClaudeEffort, type ClaudeResponse, type LiveSession, type PermissionMode, type QueryFn} from './claude-runtime.js';
+import {claudeArtifactTitles, claudePatches, claudeRecordedSettings, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
 import {entryTimestamp, readPeerStatuses, type PeerStatus} from './claude-progress.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
@@ -55,6 +55,19 @@ function permissionMode(value: unknown): PermissionMode | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (!PERMISSION_MODES.includes(value as PermissionMode)) throw new BridgeError('invalid', '权限模式无效');
   return value as PermissionMode;
+}
+type SessionSettings = {model: string; effort: ClaudeEffort | ''; permissionMode: PermissionMode | ''};
+type ChosenSettings = {model?: string; effort?: ClaudeEffort; permissionMode?: PermissionMode};
+/**
+ * The settings a session runs with: what Claude Code reports while this connector runs it, else what the transcript last
+ * recorded (a session run in the terminal or the desktop app). The session view and every resume read them here.
+ */
+function sessionSettings(live: LiveSession | undefined, transcript: string): SessionSettings {
+  const recorded = claudeRecordedSettings(transcript);
+  const effort = live?.effort || recorded.effort, mode = live?.permissionMode || recorded.permissionMode;
+  return {model: live?.model || recorded.model,
+    effort: CLAUDE_EFFORTS.includes(effort as ClaudeEffort) ? effort as ClaudeEffort : '',
+    permissionMode: PERMISSION_MODES.includes(mode as PermissionMode) ? mode as PermissionMode : ''};
 }
 function optionalEffort(value: unknown): ClaudeEffort | undefined {
   if (value === undefined || value === null || value === '') return undefined;
@@ -130,7 +143,8 @@ export class ClaudeCodeBridge {
       try {
         if (!session || session.closed) {
           const {cwd = ''} = await this.info(id);
-          session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, model, effort, permissionMode: mode});
+          const directory = await projectDirectory(cwd);
+          session = await this.runtime.start({cwd: directory, resume: id, ...await this.resumeSettings(id, directory, {model, effort, permissionMode: mode}, session)});
         } else {
           if (guestWorkspace()) await projectDirectory(session.cwd);
           await this.runtime.configure(session, model, mode, effort);
@@ -199,6 +213,29 @@ export class ClaudeCodeBridge {
     return this.peers.value;
   }
 
+  private raw(id: string) {return this.transcript(id).then(path => readFile(path, 'utf8'), () => '');}
+
+  /**
+   * What a resumed session starts with: what the phone chose, else what the session last ran with, so continuing it here
+   * never quietly changes its model, effort or permission mode.
+   */
+  private async resumeSettings(id: string, cwd: string, chosen: ChosenSettings, live?: LiveSession): Promise<ChosenSettings> {
+    const current = sessionSettings(live, await this.raw(id));
+    return {model: chosen.model || await this.keptModel(current.model, cwd),
+      effort: chosen.effort || current.effort || undefined, permissionMode: chosen.permissionMode || current.permissionMode || undefined};
+  }
+
+  /**
+   * Claude Code resumes on its default model. The session's own model is named only where the default resolves to another
+   * one, so a default alias such as "opus[1m]" that resolves to it stays in use.
+   */
+  private async keptModel(model: string, cwd: string): Promise<string | undefined> {
+    if (!model) return undefined;
+    const models = await this.runtime.supportedModels(cwd).catch(() => [] as Json[]);
+    const fallback = models.find(item => item.id === 'default')?.resolvedModel, base = (value: string) => value.replace(/\[[^\]]*\]$/, '');
+    return typeof fallback === 'string' && fallback && base(fallback) !== base(model) ? model : undefined;
+  }
+
   private async info(id: string) {
     const info = await (await this.sessions()).getSessionInfo(id);
     if (!info) throw new BridgeError('missing', '这台电脑上找不到这条 Claude Code 会话');
@@ -231,7 +268,7 @@ export class ClaudeCodeBridge {
     const external = !live && current.external;
     const running = live ? live.running : external;
     // Edits keep their diffs only in the raw transcript; read it alongside the SDK's messages.
-    const raw = current.exists ? await this.transcript(id).then(path => readFile(path, 'utf8'), () => '') : '';
+    const raw = current.exists ? await this.raw(id) : '';
     const turns = claudeTurns(messages, running, claudePatches(raw, info?.cwd || live?.cwd || ''), claudeArtifactTitles(raw), uuid => entryTimestamp(raw, uuid));
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
     const records = this.ledger?.senders('claude', id) || [];
@@ -243,7 +280,7 @@ export class ClaudeCodeBridge {
     const usage = (messages.findLast(entry => entry.type === 'assistant' && (entry.message as Json | undefined)?.usage)?.message as Json | undefined)?.usage;
     const usedTokens = usage ? ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens'].reduce((sum, key) => sum + (Number(usage[key]) || 0), 0) : 0;
     const contextUsage = usedTokens ? {usedTokens, windowTokens: live ? await this.runtime.contextWindow(live) : null} : null;
-    const model = (messages.findLast(entry => typeof (entry.message as Json | undefined)?.model === 'string')?.message as Json | undefined)?.model;
+    const settings = sessionSettings(live, raw);
     const recent = [];
     let budget = MAX_FRAME - 1024 * 1024;
     for (const turn of turns.slice(-MAX_TURNS).reverse()) {
@@ -253,8 +290,8 @@ export class ClaudeCodeBridge {
     }
     if (turns.length && !recent.length) throw new BridgeError('too_large', 'Claude Code 最新一轮过长，请在电脑上查看');
     return {
-      id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: live?.model || model || '', effort: live?.effort || '', revision: current.revision, running,
-      controlled: Boolean(live), external, permissionMode: live?.permissionMode || '',
+      id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: settings.model, effort: settings.effort, revision: current.revision, running,
+      controlled: Boolean(live), external, permissionMode: settings.permissionMode,
       // 'busy' or 'waiting' as the process holding it reports; 'recent' when only recent transcript writes suggest it.
       externalStatus: external ? current.peer?.status || 'recent' : '', ...(current.peer?.waitingFor ? {waitingFor: current.peer.waitingFor} : {}),
       defaultPermissionMode: this.runtime.defaultMode, canBypass: Boolean(live?.canBypass), requests: live?.pending || [], error: live?.error || '',
@@ -399,7 +436,7 @@ export class ClaudeCodeBridge {
             const directory = await projectDirectory(cwd);
             if ((await this.revision(id)).external && p.confirmIdle !== true)
               throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
-            session = await this.runtime.start({cwd: directory, resume: id, model, effort, permissionMode: mode});
+            session = await this.runtime.start({cwd: directory, resume: id, ...await this.resumeSettings(id, directory, {model, effort, permissionMode: mode})});
           } else {
             if (guestWorkspace()) await projectDirectory(session.cwd);
             await this.runtime.configure(session, model, mode, effort);
@@ -459,11 +496,13 @@ export class ClaudeCodeBridge {
           if (index < 0 || turns[index].items[0]?.role !== 'user') throw new BridgeError('changed', '找不到这条消息，请刷新会话后重试');
           const anchor = turns[index - 1]?.anchor;
           if (!anchor) throw new BridgeError('invalid', '第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话');
-          const live = this.runtime.get(id), kept = mode || live?.permissionMode, keptEffort = effort || live?.effort || undefined;
-          if (live) await this.runtime.shutdown(live);
-          else if ((await this.revision(id)).external && p.confirmIdle !== true)
+          const live = this.runtime.get(id);
+          if (!live && (await this.revision(id)).external && p.confirmIdle !== true)
             throw new BridgeError('active', '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后再继续。');
-          const session = await this.runtime.start({cwd: await projectDirectory(cwd), resume: id, resumeAt: anchor, model, effort: keptEffort, permissionMode: kept});
+          // Read before the running session closes: it knows what it runs with.
+          const directory = await projectDirectory(cwd), kept = await this.resumeSettings(id, directory, {model, effort, permissionMode: mode}, live);
+          if (live) await this.runtime.shutdown(live);
+          const session = await this.runtime.start({cwd: directory, resume: id, resumeAt: anchor, ...kept});
           this.runtime.send(session, input.text, input.images, undefined, p.opId);
           this.ledger?.recordSender({service: 'claude', threadId: id, opId: p.opId, kind: 'text', text: input.text});
           return {submitted: true};
