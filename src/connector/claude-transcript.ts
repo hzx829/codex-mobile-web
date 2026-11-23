@@ -201,6 +201,35 @@ export function claudeTranscriptCwd(transcript: string): string | undefined {
   return moved || first;
 }
 
+/**
+ * What the session said before it was compacted. The Agent SDK returns only the branch since the latest compact boundary;
+ * each boundary names the entry the conversation went on from (`logicalParentUuid`), so the earlier branch is walked back
+ * from there, across older boundaries too. Entries the SDK already returned (those a compaction kept) are left out.
+ */
+export function claudeEarlierMessages(transcript: string, messages: ClaudeMessage[]): ClaudeMessage[] {
+  const first = messages[0];
+  if (first?.type !== 'system' || !transcript.includes('"logicalParentUuid"')) return [];
+  const entries = new Map<string, any>();
+  for (const line of transcript.split('\n')) {
+    if (!line.includes('"uuid"')) continue;
+    let entry: any;
+    try {entry = JSON.parse(line);} catch {continue;}
+    if (entry && typeof entry.uuid === 'string') entries.set(entry.uuid, entry);
+  }
+  const known = new Set(messages.map(entry => entry.uuid)), seen = new Set<string>(), earlier: ClaudeMessage[] = [];
+  let uuid: unknown = entries.get(first.uuid)?.logicalParentUuid;
+  while (typeof uuid === 'string' && !seen.has(uuid)) {
+    seen.add(uuid);
+    const entry = entries.get(uuid);
+    if (!entry) break;
+    const boundary = entry.type === 'system' && entry.subtype === 'compact_boundary';
+    if (!entry.isSidechain && !known.has(uuid) && (entry.type === 'user' || entry.type === 'assistant' || boundary))
+      earlier.push({type: entry.type, uuid, message: entry.message, parent_tool_use_id: null});
+    uuid = entry.parentUuid ?? (boundary ? entry.logicalParentUuid : undefined);
+  }
+  return earlier.reverse();
+}
+
 /** `titles`: names known from elsewhere (the raw transcript, a saved snapshot), used where the messages give none. */
 export function claudeTurns(messages: ClaudeMessage[], running = false, patches?: Map<string, string>, titles?: Map<string, string>,
   /** When the transcript entry with this uuid was written (ISO), or ''. */

@@ -10,7 +10,7 @@ import type {Ledger} from './ledger.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
 import {CLAUDE_EFFORTS, ClaudeRuntime, PERMISSION_MODES, type ClaudeEffort, type ClaudeResponse, type LiveSession, type PermissionMode, type QueryFn} from './claude-runtime.js';
-import {claudeArtifactTitles, claudePatches, claudeRecordedSettings, claudeTranscriptCwd, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
+import {claudeArtifactTitles, claudeEarlierMessages, claudePatches, claudeRecordedSettings, claudeTranscriptCwd, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
 import {entryTimestamp, holderName, readPeerStatuses, type PeerStatus} from './claude-progress.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
@@ -27,6 +27,16 @@ function sendMode(value: unknown): SendMode {
 }
 const PAGE = 50;
 const MAX_TURNS = 60;
+/** The most earlier turns one read adds above the ones the phone already shows. */
+const MAX_EARLIER = 100;
+/** Which turns a read returns: the latest ones, back to the turn `from` when the phone already shows it, plus `earlier` before that. */
+type ReadWindow = {from?: string; earlier?: number};
+function readWindow(p: Json): ReadWindow {
+  const from = p.from === undefined || p.from === null || p.from === '' ? undefined : textRequired(p.from, '起始轮次', 100);
+  const earlier = p.earlier === undefined || p.earlier === null ? 0 : Number(p.earlier);
+  if (!Number.isInteger(earlier) || earlier < 0) throw new BridgeError('invalid', '加载范围无效');
+  return {from, earlier: Math.min(earlier, MAX_EARLIER)};
+}
 /** A transcript written to this recently is treated as an active terminal or IDE session. */
 const ACTIVE_MS = 20_000;
 
@@ -109,6 +119,8 @@ export class ClaudeCodeBridge {
   private peers?: {at: number; value: Promise<Map<string, PeerStatus>>};
   /** Claude Code's guess at the next prompt, by session, with the turn it follows; it outlives the released process. */
   private suggestions = new Map<string, {text: string; turn: string}>();
+  /** What a session said before its latest compaction, by session and that compaction's boundary: it never changes. */
+  private compacted = new Map<string, {boundary: string; messages: ClaudeMessage[]}>();
   readonly runtime: ClaudeRuntime;
   /** Shows claude.ai Artifacts through this computer; unset where the connector has no browser profile. */
   artifacts?: ArtifactViewer;
@@ -261,7 +273,21 @@ export class ClaudeCodeBridge {
     return guestWorkspace() ? {...info, cwd: await projectDirectory(info.cwd || '')} : info;
   }
 
-  private async read(id: string, known?: string): Promise<Json> {
+  /** The SDK's messages since the latest compaction, preceded by what came before it. `earlier`: how many of them are from before. */
+  private withEarlier(id: string, messages: ClaudeMessage[], raw: string) {
+    const boundary = messages[0]?.type === 'system' ? messages[0].uuid : '';
+    if (!boundary) return {all: messages, earlier: 0};
+    let saved = this.compacted.get(id);
+    if (saved?.boundary !== boundary) {
+      saved = {boundary, messages: claudeEarlierMessages(raw, messages)};
+      this.compacted.delete(id);
+      this.compacted.set(id, saved);
+      if (this.compacted.size > 8) this.compacted.delete(this.compacted.keys().next().value!);
+    }
+    return {all: saved.messages.length ? [...saved.messages, ...messages] : messages, earlier: saved.messages.length};
+  }
+
+  private async read(id: string, known?: string, window: ReadWindow = {}): Promise<Json> {
     let current = await this.revision(id);
     if (known && known === current.revision) {
       if (this.watchers >= 32) throw new BridgeError('busy', '观察请求较多，请稍后重试');
@@ -288,11 +314,16 @@ export class ClaudeCodeBridge {
     const running = live ? live.running : external;
     // Edits keep their diffs only in the raw transcript; read it alongside the SDK's messages.
     const raw = current.exists ? await this.raw(id) : '';
-    const turns = claudeTurns(messages, running, claudePatches(raw, info?.cwd || live?.cwd || ''), claudeArtifactTitles(raw), uuid => entryTimestamp(raw, uuid));
+    // The SDK starts at the latest compaction; the transcript still holds what came before, which the phone can scroll back to.
+    const {all, earlier} = this.withEarlier(id, messages, raw);
+    const before = new Set(all.slice(0, earlier).map(entry => entry.uuid));
+    const turns = claudeTurns(all, running, claudePatches(raw, info?.cwd || live?.cwd || ''), claudeArtifactTitles(raw), uuid => entryTimestamp(raw, uuid));
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
     const records = this.ledger?.senders('claude', id) || [];
+    // Edits and forks resume from the SDK's branch, which starts at the latest compaction.
+    if (before.size) for (const turn of turns) if (turn.anchor && before.has(turn.anchor)) turn.canFork = false;
     if (records.length) {
-      const senders = sendersByText(messages.flatMap(entry => {const text = claudeUserText(entry);return text === undefined || !entry.uuid ? [] : [{id: entry.uuid, text}];}), records);
+      const senders = sendersByText(all.flatMap(entry => {const text = claudeUserText(entry);return text === undefined || !entry.uuid ? [] : [{id: entry.uuid, text}];}), records);
       for (const turn of turns) for (const item of turn.items) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
     }
     await this.nameSavedPages(turns);
@@ -307,7 +338,9 @@ export class ClaudeCodeBridge {
     const settings = sessionSettings(live, raw);
     const recent = [];
     let budget = MAX_FRAME - 1024 * 1024;
-    for (const turn of turns.slice(-MAX_TURNS).reverse()) {
+    const anchor = window.from ? turns.findIndex(turn => turn.id === window.from) : -1;
+    const start = Math.max(0, Math.min(turns.length - MAX_TURNS, anchor < 0 ? Infinity : anchor) - (window.earlier || 0));
+    for (const turn of turns.slice(start).reverse()) {
       budget -= Buffer.byteLength(JSON.stringify(turn)) + 1;
       if (budget < 0) break;
       recent.push(turn);
@@ -431,8 +464,8 @@ export class ClaudeCodeBridge {
     }
     const id = textRequired(p.conversationId, '会话', 36);
     if (!sessionId.test(id)) throw new BridgeError('invalid', 'Claude Code 会话 ID 无效');
-    if (action === 'claude.read') return this.read(id);
-    if (action === 'claude.watch') return this.read(id, textRequired(p.revision, '会话版本', 200));
+    if (action === 'claude.read') return this.read(id, undefined, readWindow(p));
+    if (action === 'claude.watch') return this.read(id, textRequired(p.revision, '会话版本', 200), readWindow(p));
     if (action === 'claude.file.read' || action === 'claude.file.download') {
       const path = textRequired(p.path, '文件路径', 4096);
       if (/^[\\/]{2}/.test(path)) throw new BridgeError('invalid', '请选择本机文件');
@@ -518,8 +551,11 @@ export class ClaudeCodeBridge {
         this.sending.add(id);
         try {
           const {cwd = ''} = await this.info(id);
-          const turns = claudeTurns(await (await this.sessions()).getSessionMessages(id, {includeSystemMessages: true}));
+          const messages = await (await this.sessions()).getSessionMessages(id, {includeSystemMessages: true});
+          const turns = claudeTurns(messages);
           const index = turns.findIndex(turn => turn.id === turnId);
+          if (index < 0 && this.withEarlier(id, messages, await this.raw(id)).all.some(entry => entry.uuid === turnId))
+            throw new BridgeError('invalid', '整理上下文之前的消息不能改写。可以改写之后的消息，或在会话菜单里“复制会话”');
           if (index < 0 || turns[index].items[0]?.role !== 'user') throw new BridgeError('changed', '找不到这条消息，请刷新会话后重试');
           const anchor = turns[index - 1]?.anchor;
           if (!anchor) throw new BridgeError('invalid', '第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话');

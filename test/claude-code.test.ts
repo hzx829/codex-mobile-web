@@ -409,3 +409,71 @@ test('claude.ai pages are named from the raw transcript and repeated on the newe
   assert.deepEqual(claudeTurns(branch.slice(0, 3).map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles).at(-1)?.pages, [{url: page, title: '持仓决策看板', changed: 't2', shown: 't2'}]);
   assert.equal(claudeTurns([{type: 'user', uuid: 'u', message: {content: 'hi'}}]).at(-1)?.pages, undefined);
 });
+
+/** `count` prompts and replies, compacted after `compactAfter` of them: the SDK returns only what follows the boundary. */
+function compactedTranscript(cwd: string, count: number, compactAfter: number) {
+  let parent: string | null = null, n = 0;
+  const base = {sessionId: sid, cwd, version: '2.1.0', userType: 'external', isSidechain: false};
+  const lines: object[] = [];
+  const add = (entry: object) => {
+    const uuid = `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
+    lines.push({parentUuid: parent, ...base, ...entry, uuid, timestamp: new Date(1_790_000_000_000 + n * 1000).toISOString()});
+    parent = uuid;
+    return uuid;
+  };
+  for (let index = 1; index <= count; index++) {
+    if (index === compactAfter + 1) {
+      const last = parent;
+      parent = null;
+      add({type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', logicalParentUuid: last, compactMetadata: {trigger: 'auto'}});
+      add({type: 'user', isCompactSummary: true, isVisibleInTranscriptOnly: true,
+        message: {role: 'user', content: 'This session is being continued from a previous conversation that ran out of context. Summary…'}});
+    }
+    add({type: 'user', message: {role: 'user', content: `问题 ${index}`}});
+    add({type: 'assistant', message: {id: `msg_${index}`, role: 'assistant', model: 'claude-sonnet-4-5', content: [{type: 'text', text: `回答 ${index}`}]}});
+  }
+  return lines.map(line => JSON.stringify(line)).join('\n') + '\n';
+}
+
+test('a compacted session shows what came before the compaction, and the phone can load earlier turns', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, compactedTranscript(cwd, 100, 90));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'));
+    const text = (turn: any) => turn.items.find((item: any) => item.role === 'user')?.text;
+
+    const view = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(view.turns.length, 60);assert.equal(view.truncated, true);
+    assert.equal(text(view.turns[0]), '问题 41');assert.equal(text(view.turns.at(-1)), '问题 100');
+    assert.ok(view.turns.at(-11).items.some((item: any) => item.type === 'contextCompaction'));
+    // Edits and forks resume from the branch after the compaction.
+    assert.equal(view.turns.find((turn: any) => text(turn) === '问题 50').canFork, false);
+    assert.equal(view.turns.find((turn: any) => text(turn) === '问题 95').canFork, true);
+
+    const earlier = await bridge.handle('claude.read', {conversationId: sid, from: view.turns[0].id, earlier: 30});
+    assert.equal(earlier.turns.length, 90);assert.equal(text(earlier.turns[0]), '问题 11');assert.equal(earlier.truncated, true);
+    // Watching keeps the loaded turns.
+    const kept = await bridge.handle('claude.read', {conversationId: sid, from: earlier.turns[0].id});
+    assert.equal(text(kept.turns[0]), '问题 11');
+    const all = await bridge.handle('claude.read', {conversationId: sid, from: kept.turns[0].id, earlier: 30});
+    assert.equal(all.turns.length, 100);assert.equal(text(all.turns[0]), '问题 1');assert.equal(all.truncated, false);
+    const ids = all.turns.flatMap((turn: any) => turn.items.map((item: any) => item.id));
+    assert.equal(new Set(ids).size, ids.length);
+
+    const edit = await bridge.handle('claude.edit', {conversationId: sid, turnId: all.turns[49].id, text: '改写', opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-000000000001`});
+    assert.equal(edit.state, 'failed');assert.match(edit.error.message, /整理上下文之前/);
+    await assert.rejects(bridge.handle('claude.read', {conversationId: sid, earlier: -1}), /无效/);
+  } finally {
+    bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});

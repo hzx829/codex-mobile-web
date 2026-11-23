@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState} from 'react';
+import {useEffect,useLayoutEffect,useRef,useState} from 'react';
 import {ConversationStatus,ConversationTurn,NextStepCard,PendingMessage,RunningStep,connectionLost} from './conversation';
 import {ThreadMenu} from './thread-menu';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
@@ -60,6 +60,8 @@ const modeLabel=(mode:string)=>MODES.find(m=>m.id===mode)?.label||mode;
 const REMEMBER={session:'本会话允许',project:'本项目始终允许',user:'始终允许'} as const;
 /** The level Claude Code marks as recommended; shown until one is chosen here. */
 const RECOMMENDED_EFFORT='medium';
+/** Turns one "load earlier" adds above the ones shown. */
+const EARLIER_PAGE=30;
 function load(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
 /** The last model chosen for new sessions; "default" was a list entry before the list dropped it. */
 function storedModel(machine:string){const value=load(`claude:${machine}:model`);return value==='default'?'':value;}
@@ -81,6 +83,11 @@ export function ClaudeCodePanel(props:Props){
   const [models,setModels]=useState<Json[]|null>(()=>storedModels(machine)),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]),[defaultMode,setDefaultMode]=useState('');
   const request=useRef(call);request.current=call;
   const alive=useRef(true),modelsRead=useRef(false),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
+  // Once earlier turns are loaded, every read keeps them: it returns the latest turns back to this one.
+  const from=useRef(''),scrollAnchor=useRef<{element:HTMLElement;top:number}|null>(null),earlierRequest=useRef<object|null>(null);
+  const [loadingEarlier,setLoadingEarlier]=useState(false),[earlierError,setEarlierError]=useState('');
+  useEffect(()=>{from.current='';earlierRequest.current=null;setLoadingEarlier(false);setEarlierError('');},[conversationId]);
+  const windowFor=()=>from.current?{from:from.current}:{};
   useComposerHeight(composer,draft,true);
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   function edit(text:string){setDraft(text);store(`${scope}:draft`,text);}
@@ -89,7 +96,7 @@ export function ClaudeCodePanel(props:Props){
   const refresh=useStableEvent(async(clearError=true)=>{
     if(!connected||creating)return;
     setBusy(true);
-    try{const next=await request.current('claude.read',{conversationId});if(alive.current){setView(next);if(clearError)setError('');setWatchError('');}}
+    try{const sent=from.current,next=await request.current('claude.read',{conversationId,...windowFor()});if(alive.current&&sent===from.current){setView(next);if(clearError)setError('');setWatchError('');}}
     catch(e){failed(e);}
     finally{if(alive.current)setBusy(false);}
   });
@@ -105,10 +112,11 @@ export function ClaudeCodePanel(props:Props){
       if(!active||inflight||document.visibilityState!=='visible')return;
       inflight=true;let retry=0;
       try{
-        const next=await request.current('claude.watch',{conversationId,revision:view!.revision});
+        const sent=from.current,next=await request.current('claude.watch',{conversationId,revision:view!.revision,...windowFor()});
         if(!active)return;
         setWatchError('');
-        if(!next.unchanged){setView(next);return;}
+        // Read before earlier turns were added, it would drop them; the view still has the old revision, so watching again reads at once.
+        if(!next.unchanged&&sent===from.current){setView(next);return;}
       }catch{if(active)setWatchError('与电脑的会话同步中断，正在重连…');retry=2500;}
       finally{inflight=false;}
       if(active)timer=setTimeout(watch,retry);
@@ -117,7 +125,25 @@ export function ClaudeCodePanel(props:Props){
     document.addEventListener('visibilitychange',watch);
     return()=>{active=false;clearTimeout(timer);document.removeEventListener('visibilitychange',watch);};
   },[connected,conversationId,view?.revision]);
-  useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,outgoing]);
+  useLayoutEffect(()=>{
+    const el=scroll.current,anchor=scrollAnchor.current;scrollAnchor.current=null;if(!el)return;
+    // Turns added above keep what was on screen in place.
+    if(anchor?.element.isConnected)el.scrollTop+=anchor.element.getBoundingClientRect().top-anchor.top;
+    else if(stick.current)el.scrollTop=el.scrollHeight;
+  },[view,outgoing]);
+  async function loadEarlier(){
+    const first=view?.turns?.[0]?.id;if(!connected||creating||!view?.truncated||!first||earlierRequest.current)return;
+    const mine={};earlierRequest.current=mine;setLoadingEarlier(true);setEarlierError('');stick.current=false;
+    try{
+      const next=await request.current('claude.read',{conversationId,from:first,earlier:EARLIER_PAGE});
+      if(!alive.current||earlierRequest.current!==mine)return;
+      const element=scroll.current?.querySelector<HTMLElement>('.turn');
+      if(element)scrollAnchor.current={element,top:element.getBoundingClientRect().top};
+      from.current=next.turns?.[0]?.id||'';
+      setView(next);
+    }catch(e:any){if(alive.current&&earlierRequest.current===mine)setEarlierError(e?.message||'加载失败，请重试');}
+    finally{if(earlierRequest.current===mine){earlierRequest.current=null;if(alive.current)setLoadingEarlier(false);}}
+  }
   // claude.ai pages follow Claude's own app: the conversation's page comes back with it, and a publish or an open call brings a page up.
   const pagesSeen=useRef<Map<string,string>|null>(null),showPage=useStableEvent(props.showPage);
   useEffect(()=>{
@@ -273,7 +299,7 @@ export function ClaudeCodePanel(props:Props){
   const editTurn=useStableEvent((turnId:string,_item:string,text:string)=>resend(turnId,text));
   const diff=useStableEvent((turn:TurnView)=>props.showDiff(turn));
   const fork=useStableEvent((turn:TurnView)=>{
-    if(!turn.canFork||!turn.anchor){setNotice(turn.status==='inProgress'?'请等这一轮结束后再分叉':'这一轮暂不能分叉，请刷新后重试');return;}
+    if(!turn.canFork||!turn.anchor){setNotice(turn.status==='inProgress'?'请等这一轮结束后再分叉':turn.anchor?'整理上下文之前的轮次不能分叉，可以从之后的轮次分叉':'这一轮暂不能分叉，请刷新后重试');return;}
     void mutate('claude.fork',{conversationId,upToMessageId:turn.anchor},result=>props.forked(result.conversationId));
   });
   const followup=useStableEvent((text:string)=>{edit(draft.trim()?`${draft.trimEnd()}\n\n${text}`:text);composer.current?.focus();});
@@ -329,7 +355,7 @@ export function ClaudeCodePanel(props:Props){
       </>}
     </ThreadHeader>
     {view?.notice&&<div className="banner">{view.notice}</div>}
-    <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={()=>{const el=scroll.current!;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;}}><div className="timeline-content">
+    <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={()=>{const el=scroll.current!;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;if(el.scrollTop<160&&!earlierError)void loadEarlier();}}><div className="timeline-content">
       {creating?<div className="new-chat-welcome"><h1>交给 Claude Code</h1>
         <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} onChange={e=>setTarget(e.target.value)}>
           {!target&&<option value="">{guest?'选择或新建项目':'正在读取项目…'}</option>}
@@ -341,7 +367,7 @@ export function ClaudeCodePanel(props:Props){
           <GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setPlaces(old=>old.some(item=>item.id===path)?old:[...old,{id:path,path}]);setTarget(path);}}/>
         </details>:target===OTHER&&<label className="claude-project"><input autoFocus aria-label="文件夹路径" placeholder="电脑上的完整路径" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>}
         {startPath&&<p className="muted">{startPath}</p>}</div>:<>
-        {view?.truncated&&<p className="muted">仅显示近期记录，完整会话可在电脑查看。</p>}
+        {view?.truncated&&<button type="button" className="more-link earlier" disabled={!connected||loadingEarlier} onClick={()=>void loadEarlier()}>{loadingEarlier?'正在加载…':earlierError?`${earlierError} · 重试`:'加载更早内容'}</button>}
         {!view&&busy&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         <SenderScope senders={turns.flatMap(turn=>turn.items.map(item=>item.sender))}>{turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source="connector"  latestUser={false} disabled={!canWrite}
           openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={editTurn} onFork={fork} onDiff={diff} onBlocked={setNotice} editBlocked={!view?.truncated&&turn.id===turns[0]?.id?FIRST_MESSAGE:undefined}/>)}</SenderScope>
