@@ -14,7 +14,7 @@ const snapWidth=(width:number)=>Math.max(320,Math.min(1600,Math.floor(width/40)*
  * `fresh` names the page's latest change; a new value means the saved copy is out of date and is made again.
  */
 export function ArtifactPanel({url,connected,call,onTitle,fresh}:{url:string;connected:boolean;call:Call;onTitle?:(title:string)=>void;fresh?:string}){
-  const [state,setState]=useState<'loading'|'rendering'|'login'|'ready'|'error'>('loading');
+  const [state,setState]=useState<'loading'|'rendering'|'login'|'challenge'|'ready'|'error'>('loading');
   const [page,setPage]=useState<Ready|null>(null),[error,setError]=useState(''),[progress,setProgress]=useState(0);
   const box=useRef<HTMLDivElement>(null),run=useRef(0),request=useRef(call),loaded=useRef<string|undefined>(undefined);request.current=call;
   async function load(refresh=false){
@@ -31,7 +31,7 @@ export function ArtifactPanel({url,connected,call,onTitle,fresh}:{url:string;con
         setState('rendering');
         if(tries>=8)throw new Error('电脑渲染页面超时，请稍后刷新');
       }
-      if(result.state==='login'){setState('login');return;}
+      if(result.state==='login'||result.state==='challenge'){setState(result.state);return;}
       const file:FilePreview=result.file;
       const controller=new AbortController();
       const blob=await receiveFile(file,offset=>request.current('claude.artifact.download',{slug:result.slug,name:file.name,revision:file.revision,offset}),controller.signal,bytes=>alive()&&setProgress(file.size?bytes/file.size:1));
@@ -48,7 +48,7 @@ export function ArtifactPanel({url,connected,call,onTitle,fresh}:{url:string;con
     </div>
     {error&&<p className="preview-notice error" role="alert">{error}</p>}
     {state==='ready'&&page?<iframe title={page.title} srcDoc={page.html} sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer"/>:
-      state==='login'?<ArtifactSignIn call={call} connected={connected} done={()=>void load(true)}/>:
+      state==='login'||state==='challenge'?<ArtifactSignIn key={state} call={call} connected={connected} challenge={state==='challenge'} done={()=>void load(true)}/>:
       <div className="preview-empty" role={state==='error'?'alert':'status'}>
         {state==='error'?<><p>{error}</p><button disabled={!connected} onClick={()=>void load()}>重试</button></>:
           <p>{!connected?'电脑未连接':progress>0?`正在接收页面 ${Math.floor(progress*100)}%`:state==='rendering'?'电脑正在打开并渲染页面…':'正在请求电脑…'}</p>}
@@ -57,6 +57,7 @@ export function ArtifactPanel({url,connected,call,onTitle,fresh}:{url:string;con
 }
 
 const EMAIL_KEY='cmw.claude-signin-email';
+const CHALLENGE='claude.ai 要求这台电脑先通过一次 Cloudflare 人机验证。被程序控制的浏览器过不了这一步，需要在电脑屏幕上用鼠标完成。';
 const remembered=()=>{try{return localStorage.getItem(EMAIL_KEY)||'';}catch{return '';}};
 const remember=(email:string)=>{try{localStorage.setItem(EMAIL_KEY,email);}catch{}};
 /** An older connector answers new sign-in operations with this. */
@@ -67,11 +68,13 @@ const outdated=(e:unknown)=>(e as {code?:string;message?:string})?.code==='inval
  * and the link or code it brings is handed back here. Otherwise in a window on the computer's own screen, by remote
  * control (screenshots here, taps and typing sent back), or with a session cookie pasted from a signed-in browser.
  */
-function ArtifactSignIn({call,connected,done}:{call:Call;connected:boolean;done:()=>void}){
+function ArtifactSignIn({call,connected,done,challenge=false}:{call:Call;connected:boolean;done:()=>void;challenge?:boolean}){
   const [shot,setShot]=useState<Json|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[text,setText]=useState(''),[link,setLink]=useState(''),[started,setStarted]=useState(false);
   const [desk,setDesk]=useState<'opening'|'open'|'closed'|null>(null);
   const [email,setEmail]=useState(remembered),[stage,setStage]=useState<'email'|'sent'|'mfa'>('email'),[answer,setAnswer]=useState(''),[cookie,setCookie]=useState('');
   const [waiting,setWaiting]=useState(false),[stuck,setStuck]=useState(''),[more,setMore]=useState(false);
+  /** Cloudflare wants a person: only the plain window on the computer's screen gets past it. */
+  const [check,setCheck]=useState(challenge?CHALLENGE:'');
   const screen=useRef<HTMLDivElement>(null),lock=useRef(false),alive=useRef(true),request=useRef(call);request.current=call;
   /** Runs one step of the email or cookie sign-in and moves to what the computer reports. */
   async function step(payload:Json){
@@ -82,6 +85,7 @@ function ArtifactSignIn({call,connected,done}:{call:Call;connected:boolean;done:
       if(result.signedIn){done();return;}
       if(result.stage==='sent'){setStage('sent');setAnswer('');}
       else if(result.stage==='mfa'){setStage('mfa');setAnswer('');}
+      else if(result.stage==='challenge')setCheck(result.message||CHALLENGE);
       else if(result.stage==='blocked')setStuck(result.message||'claude.ai 的登录页没有继续');
       else setError(result.message||'登录没有成功');
     }catch(e){if(alive.current)setError(outdated(e)?'这台电脑上的连接器还不支持这种登录方式，请先更新连接器。':(e as Error)?.message||'操作失败');}
@@ -121,7 +125,7 @@ function ArtifactSignIn({call,connected,done}:{call:Call;connected:boolean;done:
     try{
       const result=await request.current('claude.artifact.login',{op});
       if(!alive.current)return;
-      if(result.signedIn){setDesk(null);done();}
+      if(result.signedIn||check&&result.desktop&&!result.open){setDesk(null);done();}
       else if(result.desktop)setDesk(result.open?'open':'closed');
       else throw new Error('这台电脑上的连接器还不支持，请更新连接器');
     }catch(e){if(alive.current&&op==='desktop'){setDesk(null);setError(`没能在电脑上打开登录窗口：${(e as Error)?.message||'操作失败'}。可以改用远程登录。`);}}
@@ -129,10 +133,20 @@ function ArtifactSignIn({call,connected,done}:{call:Call;connected:boolean;done:
   }
   useEffect(()=>{if(desk!=='open'||!connected)return;const timer=setInterval(()=>{if(document.visibilityState==='visible')void desktop('status');},2000);return()=>clearInterval(timer);},[desk,connected]);
   if(!started&&(desk==='open'||desk==='opening'))return <div className="preview-empty artifact-login-intro">
-    <p role="status">{desk==='opening'?'正在电脑上打开登录窗口…':'电脑屏幕上已打开登录窗口，请在那里登录 claude.ai。登录完成后这里会自动显示页面。'}</p>
+    <p role="status">{desk==='opening'?'正在电脑上打开浏览器窗口…':'电脑屏幕上已打开浏览器窗口。请在里面完成验证、登录 claude.ai，然后关掉这个窗口，这里会自动继续。'}</p>
     {desk==='open'&&<button disabled={!connected} onClick={()=>{setDesk(null);void request.current('claude.artifact.login',{op:'close'}).catch(()=>{});}}>取消</button>}
   </div>;
   const off=!connected||waiting;
+  if(!started&&check)return <div className="artifact-login artifact-login-intro">
+    <p>{check}</p>
+    <small>电脑屏幕上会打开连接器自己的浏览器，它不受程序控制。在里面勾选“请验证您是真人”，还没登录的话顺便登录 claude.ai，然后关掉这个窗口。不在电脑旁时没法完成这一步。</small>
+    {desk==='closed'&&<p role="status">窗口已关闭。</p>}
+    {error&&<p className="error" role="alert">{error}</p>}
+    <div className="artifact-login-keys">
+      <button type="button" className="primary" disabled={!connected} onClick={()=>void desktop('desktop')}>在电脑屏幕上打开</button>
+      <button type="button" disabled={!connected} onClick={done}>已经验证过，重试</button>
+    </div>
+  </div>;
   if(!started)return <div className="artifact-login artifact-login-intro">
     <p>这台电脑的中转浏览器还没有登录 claude.ai。登录一次即可，登录信息只保存在电脑上连接器的数据目录里。</p>
     {stage==='email'?<>
@@ -159,7 +173,7 @@ function ArtifactSignIn({call,connected,done}:{call:Call;connected:boolean;done:
     <details className="artifact-login-more" open={more} onToggle={e=>setMore(e.currentTarget.open)}>
       <summary>其他登录方式</summary>
       <div className="artifact-login-keys">
-        <button type="button" disabled={off} onClick={()=>void desktop('desktop')}>在电脑屏幕上打开登录窗口</button>
+        <button type="button" disabled={off} onClick={()=>void desktop('desktop')}>在电脑屏幕上打开浏览器</button>
         <button type="button" disabled={off} onClick={()=>void remote(false)}>远程画面登录</button>
       </div>
       <small>“远程画面”在这里显示电脑浏览器的画面，点画面就是点电脑上的页面，本设备不访问 claude.ai。</small>

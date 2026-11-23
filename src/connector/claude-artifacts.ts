@@ -1,6 +1,6 @@
 import {spawn, type ChildProcess} from 'node:child_process';
 import {existsSync} from 'node:fs';
-import {mkdir, readdir, readFile, rm, writeFile} from 'node:fs/promises';
+import {lstat, mkdir, open as openFile, readdir, readFile, rm, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {WebSocket} from 'ws';
@@ -33,6 +33,7 @@ const SITE = 'https://claude.ai';
 const SESSION_COOKIE = /^sessionKey(?:V\d+)?$/;
 /** Pages of the sign-in itself: being on one means sign-in is not finished, whatever cookies are there. */
 const SIGN_IN_PATH = /^\/(?:login|magic-link|sso-callback|oauth)(?:\/|$)/;
+const CHALLENGE = 'claude.ai 要求先通过 Cloudflare 人机验证。被程序控制的浏览器过不了这一步，需要在电脑屏幕上的窗口里用鼠标完成。';
 /** Links from claude.ai's sign-in email, which may be opened in the connector's browser. */
 const SIGN_IN_LINK = /^https:\/\/(?:[a-z0-9-]+\.)*(?:claude\.ai|anthropic\.com)\//i;
 /**
@@ -44,8 +45,15 @@ const LOGIN_STATE = `(() => {
   const shown = el => !!el && !el.closest('[hidden]') && el.getClientRects().length > 0;
   const active = [...document.querySelectorAll('.si-step[data-active]')].find(shown);
   const alert = [...document.querySelectorAll('[role=alert], cds-field-error')].filter(el => shown(el) && el.textContent.trim()).map(el => el.textContent.trim())[0] || '';
-  const challenge = [...document.querySelectorAll('iframe')].some(f => /hcaptcha|challenges\\.cloudflare/.test(f.src) && shown(f) && f.getBoundingClientRect().width > 100);
-  return {host: location.hostname, path: location.pathname, title: document.title, step: active ? active.getAttribute('data-step') : '', alert, challenge,
+  // claude.ai keeps hCaptcha frames in the page, clipped to nothing; one counts only where it can be seen and clicked.
+  const onTop = f => {
+    if (f.closest('[inert],[aria-hidden="true"]') || getComputedStyle(f).visibility === 'hidden') return false;
+    const r = f.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+    return r.width > 100 && r.height > 60 && x >= 0 && y >= 0 && x < innerWidth && y < innerHeight && document.elementFromPoint(x, y) === f;
+  };
+  const challenge = [...document.querySelectorAll('iframe')].some(f => /hcaptcha/.test(f.src) && onTop(f));
+  const cloudflare = /^(Just a moment|请稍候)/.test(document.title) || /challenge|cdn-cgi/.test(location.pathname);
+  return {host: location.hostname, path: location.pathname, title: document.title, step: active ? active.getAttribute('data-step') : '', alert, challenge, cloudflare,
     email: shown(document.querySelector('#email')), another: shown(document.querySelector('[data-testid=login-use-another-account]'))};
 })()`;
 const DEFAULT_TITLE = 'claude.ai 页面';
@@ -70,6 +78,18 @@ export function findBrowser(env = process.env, exists = existsSync): string | un
  */
 export function profileFolder(executable: string) {
   return /msedge|microsoft[ -]edge/i.test(executable) ? 'claude-browser' : 'claude-browser-chrome';
+}
+
+/**
+ * Whether a browser has this profile open. On Windows it holds the profile's `lockfile` for as long as it runs;
+ * elsewhere it keeps a `SingletonLock` link.
+ */
+export async function profileInUse(profile: string) {
+  if (process.platform !== 'win32') return lstat(join(profile, 'SingletonLock')).then(() => true, () => false);
+  const file = join(profile, 'lockfile');
+  if (!existsSync(file)) return false;
+  try {const handle = await openFile(file, 'r+');await handle.close();return false;}
+  catch (error) {return ['EBUSY', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code || '');}
 }
 
 type Message = {id?: number; method?: string; params?: Json; result?: Json; error?: {message?: string}; sessionId?: string};
@@ -123,7 +143,8 @@ function running(pid?: number) {
 }
 type Frame = {sessionId: string; frameId: string; url: string};
 type Serialized = {html: string; resources: string[]; frames: {src: string; name: string}[]};
-export type Snapshot = {state: 'ready'; slug: string; title: string; at: number; file: Json} | {state: 'login'} | {state: 'rendering'};
+/** `challenge`: Cloudflare wants a person to pass its check, which only the window on the computer's screen can do. */
+export type Snapshot = {state: 'ready'; slug: string; title: string; at: number; file: Json} | {state: 'login'} | {state: 'challenge'} | {state: 'rendering'};
 
 /**
  * Serializer evaluated inside each frame (in an isolated world, so the page's scripts cannot see it).
@@ -231,7 +252,7 @@ export class ArtifactViewer {
   private jobs = new Map<string, Promise<Snapshot>>();
   private login?: {targetId: string; sessionId: string; width: number; height: number};
   /** The sign-in window on the computer's own screen. */
-  private desk?: {targetId: string; off: () => void};
+  private desk?: {child: ChildProcess};
   private visible = false;
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private dataDir: string, private executable = () => findBrowser(), private frameHost = FRAME_HOST,
@@ -246,6 +267,7 @@ export class ArtifactViewer {
       const exe = this.executable();
       if (!exe) throw new BridgeError('unavailable', '电脑上没有找到 Edge 或 Chrome，无法中转 claude.ai 页面。可在连接器环境变量 CLAUDE_ARTIFACT_BROWSER 指定浏览器。');
       const profile = join(this.dataDir, profileFolder(exe));
+      if (await profileInUse(profile)) throw new BridgeError('busy', '电脑屏幕上的 claude.ai 窗口还开着，请在那里完成后关掉它。');
       await mkdir(profile, {recursive: true});
       const portFile = join(profile, 'DevToolsActivePort');
       await rm(portFile, {force: true});
@@ -284,7 +306,7 @@ export class ArtifactViewer {
   }
   /** Closes the browser, and ends its process if it has not exited within two seconds. */
   private async stop(browser: Browser) {
-    this.browser = undefined;this.login = undefined;this.desk?.off();this.desk = undefined;
+    this.browser = undefined;this.login = undefined;
     await browser.cdp.send('Browser.close', {}, undefined, 2000).catch(() => {});
     for (let i = 0; i < 20 && running(browser.pid); i++) await delay(100);
     browser.cdp.close();
@@ -332,7 +354,7 @@ export class ArtifactViewer {
     let job = this.jobs.get(variant + slug);
     if (!job) {
       job = this.serial(() => this.capture(String(p.url), width, dark)).then(async result => {
-        void this.note('html' in result);
+        if ('html' in result || result.state === 'login') void this.note('html' in result);
         if ('html' in result) {
           await mkdir(dir, {recursive: true});
           await writeFile(file, result.html);
@@ -372,7 +394,7 @@ export class ArtifactViewer {
     return downloadProjectFile(this.snapshots(slug), name, String(p.revision || ''), Number(p.offset));
   }
 
-  private async capture(url: string, width: number, dark: boolean, retried = false): Promise<{html: string; title: string} | {state: 'login'}> {
+  private async capture(url: string, width: number, dark: boolean, retried = false): Promise<{html: string; title: string} | {state: 'login'} | {state: 'challenge'}> {
     const browser = await this.open();
     const {cdp} = browser;
     const page = await this.tab(browser, width, 900, dark);
@@ -415,8 +437,8 @@ export class ArtifactViewer {
         if (state) {
           if (/challenge|cdn-cgi/.test(state.href) || /^(Just a moment|请稍候)/.test(state.title)) {
             if (this.now() - started > 20_000) {
-              // A check that needs a person goes to the phone's sign-in view, where they can tick it themselves.
-              if (retried || browser.visible) return {state: 'login'};
+              // A check that wants a person is not a sign-out: it is passed in the window on the computer's screen.
+              if (retried || browser.visible) return {state: 'challenge'};
               this.visible = true;
               return this.capture(url, width, dark, true);
             }
@@ -537,52 +559,45 @@ export class ArtifactViewer {
     const {cookies = []} = await cdp.send('Storage.getCookies').catch((): Json => ({}));
     return (cookies as Json[]).some(cookie => SESSION_COOKIE.test(String(cookie.name)) && this.onSite(cookie.domain));
   }
-  private async closeDesk(browser?: Browser) {
+  private closeDesk() {
     const desk = this.desk;
-    if (!desk) return;
-    this.desk = undefined;desk.off();
-    await browser?.cdp.send('Target.closeTarget', {targetId: desk.targetId}).catch(() => {});
+    this.desk = undefined;
+    if (desk?.child.exitCode === null) desk.child.kill();
   }
 
   /**
-   * Sign-in at the computer: an ordinary window of the connector's browser, on the computer's screen, at claude.ai's
-   * sign-in page. `start` opens it; without it this reports whether the window is still open and whether sign-in is done.
+   * Sign-in at the computer: the connector's profile opened in a plain browser window on the computer's screen, at
+   * claude.ai's sign-in page, with no remote debugging and nothing attached. Cloudflare's "verify you are human" keeps
+   * coming back in a browser under DevTools control, so this window is where a person passes it, and signs in.
+   * The connector's own browser stays closed meanwhile (one browser per profile). Nothing can be read from the window,
+   * so it is done when the person closes it; the profile's cookies then tell whether sign-in happened.
+   * `start` opens it; without it this reports whether it is still open and, once closed, whether sign-in is done.
    */
   private async deskSignIn(start: boolean): Promise<Json> {
-    if (start) {
-      this.visible = true;
-      const browser = await this.open(), {cdp} = browser;
-      await this.closeDesk(browser);
-      const bounds = {left: 80, top: 60, width: 1100, height: 820};
-      const {targetId} = await cdp.send('Target.createTarget', {url: this.loginUrl, newWindow: true, ...bounds});
-      // The browser's first window sits off-screen; this one must not inherit that.
-      const {windowId} = await cdp.send('Browser.getWindowForTarget', {targetId}).catch((): Json => ({}));
-      if (windowId !== undefined) {
-        await cdp.send('Browser.setWindowBounds', {windowId, bounds: {windowState: 'normal'}}).catch(() => {});
-        await cdp.send('Browser.setWindowBounds', {windowId, bounds}).catch(() => {});
-      }
-      await cdp.send('Target.activateTarget', {targetId}).catch(() => {});
-      // A window the person closes themselves must not keep the browser running.
-      await cdp.send('Target.setDiscoverTargets', {discover: true}).catch(() => {});
-      const off = cdp.on(message => {
-        if (message.method !== 'Target.targetDestroyed' || message.params?.targetId !== targetId || this.desk?.targetId !== targetId) return;
-        this.desk = undefined;off();this.rest();
-      });
-      this.desk = {targetId: String(targetId), off};
+    const exe = this.executable();
+    if (!exe) throw new BridgeError('unavailable', '电脑上没有找到 Edge 或 Chrome。');
+    const profile = join(this.dataDir, profileFolder(exe));
+    if (start && !(this.desk && await profileInUse(profile))) {
+      const current = await this.browser?.catch(() => undefined);
+      if (current) await this.stop(current);
+      this.login = undefined;
+      await mkdir(profile, {recursive: true});
+      const child = spawn(exe, [`--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-sync', '--hide-crash-restore-bubble',
+        '--new-window', '--window-position=80,60', '--window-size=1100,820', this.loginUrl], {stdio: 'ignore'});
+      child.on('error', () => {});
+      this.desk = {child};
+      for (let i = 0; i < 100 && !(await profileInUse(profile)); i++) await delay(100);
+      if (!await profileInUse(profile)) {this.desk = undefined;throw new BridgeError('unavailable', '电脑上的浏览器窗口没有打开');}
     }
-    const browser = await this.browser?.catch(() => undefined);
-    if (!browser || browser.cdp.closed) {this.desk = undefined;return {desktop: true, open: false, signedIn: false};}
-    const {targetInfos = []} = this.desk ? await browser.cdp.send('Target.getTargets').catch((): Json => ({})) : {};
-    const target = (targetInfos as Json[]).find(info => info.targetId === this.desk?.targetId);
-    if (!target) await this.closeDesk();
-    let path = '';
-    try {path = target ? new URL(String(target.url)).pathname : '';} catch {}
-    // Signed in once the session cookie is there and claude.ai has moved on from its sign-in page.
-    const signedIn = await this.signedIn(browser.cdp) && !(target && (SIGN_IN_PATH.test(path) || !this.onSite(new URL(String(target.url)).hostname)));
-    if (signedIn && target) await this.closeDesk(browser);
+    if (this.desk && await profileInUse(profile)) return {desktop: true, open: true, signedIn: false};
+    if (!this.desk) return {desktop: true, open: false, signedIn: (await this.known()).signedIn === 'yes'};
+    this.desk = undefined;
+    // Closed: the connector's browser looks at the cookies the window left, without opening any page.
+    const browser = await this.open();
+    const signedIn = await this.signedIn(browser.cdp);
     await this.note(signedIn);
     this.rest();
-    return {desktop: true, open: Boolean(this.desk), signedIn};
+    return {desktop: true, open: false, signedIn};
   }
 
   /** The tab sign-in works in. Shared with the remote screen, so a stuck email sign-in can be finished by hand. */
@@ -604,9 +619,17 @@ export class ArtifactViewer {
    */
   private async loginWait(cdp: Cdp, sessionId: string, want: (state: Json) => Json | undefined, ms = 25_000, stale = ''): Promise<Json> {
     const started = this.now();
+    let cloudflare = 0;
     while (this.now() - started < ms) {
       await delay(500);
       const state = await this.loginState(cdp, sessionId);
+      // Cloudflare's quiet check passes by itself in a few seconds; one still there wants a person at the computer.
+      if (state.cloudflare) {
+        cloudflare ||= this.now();
+        if (this.now() - cloudflare > 12_000) return {stage: 'challenge', message: CHALLENGE};
+        continue;
+      }
+      cloudflare = 0;
       if (this.onSite(state.host) && state.path && !SIGN_IN_PATH.test(String(state.path)) && await this.signedIn(cdp)) return {stage: 'done', signedIn: true};
       const hit = want(state);
       if (hit) return hit;
@@ -704,7 +727,8 @@ export class ArtifactViewer {
     while (this.now() - started < 25_000) {
       await delay(800);
       const state = await this.loginState(cdp, sessionId);
-      if (!this.onSite(state.host) || /^(Just a moment|请稍候)/.test(String(state.title || ''))) continue;
+      if (state.cloudflare && this.now() - started > 15_000) return this.loginDone({stage: 'challenge', message: CHALLENGE});
+      if (!this.onSite(state.host) || state.cloudflare) continue;
       const status = await this.evaluate(cdp, sessionId, `fetch('/api/organizations', {credentials: 'include', headers: {accept: 'application/json'}}).then(r => r.status, () => 0)`).catch(() => 0);
       if (status === 200) return this.loginDone({stage: 'done', signedIn: true});
       if (status === 401 || status === 403) {
@@ -731,7 +755,7 @@ export class ArtifactViewer {
     if (op === 'close') return this.serial(async () => {
       const browser = await this.browser?.catch(() => undefined);
       if (browser && this.login) await browser.cdp.send('Target.closeTarget', {targetId: this.login.targetId}).catch(() => {});
-      await this.closeDesk(browser);
+      this.closeDesk();
       this.login = undefined;this.rest();
       return {closed: true};
     });
