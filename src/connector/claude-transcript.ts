@@ -184,6 +184,23 @@ export function claudeRecordedSettings(transcript: string): ClaudeRecordedSettin
   return found;
 }
 
+/**
+ * The folder a session works in, as Claude Code records it: where it was last moved to, else the first entry that names one.
+ * The Agent SDK reads it from the transcript's first 64 KiB only, which a first prompt carrying an image can fill on its own.
+ */
+export function claudeTranscriptCwd(transcript: string): string | undefined {
+  let first: string | undefined, moved: string | undefined;
+  for (const line of transcript.split('\n')) {
+    if (!line.includes('"relocatedCwd"') && (first !== undefined || !line.includes('"cwd"'))) continue;
+    let entry: any;
+    try {entry = JSON.parse(line);} catch {continue;}
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.type === 'relocated' && typeof entry.relocatedCwd === 'string' && entry.relocatedCwd) moved = entry.relocatedCwd;
+    if (first === undefined && typeof entry.cwd === 'string' && entry.cwd) first = entry.cwd;
+  }
+  return moved || first;
+}
+
 /** `titles`: names known from elsewhere (the raw transcript, a saved snapshot), used where the messages give none. */
 export function claudeTurns(messages: ClaudeMessage[], running = false, patches?: Map<string, string>, titles?: Map<string, string>,
   /** When the transcript entry with this uuid was written (ISO), or ''. */

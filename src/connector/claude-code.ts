@@ -10,7 +10,7 @@ import type {Ledger} from './ledger.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
 import {CLAUDE_EFFORTS, ClaudeRuntime, PERMISSION_MODES, type ClaudeEffort, type ClaudeResponse, type LiveSession, type PermissionMode, type QueryFn} from './claude-runtime.js';
-import {claudeArtifactTitles, claudePatches, claudeRecordedSettings, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
+import {claudeArtifactTitles, claudePatches, claudeRecordedSettings, claudeTranscriptCwd, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
 import {entryTimestamp, holderName, readPeerStatuses, type PeerStatus} from './claude-progress.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
@@ -169,8 +169,8 @@ export class ClaudeCodeBridge {
   /** All sessions, newest first, cached briefly: projects and search both need the whole catalog. */
   private async all(force = false) {
     if (!force && this.catalog && this.now() - this.catalog.at < 30_000) return this.catalog.sessions;
-    let sessions = (await (await this.sessions()).listSessions()).filter(info => !info.archived)
-      .sort((a, b) => b.lastModified - a.lastModified);
+    let sessions = await Promise.all((await (await this.sessions()).listSessions()).filter(info => !info.archived)
+      .sort((a, b) => b.lastModified - a.lastModified).map(info => this.withCwd(info)));
     if (guestWorkspace()) {
       const paths = new Map<string, Promise<string | undefined>>();
       for (const info of sessions) {
@@ -247,9 +247,17 @@ export class ClaudeCodeBridge {
     return typeof fallback === 'string' && fallback && base(fallback) !== base(model) ? model : undefined;
   }
 
+  /** The SDK finds no folder when the first prompt's images push it past what it reads; the whole transcript names it. */
+  private async withCwd(info: SessionInfo): Promise<SessionInfo> {
+    if (info.cwd) return info;
+    const cwd = claudeTranscriptCwd(await this.raw(info.sessionId));
+    return cwd ? {...info, cwd} : info;
+  }
+
   private async info(id: string) {
-    const info = await (await this.sessions()).getSessionInfo(id);
-    if (!info) throw new BridgeError('missing', '这台电脑上找不到这条 Claude Code 会话');
+    const found = await (await this.sessions()).getSessionInfo(id);
+    if (!found) throw new BridgeError('missing', '这台电脑上找不到这条 Claude Code 会话');
+    const info = await this.withCwd(found);
     return guestWorkspace() ? {...info, cwd: await projectDirectory(info.cwd || '')} : info;
   }
 

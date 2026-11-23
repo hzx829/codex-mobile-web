@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp, mkdir, writeFile, utimes} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {claudeArtifactTitles, claudeRecordedSettings, claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
+import {claudeArtifactTitles, claudeRecordedSettings, claudeTranscriptCwd, claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
 import {ClaudeCodeBridge} from '../src/connector/claude-code.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 import {Ledger} from '../src/connector/ledger.js';
@@ -330,6 +330,64 @@ test('a session run in the desktop app shows its own settings and keeps them whe
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
     await removeTestTemp(root);
   }
+});
+
+test('a session whose first prompt carries a large image still resumes in its own folder', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    // As Claude Code writes it: the image comes first and the entry's cwd after it, past the SDK's 64 KiB head.
+    const [first, ...rest] = transcript(cwd).trim().split('\n').map(line => JSON.parse(line));
+    const {cwd: _, ...head} = first;
+    const image = {type: 'image', source: {type: 'base64', media_type: 'image/jpeg', data: 'A'.repeat(100_000)}};
+    const lines = [{...head, message: {role: 'user', content: [image, {type: 'text', text: '看看这张图'}]}, cwd}, ...rest,
+      {type: 'ai-title', aiTitle: '看图修 bug', sessionId: sid}];
+    await writeFile(file, lines.map(line => JSON.stringify(line)).join('\n') + '\n');
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const {getSessionInfo} = await import('@anthropic-ai/claude-agent-sdk');
+    assert.equal((await getSessionInfo(sid))?.cwd, undefined, 'the SDK no longer misses the folder; this fallback may be unneeded');
+
+    const starts: any[] = [];
+    const query: QueryFn = ({prompt, options}) => {
+      if (options?.resume) starts.push(options);
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const _ of prompt) yield {type: 'result', subtype: 'success', session_id: sid, errors: []};
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      generator.supportedModels = async () => [];
+      return generator;
+    };
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000));
+    const list = await bridge.handle('claude.list', {});
+    assert.deepEqual(list.data.map((item: any) => [item.id, item.cwd]), [[sid, cwd]]);
+    assert.deepEqual(list.projects, [{id: cwd, path: cwd}]);
+    assert.equal((await bridge.handle('claude.read', {conversationId: sid})).cwd, cwd);
+    const sent = await bridge.handle('claude.send', {conversationId: sid, text: '好', opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-000000000001`});
+    assert.equal(sent.state, 'accepted', JSON.stringify(sent));
+    assert.equal(starts[0].cwd, cwd);
+  } finally {
+    bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('a transcript’s folder is where it was last moved, else the first entry that names one', () => {
+  const line = (entry: object) => JSON.stringify(entry);
+  assert.equal(claudeTranscriptCwd([line({type: 'ai-title', aiTitle: 'x'}), line({type: 'user', cwd: '/a', message: {content: [{type: 'tool_use', input: {cwd: '/z'}}]}}),
+    line({type: 'user', cwd: '/b'})].join('\n')), '/a');
+  assert.equal(claudeTranscriptCwd([line({type: 'user', cwd: '/a'}), line({type: 'relocated', relocatedCwd: '/b'}), 'not json',
+    line({type: 'relocated', relocatedCwd: '/c'})].join('\n')), '/c');
+  assert.equal(claudeTranscriptCwd(line({type: 'user', message: {content: '"cwd":"/fake"'}})), undefined);
+  assert.equal(claudeTranscriptCwd(''), undefined);
 });
 
 test('claude.ai pages are named from the raw transcript and repeated on the newest turn', () => {
