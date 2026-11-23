@@ -188,6 +188,8 @@ type PermissionOption = {id: string; label: string; description: string; elevate
 
 Codex 把“完全访问”改成“不提示审批”，除非以后同时修改沙箱；没有覆盖时显示“电脑配置”。
 
+2026-11-22 起，Claude Code 的权限模式改用其桌面 App 的叫法、说明和顺序：自动（`auto`）/ 手动（`default`）/ 接受编辑（`acceptEdits`）/ 计划（`plan`）/ 跳过权限确认（`bypassPermissions`）。上表 Claude Code 一列的说法以此为准；Codex 的说法不变。许可浮层也照原生精简：去掉“沿用当前”一行和“从下一条消息开始生效”的说明，只列各档并勾选正在用的；再点正在用的一档即取消选择。Codex 没有覆盖时的“电脑配置”仍列在最前，可以选回。
+
 **Antigravity。** 本机 2.32.1 的 `language_server.exe` 里有这些枚举：`CASCADE_COMMANDS_AUTO_EXECUTION_{OFF, AUTO, EAGER, PROCEED_IN_SANDBOX}`、`ARTIFACT_REVIEW_MODE_{ALWAYS, AUTO, TURBO}`、`PLANNING_MODE_{ON, OFF}`、`CONVERSATIONAL_PLANNER_MODE_{DEFAULT, READ_ONLY}`，还有 `SetCascadeAutoExecutionPolicy`、`GetArtifactReviewPolicy` 等方法名。它们和模型一样可能放在 `cascadeConfig` 里随消息发送，但这只说明接口长什么样，按 [Antigravity 实施计划](../antigravity/IMPLEMENTATION.md) 的做法，要先在测试对话里核实。核实前 Antigravity 不显示许可按钮。
 
 ### 3.7 审批卡

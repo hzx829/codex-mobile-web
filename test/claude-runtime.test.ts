@@ -52,6 +52,7 @@ function fakeClaude(projects: string) {
         if (text === 'ask') {
           answers.push(await options!.canUseTool!('AskUserQuestion', {questions: [{question: '用哪个数据库？', header: '数据库', multiSelect: false, options: [{label: 'SQLite', description: ''}, {label: 'Postgres', description: ''}]}]}, {signal: new AbortController().signal} as any));
         }
+        if (text === 'plan') answers.push(await options!.canUseTool!('ExitPlanMode', {plan: '1. 改代码'}, {signal: new AbortController().signal} as any));
         if (text === 'slow') await until(() => interrupted || closed, Boolean, 5000);
         await write({type: 'assistant', message: {id: 'r', role: 'assistant', model: 'claude-test', content: [{type: 'text', text: interrupted ? '已停止' : `好的：${text}`}]}});
         yield {type: 'assistant', session_id: id, message: {}};
@@ -226,6 +227,19 @@ test('the connector default permission mode: skip prompts by default, and switch
     assert.equal((await bridge.handle('claude.send', {conversationId: id, text: '继续', permissionMode: 'bypassPermissions', opId: opId()})).state, 'accepted');
     assert.deepEqual(fake.calls.filter(call => call.type === 'mode').map(call => call.mode), ['default', 'bypassPermissions']);
     await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 3);
+
+    // An approved plan is carried out in the mode chosen on the phone, including the one the session left to plan.
+    await bridge.handle('claude.send', {conversationId: id, text: 'plan', permissionMode: 'plan', opId: opId()});
+    view = await until(() => bridge.handle('claude.read', {conversationId: id}), value => value.requests.length === 1);
+    assert.equal(view.requests[0].kind, 'plan');
+    assert.deepEqual(view.requests[0].implementModes, ['acceptEdits', 'default', 'bypassPermissions']);
+    const wrong = await bridge.handle('claude.respond', {conversationId: id, requestId: view.requests[0].id, decision: 'allow', mode: 'auto', opId: opId()});
+    assert.equal(wrong.state, 'failed', 'only an offered mode');
+    assert.equal((await bridge.handle('claude.respond', {conversationId: id, requestId: view.requests[0].id, decision: 'allow', mode: 'bypassPermissions', opId: opId()})).state, 'accepted');
+    assert.deepEqual(fake.answers.at(-1), {behavior: 'allow', updatedInput: {plan: '1. 改代码'}, updatedPermissions: [{type: 'setMode', mode: 'bypassPermissions', destination: 'session'}]});
+    assert.deepEqual(fake.calls.filter(call => call.type === 'mode').map(call => call.mode), ['default', 'bypassPermissions', 'plan', 'bypassPermissions']);
+    view = await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 4);
+    assert.equal(view.permissionMode, 'bypassPermissions');
 
     // Claude Code's own default (a borrowed computer): skipping is only possible when the session starts with it.
     const plain = fakeClaude(join(config, 'projects'));

@@ -21,8 +21,21 @@ export type ClaudeRequestView = {
   canRemember: boolean; questions?: ClaudeQuestion[];
   /** Where "remember" saves the rule, so the phone can name it: this session, this project or every project. */
   rememberScope?: 'session' | 'project' | 'user';
+  /** A plan: the modes it can be carried out in, the suggested one first. Older connectors leave it out. */
+  implementModes?: PermissionMode[];
 };
-export type ClaudeResponse = {decision: 'allow' | 'allowSession' | 'deny'; answers?: Record<string, string>; message?: string};
+/** `mode`: the mode an approved plan is carried out in; one of the request's `implementModes`. */
+export type ClaudeResponse = {decision: 'allow' | 'allowSession' | 'deny'; answers?: Record<string, string>; message?: string; mode?: PermissionMode};
+
+/**
+ * The modes a plan can be carried out in, as Claude Code's own plan prompt offers them: accepting edits
+ * (suggested) or approving each one, plus the hands-off mode the session ran in before it began planning.
+ */
+export function implementModes(before: PermissionMode | undefined, canBypass: boolean): PermissionMode[] {
+  const modes: PermissionMode[] = ['acceptEdits', 'default'];
+  if (before === 'auto' || (before === 'bypassPermissions' && canBypass)) modes.push(before);
+  return modes;
+}
 
 /** The broadest place the suggested permission updates would be written. */
 function rememberScope(suggestions: PermissionUpdate[] | undefined): ClaudeRequestView['rememberScope'] {
@@ -106,6 +119,8 @@ export class LiveSession {
   window?: number | null;
   /** Started with permission to skip prompts, so it can switch into "bypassPermissions" later. */
   canBypass = false;
+  /** The mode the session left when the phone switched it to planning, offered again when the plan is approved. */
+  beforePlan?: PermissionMode;
   /** The operation that started the running turn, so its tokens go to whoever sent it. */
   turnOpId?: string;
   /** A 'now' message that may end the running turn and start its own; it starts the next turn when it does. */
@@ -309,6 +324,7 @@ export class ClaudeRuntime extends EventEmitter {
       detail: kind === 'plan' ? str(input.plan) : kind === 'question' ? '' : [context.description, inputSummary(tool, input), context.decisionReason].filter(Boolean).join('\n\n'),
       canRemember: kind === 'permission' && Boolean(context.suggestions?.length), ...(asked ? {questions: asked} : {}),
       ...(kind === 'permission' && context.suggestions?.length ? {rememberScope: rememberScope(context.suggestions)} : {}),
+      ...(kind === 'plan' ? {implementModes: implementModes(session.beforePlan, session.canBypass)} : {}),
     };
     return new Promise(resolve => {
       const finish = (result: PermissionResult) => {
@@ -323,7 +339,7 @@ export class ClaudeRuntime extends EventEmitter {
     });
   }
 
-  respond(session: LiveSession, requestId: string, response: ClaudeResponse) {
+  async respond(session: LiveSession, requestId: string, response: ClaudeResponse) {
     const request = session.requests.get(requestId);
     if (!request) throw new BridgeError('expired', '该请求已经处理或失效，请刷新');
     if (response.decision === 'deny') {
@@ -338,6 +354,16 @@ export class ClaudeRuntime extends EventEmitter {
         answers[question.question] = answer.slice(0, 2000);
       }
       request.resolve({behavior: 'allow', updatedInput: {...request.input, answers}});
+      return;
+    }
+    const mode = request.view.kind === 'plan' ? response.mode : undefined;
+    if (mode) {
+      if (!request.view.implementModes?.includes(mode)) throw new BridgeError('invalid', '无法按这个模式执行计划');
+      // Set before the plan is released, as Claude Code's own prompt does, so its first step already runs in the mode.
+      await session.query.setPermissionMode(mode);
+      session.permissionMode = mode;session.beforePlan = undefined;
+      if (!session.requests.has(requestId)) return;
+      request.resolve({behavior: 'allow', updatedInput: request.input, updatedPermissions: [{type: 'setMode', mode, destination: 'session'}]});
       return;
     }
     request.resolve({behavior: 'allow', updatedInput: request.input,
@@ -366,12 +392,14 @@ export class ClaudeRuntime extends EventEmitter {
   async configure(session: LiveSession, model?: string, permissionMode?: PermissionMode, effort?: ClaudeEffort) {
     if (session.inbox.closed) throw new BridgeError('offline', 'Claude Code 会话正在释放，请稍后重试');
     if (permissionMode === 'bypassPermissions' && permissionMode !== session.permissionMode && !session.canBypass)
-      throw new BridgeError('invalid', '“全部允许”只能在新建或重新接入会话时选择');
+      throw new BridgeError('invalid', '“跳过权限确认”只能在新建或重新接入会话时选择');
     if (model && model !== session.model) {await session.query.setModel(model);session.model = model;}
     // After the model, so the level is judged against the model it will run on.
     if (effort && effort !== session.effort) {await session.query.applyFlagSettings({effortLevel: effort});session.effort = effort;}
     if (permissionMode &&permissionMode !== session.permissionMode) {
-      await session.query.setPermissionMode(permissionMode);session.permissionMode = permissionMode;
+      await session.query.setPermissionMode(permissionMode);
+      if (permissionMode === 'plan') session.beforePlan = session.permissionMode;
+      session.permissionMode = permissionMode;
     }
   }
 

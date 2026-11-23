@@ -38,11 +38,11 @@ test('a guest token registers only its bound connector', async () => {
     await hello({role: 'connector', token, machineId: 'personal'}, true);
     assert.equal((await hello({role: 'phone', token: restricted, machineId: 'guest-pc'}, false))[0], 4401);
     assert.equal((await hello({role: 'connector', token: restricted, machineId: 'personal'}, false))[0], 4401);
-    await hello({role: 'connector', token: restricted, machineId: 'guest-pc', guest: true, services: ['claude', 'claude', 'unknown']}, true);
+    await hello({role: 'connector', token: restricted, machineId: 'guest-pc', guest: true, services: ['claude', 'claude', 'unknown'], protocol: 1, features: ['live', 'live', 'bad name', 7]}, true);
     const phone = await hello({role: 'phone', token}, true);
     assert.deepEqual(phone.machines, [
       {id: 'personal', name: 'fixture'},
-      {id: 'guest-pc', name: 'fixture', guest: true, services: ['claude']},
+      {id: 'guest-pc', name: 'fixture', guest: true, services: ['claude'], protocol: 1, features: ['live']},
     ]);
   } finally {await relay.close();}
 });

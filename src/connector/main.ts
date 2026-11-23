@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { readConfig } from '../shared/config.js';
 import { MAX_FRAME, BridgeError, bridgeServices, type BridgeRequest, type Json } from '../shared/types.js';
+import { CONNECTOR_FEATURES, PROTOCOL_VERSION } from '../shared/protocol.js';
 import { Ledger, actorOf, requestActor } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
@@ -118,7 +119,7 @@ function connect() {
   const pulse=setInterval(()=>{if(ws.readyState!==WebSocket.OPEN)return;if(!alive){ws.terminate();return;}alive=false;ws.ping();},15_000);
   ws.on('pong',()=>{alive=true;});
   let ready=false;const authTimer=setTimeout(()=>ws.terminate(),10_000);
-  ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname(),services:available,...guest?{guest:true}:{}}));
+  ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname(),services:available,protocol:PROTOCOL_VERSION,features:CONNECTOR_FEATURES,...guest?{guest:true}:{}}));
   ws.on('message',async data=>{
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
     if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');usageRelay=Array.isArray(m.features)&&m.features.includes('team');usageSending=false;console.log('电脑已连接中继');flushUsage();return;}
@@ -157,15 +158,16 @@ function connect() {
 }
 // Structural changes ask phones to read again; bursts within this window share one notice.
 const CHANGE_DELAY=60;
-// Running-turn content is pushed; frames within this window are merged into one.
+// Running-turn content is pushed at most once per window; changes within it are merged into one frame.
+// The first change after a quiet window goes out at once, so a reply's first words are not held back.
 const LIVE_DELAY=40;
-const liveIds=new Set<string>();let liveTimer:NodeJS.Timeout|undefined;
+const liveIds=new Set<string>();let liveTimer:NodeJS.Timeout|undefined,liveSentAt=0;
 function scheduleLive(id:string){
   liveIds.add(id);if(liveTimer)return;
   liveTimer=setTimeout(()=>{
-    liveTimer=undefined;const ids=[...liveIds];liveIds.clear();
+    liveTimer=undefined;liveSentAt=Date.now();const ids=[...liveIds];liveIds.clear();
     for(const threadId of ids){try{const frame=control.liveFrame(threadId);if(frame)send({type:'live',...frame});}catch{}}
-  },LIVE_DELAY);
+  },Math.max(0,LIVE_DELAY-(Date.now()-liveSentAt)));
 }
 control.on('stream',(id:string)=>scheduleLive(id));
 control.on('change',(id:string|null)=>{

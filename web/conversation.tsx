@@ -7,6 +7,7 @@ import {IconButton} from './icon-button';
 import type {OptimisticMessage} from './optimistic';
 import {diffSummary} from './diff-summary';
 import {SenderLabel} from './senders';
+import {usePacedText} from './text-reveal';
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const statusLabel:Record<string,string>={inProgress:'进行中',completed:'已完成',interrupted:'已停止',failed:'失败'};
 const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划',fileRead:'读取文件',codeSearch:'搜索代码',subagent:'子任务',toolCall:'使用工具',nextStep:'下一步'};
@@ -38,7 +39,11 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
   return <section className="turn">
     {groups.map((group,index)=>group[0].role==='activity'?<ActivityGroup key={`activity-${index}`} items={group} running={turn.status==='inProgress'} openFile={openFile}/>:group.map(item=>{
       if(item.role==='status')return <ConversationStatus key={item.id}>{item.text}</ConversationStatus>;
-      const body=<><SafeMarkdown text={item.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}</>;
+      // Only the reply still being written is paced; everything else paints as it is.
+      const text=item.role==='assistant'&&item===lastReply&&turn.status==='inProgress'
+        ?<PacedMarkdown text={item.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>
+        :<SafeMarkdown text={item.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>;
+      const body=<>{text}{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}</>;
       return item.role==='user'?<UserMessage key={item.id} sender={item.sender} text={item.text} editReason={editReason} disabled={disabled} blocked={onBlocked} copy={()=>onCopy(item.text)} resend={text=>onEdit(turn.id,item.id,text)}>{body}</UserMessage>:<article className={`message ${item.role}`} key={item.id}>{body}</article>;
     }))}
     {turn.plan&&<PlanCard steps={turn.plan} running={turn.status==='inProgress'}/>}
@@ -46,6 +51,10 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
     {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/><IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/></div>}
   </section>;
 });
+/** A reply still being written, revealed smoothly as live frames arrive; see text-reveal.ts. */
+function PacedMarkdown({text,...props}:{text:string;openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(text:string)=>void}){
+  return <SafeMarkdown text={usePacedText(text,true)} {...props}/>;
+}
 /** The plan as the turn left it, as Claude's own app shows it: done, under way, still to do. */
 function PlanCard({steps,running}:{steps:PlanStep[];running:boolean}){
   const done=steps.filter(step=>step.status==='completed').length;

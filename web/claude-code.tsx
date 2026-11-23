@@ -40,18 +40,19 @@ type Props={
   /** Opens the voice input settings, shared with the other apps. */
   chooseVoice:()=>void;
 };
-type Request={id:string;kind:'permission'|'question'|'plan';tool:string;title:string;detail:string;canRemember:boolean;rememberScope?:'session'|'project'|'user';questions?:{question:string;header:string;multiSelect:boolean;options:{label:string;description:string}[]}[]};
+type Request={id:string;kind:'permission'|'question'|'plan';tool:string;title:string;detail:string;canRemember:boolean;rememberScope?:'session'|'project'|'user';implementModes?:string[];questions?:{question:string;header:string;multiSelect:boolean;options:{label:string;description:string}[]}[]};
 const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
 const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:TurnView)=>turn.items.filter(item=>item.role==='user').map(item=>item.id)):[];
 function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
 type Place={id:string;path:string};
 const OTHER='__other';
+/** Names, descriptions and order as Claude Code's desktop app shows them. */
 const MODES:PermissionOption[]=[
-  {id:'default',label:'按需审批',description:'按 Claude Code 的规则，需要时请你审批'},
-  {id:'acceptEdits',label:'自动接受编辑',description:'文件修改自动接受，命令仍需审批'},
-  {id:'plan',label:'只做计划',description:'只读分析并给出计划，你确认后才执行'},
-  {id:'auto',label:'自动审批',description:'由 Claude Code 的分类器判断每一步，拿不准时再请你审批'},
-  {id:'bypassPermissions',label:'跳过权限确认',description:'不再请求任何审批，直接执行（慎用）',elevated:true},
+  {id:'auto',label:'自动',description:'由 Claude 处理权限决策'},
+  {id:'default',label:'手动',description:'更改前始终询问'},
+  {id:'acceptEdits',label:'接受编辑',description:'自动接受所有文件编辑'},
+  {id:'plan',label:'计划',description:'在进行更改前制定计划'},
+  {id:'bypassPermissions',label:'跳过权限确认',description:'接受所有权限',elevated:true},
 ];
 /** A session without a mode of its own runs in the connector's default mode (older connectors: Claude Code's default). */
 const modeLabel=(mode:string)=>MODES.find(m=>m.id===mode)?.label||mode;
@@ -354,7 +355,7 @@ export function ClaudeCodePanel(props:Props){
     </div></div>
     <footer className="composer-area">
       <div className="request-stack">{requests.map(item=><ClaudeRequestCard key={`${conversationId}:${item.id}`} request={item} disabled={!connected||busy||Boolean(pending)}
-        respond={(decision,answers)=>void mutate('claude.respond',{conversationId,requestId:item.id,decision,...(answers?{answers}:{})})}/>)}</div>
+        respond={(decision,answers,mode)=>void mutate('claude.respond',{conversationId,requestId:item.id,decision,...(answers?{answers}:{}),...(mode?{mode}:{})})}/>)}</div>
       {(error||previewError)&&<div className="feedback error" role="alert"><span>{error||previewError}</span><IconButton icon="close" label="关闭提示" onClick={()=>{setError('');clearPreviewError();}}/></div>}
       {notice&&<div className="feedback" role="status">{notice}</div>}
       {pending&&!busy&&<div className="pending"><button onClick={()=>void check()} disabled={!connected}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先在会话和电脑上确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
@@ -392,7 +393,9 @@ export function ClaudeCodePanel(props:Props){
   </main>;
 }
 
-function ClaudeRequestCard({request,disabled,respond}:{request:Request;disabled:boolean;respond:(decision:'allow'|'allowSession'|'deny',answers?:Record<string,string>)=>void}){
+/** How an approved plan is carried out, as Claude Code's own plan prompt words it. */
+const IMPLEMENT:Record<string,string>={acceptEdits:'开始执行，接受编辑',default:'开始执行，手动审批'};
+function ClaudeRequestCard({request,disabled,respond}:{request:Request;disabled:boolean;respond:(decision:'allow'|'allowSession'|'deny',answers?:Record<string,string>,mode?:string)=>void}){
   const [answers,setAnswers]=useState<Record<string,string[]>>({});
   const [other,setOther]=useState<Record<string,string>>({});
   if(request.kind==='question'){
@@ -406,6 +409,11 @@ function ClaudeRequestCard({request,disabled,respond}:{request:Request;disabled:
       <div className="choices"><button className="primary" disabled={disabled||!complete} onClick={()=>respond('allow',Object.fromEntries((request.questions||[]).map(q=>[q.question,value(q.question)])))}>提交回答</button>
         <button disabled={disabled} onClick={()=>respond('deny')}>跳过</button></div></div>;
   }
+  if(request.kind==='plan'&&request.implementModes?.length)return <div className="request"><strong>{request.title}</strong>{request.detail&&<pre>{request.detail}</pre>}
+    <div className="choices">
+      {request.implementModes.map((mode,index)=><button key={mode} className={index===0?'primary':''} disabled={disabled} onClick={()=>respond('allow',undefined,mode)}>{IMPLEMENT[mode]||`开始执行，${modeLabel(mode)}`}</button>)}
+      <button disabled={disabled} onClick={()=>respond('deny')}>继续规划</button>
+    </div></div>;
   return <div className="request"><strong>{request.title}</strong>{request.detail&&<pre>{request.detail}</pre>}
     <div className="choices">
       <button disabled={disabled} onClick={()=>respond('allow')}>{request.kind==='plan'?'开始执行':'允许一次'}</button>

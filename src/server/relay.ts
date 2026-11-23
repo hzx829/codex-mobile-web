@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { MAX_FRAME, bridgeServices, textRequired, type Json, type Machine } from '../shared/types.js';
 import { machineIdPattern, type ConnectorToken } from '../shared/config.js';
 import { PreviewTunnel } from './preview-tunnel.js';
+import { connectorReport } from '../shared/protocol.js';
 import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 import { TeamError, type TeamStore } from './team/store.js';
 import { CREATE_ACTIONS, LIST_ACTIONS, MUTATION_ACTIONS, READ_ACTIONS, SENDER_ACTIONS, SEND_ACTIONS, createdThread, handleTeam, publicUser, refreshSenderNames, serviceOf, threadOf, type Member } from './team/actions.js';
@@ -159,6 +160,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
           machine={id:m.machineId,name:m.name.slice(0,100)};
           if(m.guest===true||bound)machine.guest=true;
           if(Array.isArray(m.services))machine.services=bridgeServices.filter(service=>m.services.includes(service));
+          Object.assign(machine,connectorReport(m));
           for(const [old,q]of peers)if(q.machine?.id===machine.id){peers.delete(old);old.close(4409,'replaced');}
           try{team?.seenMachine(machine.id,machine.name);}catch{}
         }

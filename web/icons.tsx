@@ -19,7 +19,7 @@ const paths:Record<IconName,ReactNode>={
   chevron:<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>,
   close:<path d="M6.5 6.5l11 11m0-11-11 11"/>,
   refresh:<path d="M19.5 12A7.5 7.5 0 0 1 6.2 16.8M4.5 12A7.5 7.5 0 0 1 17.8 7.2M18 3.5v4h-4M6 20.5v-4h4"/>,
-  settings:<><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--icon-fill, #fff)"/><circle cx="15" cy="17" r="2.5" fill="var(--icon-fill, #fff)"/></>,
+  settings:<><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--icon-fill, var(--bg, #fff))"/><circle cx="15" cy="17" r="2.5" fill="var(--icon-fill, var(--bg, #fff))"/></>,
   file:<><path d="M13.5 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9Z"/><path d="M13.5 3.5V9H19"/></>,
   image:<><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m20.5 15.5-4.5-4.5-9.5 8.5"/></>,
   logout:<path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4M15 8l4 4-4 4M19 12H9"/>,

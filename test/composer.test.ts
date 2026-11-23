@@ -62,14 +62,25 @@ test('the shared composer, "+" sheet, pickers and queue show what each runtime s
     assert.deepEqual(menu(),[['添加图片大图自动压缩',true],['添加文件PDF、Word 等',false],['语音输入系统键盘',false],['打开本机网页',false],['查看项目文件',false],['刷新会话',false],['选择项目',false]]);
     assert.ok(Array.from(document.querySelectorAll('.muted')).some(note=>note.textContent==='当前模型未确认图片能力'));
 
-    // Permission picker: "keep the current level" first, each level with what it means; choosing closes it.
+    // Permission picker: each level with what it means, the one in use checked; choosing closes it.
     let chosen='',closed=0;
     await render(h(PermissionPicker,{point:{x:0,y:0},options:OPTIONS,value:'',current:{id:'default',label:'按需审批'},onChange:id=>{chosen=id;},close:()=>closed++}));
-    const rows=Array.from(document.querySelectorAll('.model-picker-options button'));
-    assert.deepEqual(rows.map(row=>[row.textContent,row.getAttribute('aria-pressed')]),[['沿用当前 · 按需审批使用会话现在的设置','true'],['按需审批需要时审批','false'],['全部允许不再审批','false']]);
-    assert.ok(rows[2].classList.contains('elevated'));
-    await click(rows[2]);
+    let rows=Array.from(document.querySelectorAll('.model-picker-options button'));
+    assert.equal($('.permission-picker-title')?.textContent,'模式');
+    assert.deepEqual(rows.map(row=>[row.textContent,row.getAttribute('aria-pressed')]),[['按需审批需要时审批','true'],['全部允许不再审批','false']]);
+    assert.ok(rows[1].classList.contains('elevated'));
+    await click(rows[1]);
     assert.deepEqual([chosen,closed],['bypass',1]);
+    // Choosing the level in use clears the choice.
+    await render(h(PermissionPicker,{point:{x:0,y:0},options:OPTIONS,value:'bypass',current:{id:'default',label:'按需审批'},onChange:id=>{chosen=id;},close:()=>closed++}));
+    await click(Array.from(document.querySelectorAll('.model-picker-options button'))[0]);
+    assert.equal(chosen,'');
+    // A level left to the computer is listed first so it can be chosen again.
+    await render(h(PermissionPicker,{point:{x:0,y:0},options:OPTIONS,value:'default',current:{id:'',label:'电脑配置'},title:'许可',onChange:id=>{chosen=id;},close:()=>closed++}));
+    rows=Array.from(document.querySelectorAll('.model-picker-options button'));
+    assert.deepEqual(rows.map(row=>[row.textContent,row.getAttribute('aria-pressed')]),[['电脑配置使用电脑上的配置','false'],['按需审批需要时审批','true'],['全部允许不再审批','false']]);
+    await click(rows[0]);
+    assert.equal(chosen,'');
 
     // A model list without effort or fast tier (Claude Code, Antigravity).
     let model='unset';closed=0;

@@ -6,7 +6,8 @@ export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; tex
 export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'};
 export const bridgeServices = ['codex', 'antigravity', 'claude'] as const;
 export type BridgeService = typeof bridgeServices[number];
-export type Machine = {id: string; name: string; guest?: boolean; services?: BridgeService[]};
+/** `protocol` and `features`: what the computer's connector reported (src/shared/protocol.ts); older connectors and relays leave them out. */
+export type Machine = {id: string; name: string; guest?: boolean; services?: BridgeService[]; protocol?: number; features?: string[]};
 export type RequestAction = AntigravityAction | ClaudeAction | 'project.create' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe' | 'voice.stream.open' | 'voice.stream.audio' | 'voice.stream.close' | 'voice.stream.cancel';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 /** `sender`: the team member who sent a user message from the phone, when the connector recorded it. */

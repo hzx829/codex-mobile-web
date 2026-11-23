@@ -17,16 +17,21 @@ export function PermissionButton({options,value,current,expanded,disabled,open,r
     <Icon name="shield" size={17}/><span>{label}</span></button>;
 }
 
-/** "Keep the current level" first, then the runtime's levels, each with what it means. Choosing closes it. */
-export function PermissionPicker({point,anchor,options,value,current,disabled=false,onChange,close}:{point:MenuPoint;anchor?:HTMLElement|null;options:PermissionOption[];value:string;current:CurrentPermission;disabled?:boolean;onChange:(id:string)=>void;close:()=>void}){
-  const pick=(id:string)=>{onChange(id);close();};
-  return <Popover point={point} anchor={anchor} side="above" title="许可" label="许可" close={close} className="model-picker permission-picker" focusSelector="button[aria-pressed=true]" showHeader={false}>
-    <div className="model-picker-options plain" role="group" aria-label="许可">
-      <button type="button" aria-pressed={!value} disabled={disabled} onClick={()=>pick('')}><span>沿用当前 · {current.label}<small>使用会话现在的设置</small></span>{!value&&<Icon name="check" size={16}/>}</button>
-      {options.map(option=><button type="button" key={option.id} className={option.elevated?'elevated':''} aria-pressed={value===option.id} disabled={disabled} onClick={()=>pick(option.id)}>
-        <span>{option.label}<small>{option.description}</small></span>{value===option.id&&<Icon name="check" size={16}/>}</button>)}
+/**
+ * The runtime's levels, each with what it means, the one in use checked, as Claude Code's own mode menu lists them.
+ * Choosing the level the session already uses clears the choice. A current level that is not one of the options
+ * (Codex left to the computer's configuration) is listed first so it can be chosen again.
+ */
+export function PermissionPicker({point,anchor,options,value,current,title='模式',disabled=false,onChange,close}:{point:MenuPoint;anchor?:HTMLElement|null;options:PermissionOption[];value:string;current:CurrentPermission;title?:string;disabled?:boolean;onChange:(id:string)=>void;close:()=>void}){
+  const pick=(id:string)=>{onChange(id===current.id?'':id);close();};
+  const chosen=value||current.id;
+  const rows=options.some(option=>option.id===current.id)?options:[{id:current.id,label:current.label,description:current.id?'会话现在的设置':'使用电脑上的配置'},...options];
+  return <Popover point={point} anchor={anchor} side="above" title={title} label={title} close={close} className="model-picker permission-picker" focusSelector="button[aria-pressed=true]" showHeader={false}>
+    <p className="permission-picker-title">{title}</p>
+    <div className="model-picker-options plain" role="group" aria-label={title}>
+      {rows.map(option=><button type="button" key={option.id} className={option.elevated?'elevated':''} aria-pressed={chosen===option.id} disabled={disabled} onClick={()=>pick(option.id)}>
+        <span>{option.label}<small>{option.description}</small></span>{chosen===option.id&&<Icon name="check" size={16}/>}</button>)}
     </div>
-    <p className="model-picker-note">从下一条消息开始生效。</p>
   </Popover>;
 }
 

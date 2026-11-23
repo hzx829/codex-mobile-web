@@ -577,10 +577,11 @@ export class ClaudeCodeBridge {
       const decision = p.decision;
       if (decision !== 'allow' && decision !== 'allowSession' && decision !== 'deny') throw new BridgeError('invalid', '回应无效');
       const answers = p.answers && typeof p.answers === 'object' ? Object.fromEntries(Object.entries(p.answers).filter(([, value]) => typeof value === 'string')) as Record<string, string> : undefined;
-      const response: ClaudeResponse = {decision, answers, message: typeof p.message === 'string' ? p.message : undefined};
+      const mode = permissionMode(p.mode);
+      const response: ClaudeResponse = {decision, answers, message: typeof p.message === 'string' ? p.message : undefined, ...(mode ? {mode} : {})};
       return this.mutate(p, {action, id, requestId, response}, async () => {
         if (!session) throw new BridgeError('expired', '这条会话已不在手机控制下，请刷新');
-        this.runtime.respond(session, requestId, response);
+        await this.runtime.respond(session, requestId, response);
         return {responded: true};
       });
     }
