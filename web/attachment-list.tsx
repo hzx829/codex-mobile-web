@@ -6,11 +6,16 @@ import {MAX_IMAGES} from '../src/shared/images';
 
 const size=(bytes:number)=>bytes>=1024*1024?`${(bytes/1024/1024).toFixed(1)} MiB`:`${Math.max(1,Math.ceil(bytes/1024))} KiB`;
 
-/** Photos waiting in a composer: tap one to view it, or remove it until it is sent. */
-export function ImageAttachments({images,disabled,show,remove}:{images:string[];disabled:boolean;show:(url:string,title:string)=>void;remove:(index:number)=>void}){
+/**
+ * Photos waiting in a composer: tap one to crop or mark it (`edit`), or remove it, until it is sent.
+ * While the composer is locked (sending, reading a selection) a tap only shows the photo.
+ */
+export function ImageAttachments({images,disabled,show,edit,remove}:{images:string[];disabled:boolean;show:(url:string,title:string)=>void;edit?:(url:string,title:string)=>void;remove:(index:number)=>void}){
   if(!images.length)return null;
+  const editable=Boolean(edit)&&!disabled;
   return <div className="image-strip"><span className="attachment-count" role="status">图片 {images.length}/{MAX_IMAGES}</span><div className="attachment-thumbnails">{images.map((url,i)=><div className="attachment-thumb" key={i}>
-    <button type="button" aria-label={`查看第 ${i+1} 张图片，共 ${images.length} 张`} onClick={()=>show(url,`待发送图片 ${i+1}/${images.length}`)}><img src={url} alt={`待发送图片 ${i+1}`} decoding="async"/></button>
+    <button type="button" aria-label={`${editable?'编辑':'查看'}第 ${i+1} 张图片，共 ${images.length} 张`}
+      onClick={()=>editable?edit!(url,`编辑图片 ${i+1}/${images.length}`):show(url,`待发送图片 ${i+1}/${images.length}`)}><img src={url} alt={`待发送图片 ${i+1}`} decoding="async"/></button>
     <button className="attachment-remove" type="button" disabled={disabled} aria-label={`移除第 ${i+1} 张图片`} onClick={()=>remove(i)}><Icon name="close" size={14}/></button></div>)}</div></div>;
 }
 /** Shown while a selection is read and large photos are compressed. */

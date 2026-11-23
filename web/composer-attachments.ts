@@ -1,6 +1,7 @@
 import {useRef,useState,type ClipboardEvent,type SetStateAction} from 'react';
-import {clipboardFiles,imageFile,isImageFile,pastedImage,readAttachmentFiles,type DraftFileAttachment} from './attachments';
+import {clipboardFiles,imageFile,isImageFile,pastedImage,readAttachmentFiles,readImageFiles,type DraftFileAttachment} from './attachments';
 import {useFileDrop} from './file-drop';
+import {MAX_TOTAL_IMAGE_BYTES,imageBytes,validateImages} from '../src/shared/images';
 
 type Options={
   /** Nothing can be added now, e.g. while a message is being sent. */
@@ -44,8 +45,28 @@ export function useComposerAttachments(options:Options){
     try{const data=pastedImage(event.clipboardData.getData('text/plain'));if(data){event.preventDefault();void add([imageFile(data)]);}}
     catch(error){event.preventDefault();latest.current.notify((error as Error)?.message||'图片读取失败');}
   }
+  /**
+   * Puts an edited photo (cropped, marked) in place of the one it was made from, compressed within what the other photos leave.
+   * Resolves to '' once it is in place, else to what went wrong; the editor shows that and stays open.
+   */
+  async function replace(original:string,edited:File):Promise<string>{
+    if(reading.current!==null)return '附件正在读取，请稍候';
+    const request=++sequence.current;reading.current=request;setLoading(true);
+    try{
+      const others=imagesRef.current.filter(url=>url!==original);
+      const [url]=await readImageFiles([edited],MAX_TOTAL_IMAGE_BYTES-others.reduce((sum,image)=>sum+imageBytes(image),0),()=>request!==sequence.current);
+      // Another conversation was opened meanwhile: its composer has nothing to replace.
+      if(request!==sequence.current)return '';
+      const index=imagesRef.current.indexOf(original);
+      if(index<0||!url)return '这张图片已不在输入框里';
+      const next=[...imagesRef.current];next[index]=url;
+      setImages(validateImages(next));
+      return '';
+    }catch(error){return (error as Error)?.message||'图片保存失败';}
+    finally{if(reading.current===request){reading.current=null;setLoading(false);}}
+  }
   /** Empties the composer and ignores a selection still being read (another conversation opened). */
   function reset(){sequence.current++;reading.current=null;setLoading(false);setImages([]);setFiles([]);}
   const drop=useFileDrop(dropped=>void add(dropped),options.disabled||loading);
-  return {images,files,loading,count:images.length+files.length,add,paste,drop,setImages,setFiles,clear:()=>{setImages([]);setFiles([]);},reset};
+  return {images,files,loading,count:images.length+files.length,add,paste,replace,drop,setImages,setFiles,clear:()=>{setImages([]);setFiles([]);},reset};
 }

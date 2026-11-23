@@ -102,5 +102,32 @@ test('the shared composer, "+" sheet, pickers and queue show what each runtime s
     assert.deepEqual(actions(),['立即发送','立即追加到当前任务','撤回到输入框','删除排队消息']);
     await click(document.querySelector('.queued-actions button')!);
     assert.equal(now,'q1');
+
+    // A photo in the composer opens in the editor, which can also remove it. While the composer is locked a tap only shows it.
+    let attachments!:ReturnType<typeof useComposerAttachments>,shown='';
+    function Photos({locked}:{locked:boolean}){
+      attachments=useComposerAttachments({disabled:false,notify:noop});
+      return h(Composer,{attachments,input:{current:null},draft:'',edit:noop,placeholder:'',readOnly:false,submit:noop,locked,showImage:url=>{shown=url;},uploadProgress:null,
+        voice,voiceMode:'keyboard',voiceDisabled:false,onVoiceStart:noop,connected:true,add:noop,addDisabled:false,send:{label:'发送消息',sending:false,disabled:false}});
+    }
+    const url='data:image/png;base64,iVBORw0KGgo=',thumb=()=>$('.attachment-thumb > button')!,editor=()=>$('.image-editor');
+    await render(h(Photos,{locked:false}));
+    await act(async()=>attachments.setImages([url]));
+    assert.equal(thumb().getAttribute('aria-label'),'编辑第 1 张图片，共 1 张');
+    await click(thumb());
+    assert.equal(editor()?.getAttribute('aria-label'),'编辑图片 1/1');
+    assert.equal(editor()?.closest('form'),null,'the editor is not inside the composer form');
+    assert.deepEqual(Array.from(editor()!.querySelectorAll('[role=radio]')).map(swatch=>[swatch.getAttribute('aria-label'),swatch.getAttribute('aria-checked')]).slice(0,2),[['红色','true'],['黄色','false']]);
+    assert.equal((editor()!.querySelector('[aria-label="撤销"]') as HTMLButtonElement).disabled,true,'nothing to undo yet');
+    await click(editor()!.querySelector('[aria-label="关闭"]')!);
+    assert.equal(editor(),null,'closing without changes asks nothing');assert.deepEqual(attachments.images,[url]);
+    await click(thumb());
+    await click(editor()!.querySelector('[aria-label="移除这张图片"]')!);
+    assert.equal(editor(),null);assert.deepEqual(attachments.images,[]);
+    await act(async()=>attachments.setImages([url]));
+    await render(h(Photos,{locked:true}));
+    assert.equal(thumb().getAttribute('aria-label'),'查看第 1 张图片，共 1 张');
+    await click(thumb());
+    assert.equal(editor(),null);assert.equal(shown,url);
   }finally{await act(async()=>root.unmount());}
 });

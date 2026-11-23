@@ -1,5 +1,5 @@
 import type {ReactNode} from 'react';
-export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'trash'|'diff'|'team';
+export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'redo'|'crop'|'trash'|'diff'|'team';
 // One line-icon family: 24-unit grid, 1.75 stroke, round joins. Drawn at 20 px by default.
 const paths:Record<IconName,ReactNode>={
   back:<path d="M19 12H5m6-6.5L4.5 12l6.5 6.5"/>,
@@ -14,6 +14,8 @@ const paths:Record<IconName,ReactNode>={
   steer:<path d="M12 20V9m-5 5 5-5 5 5M6 4.5h12"/>,
   now:<path d="M13.5 3 5.5 13.5h6L10.5 21l8-10.5h-6Z"/>,
   undo:<path d="M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>,
+  redo:<path d="m15 14 5-5-5-5m5 5H9.5a5.5 5.5 0 0 0 0 11H13"/>,
+  crop:<path d="M6.5 2.5v13a2 2 0 0 0 2 2h13M2.5 6.5h13a2 2 0 0 1 2 2v13"/>,
   trash:<path d="M4 7h16M9.5 7V4.5h5V7M6 7l.9 11.6a1.5 1.5 0 0 0 1.5 1.4h7.2a1.5 1.5 0 0 0 1.5-1.4L18 7M10 11v5M14 11v5"/>,
   stop:<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>,
   chevron:<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>,

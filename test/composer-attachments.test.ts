@@ -47,6 +47,21 @@ test('composer attachments read one selection at a time, drop late results and c
     await act(async()=>{await reads.shift()!();await tick();await tick();});
     assert.equal(current.loading,false);assert.equal(current.images.length,1);assert.match(current.images[0],/^data:image\/png;base64,/);
 
+    // An edited photo takes the place of the one it was made from, read like a picked photo.
+    const original=current.images[0];
+    let replaced!:Promise<string>;
+    await act(async()=>{replaced=current.replace(original,new File(['edited'],'edited-image',{type:'image/webp'}));await tick();});
+    assert.equal(current.loading,true);
+    assert.equal(await current.replace(original,photo()),'附件正在读取，请稍候','one reading at a time, edits included');
+    await act(async()=>{await reads.shift()!();await tick();});
+    assert.equal(await replaced,'');
+    assert.equal(current.loading,false);assert.equal(current.images.length,1);
+    assert.equal(current.images[0],`data:image/webp;base64,${Buffer.from('edited').toString('base64')}`);
+    // A photo that has left the composer meanwhile is not brought back.
+    await act(async()=>{replaced=current.replace('data:image/png;base64,AAAA',photo());await tick();});
+    await act(async()=>{await reads.shift()!();await tick();});
+    assert.equal(await replaced,'这张图片已不在输入框里');assert.equal(current.images.length,1);
+
     await render({disabled:false,imagesBlocked:'当前模型未确认图片能力'});
     await act(async()=>{await current.add([photo()]);});
     assert.equal(notes.at(-1),'当前模型未确认图片能力');assert.equal(reads.length,0);assert.equal(current.images.length,1);

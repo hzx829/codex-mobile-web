@@ -1,6 +1,7 @@
-import {useEffect,useLayoutEffect,useRef,type ChangeEvent,type ReactNode,type RefObject} from 'react';
+import {useEffect,useLayoutEffect,useRef,useState,type ChangeEvent,type ReactNode,type RefObject} from 'react';
 import {SendMessageButton,submitOnDesktop} from './chat-layout';
 import {IconButton} from './icon-button';
+import {ImageEditor} from './image-editor';
 import {MenuItem} from './sheet';
 import {DOCUMENT_ACCEPT,FileAttachments,IMAGE_ACCEPT,ImageAttachments,ReadingStatus,UploadStatus} from './attachment-list';
 import {VoiceButton,VoiceStatus,type Voice} from './voice-controls';
@@ -47,8 +48,12 @@ export function Composer(props:Props){
   const caret=editing?[field!.selectionStart,field!.selectionEnd] as const:null;
   useLayoutEffect(()=>{if(caret)props.input.current?.setSelectionRange(caret[0],caret[1]);});
   useEffect(()=>{const el=props.input.current;if(el&&outside&&!caret)el.scrollTop=el.scrollHeight;});
-  return <form className={`composer ${attachments.count?'with-images':''}${attachments.drop.dragging?' dragging':''}`} onSubmit={e=>{e.preventDefault();props.submit();}} {...attachments.drop.handlers}>
-    <ImageAttachments images={attachments.images} disabled={props.locked||attachments.loading} show={props.showImage} remove={index=>attachments.setImages(old=>old.filter((_,i)=>i!==index))}/>
+  // The photo open in the editor; it closes by itself if the photo leaves the composer (sent, another conversation opened).
+  const [photo,setPhoto]=useState<{url:string;label:string}|null>(null);
+  const edited=photo&&attachments.images.includes(photo.url)?photo:null;
+  // The editor sits outside the form: React events bubble through the component tree, and a file dropped on it is not an attachment.
+  return <><form className={`composer ${attachments.count?'with-images':''}${attachments.drop.dragging?' dragging':''}`} onSubmit={e=>{e.preventDefault();props.submit();}} {...attachments.drop.handlers}>
+    <ImageAttachments images={attachments.images} disabled={props.locked||attachments.loading} show={props.showImage} edit={(url,label)=>setPhoto({url,label})} remove={index=>attachments.setImages(old=>old.filter((_,i)=>i!==index))}/>
     <FileAttachments files={attachments.files} disabled={props.locked||attachments.loading} remove={index=>attachments.setFiles(old=>old.filter((_,i)=>i!==index))}/>
     <ReadingStatus loading={attachments.loading}/>
     <UploadStatus progress={props.uploadProgress}/>
@@ -66,7 +71,11 @@ export function Composer(props:Props){
         {showSend&&<SendMessageButton sending={send.sending} label={send.label} disabled={send.disabled}/>}
       </div>
     </div>
-  </form>;
+  </form>
+  {edited&&<ImageEditor key={edited.url} src={edited.url} label={edited.label} close={()=>setPhoto(null)}
+    save={async file=>{const problem=await attachments.replace(edited.url,file);if(!problem)setPhoto(null);return problem;}}
+    remove={()=>{attachments.setImages(old=>old.filter(url=>url!==edited.url));setPhoto(null);}}/>}
+  </>;
 }
 
 /** Hidden pickers for photos and for documents; separate so the document picker does not offer the camera. */

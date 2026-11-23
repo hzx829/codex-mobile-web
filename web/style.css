@@ -654,3 +654,44 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .usage > .muted{margin:0 0 8px}
 /* Sender above a user message, shown when several members took part in a session. */
 .message-sender{text-align:right;margin:0 6px 4px;font-size:12px;color:var(--fg-3)}
+/* Editing a photo before it is sent (image-editor.tsx). Dark in both themes, as photo viewers are; the tokens below are its own. */
+.image-editor { --editor-bg: #000; --editor-fg: #fff; --editor-fg-2: #ffffffa6; --editor-chip: #ffffff1f; --editor-dim: #000000a6; --editor-error: #ff7b6b;
+  position: fixed; z-index: 40; left: 0; right: 0; top: var(--viewport-top, 0); height: var(--viewport-height, 100dvh); display: flex; flex-direction: column;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: var(--editor-bg); color: var(--editor-fg); outline: 0; overscroll-behavior: contain; animation: fade-in .15s ease; }
+.image-editor-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 60px; padding: 6px 10px; }
+.image-editor-bar > button:not(.icon-button) { min-width: 64px; padding: 10px 12px; color: var(--editor-fg); font-size: 16px; }
+.image-editor-bar strong { font-size: 16px; font-weight: 600; }
+.image-editor-history { display: flex; gap: 12px; }
+.image-editor .icon-button { width: 44px; min-width: 44px; height: 44px; padding: 10px; border-radius: 50%; color: var(--editor-fg); }
+.image-editor .icon-button svg { width: 24px; height: 24px; }
+.image-editor-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.image-editor-canvas { position: relative; flex-shrink: 0; cursor: crosshair; }
+.image-editor-canvas canvas { display: block; width: 100%; height: 100%; }
+.image-editor-stage.cropping .image-editor-canvas { cursor: default; }
+/* The box's shadow dims what will be cut away; the stage clips it to the photo's surroundings. */
+.image-editor-crop { position: absolute; outline: 1px solid var(--editor-fg); box-shadow: 0 0 0 100vmax var(--editor-dim); cursor: move;
+  background: linear-gradient(90deg, transparent calc(100%/3 - .5px), #ffffff59 0 calc(100%/3 + .5px), transparent 0 calc(200%/3 - .5px), #ffffff59 0 calc(200%/3 + .5px), transparent 0),
+              linear-gradient(transparent calc(100%/3 - .5px), #ffffff59 0 calc(100%/3 + .5px), transparent 0 calc(200%/3 - .5px), #ffffff59 0 calc(200%/3 + .5px), transparent 0); }
+.image-editor-crop > i { position: absolute; width: 22px; height: 22px; border: 0 solid var(--editor-fg); filter: drop-shadow(0 0 1.5px #000000b3); }
+.image-editor-crop > [data-corner="nw"] { left: -4px; top: -4px; border-width: 4px 0 0 4px; }
+.image-editor-crop > [data-corner="ne"] { right: -4px; top: -4px; border-width: 4px 4px 0 0; }
+.image-editor-crop > [data-corner="sw"] { left: -4px; bottom: -4px; border-width: 0 0 4px 4px; }
+.image-editor-crop > [data-corner="se"] { right: -4px; bottom: -4px; border-width: 0 4px 4px 0; }
+.image-editor-tools { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 12px 16px 18px; }
+.image-editor-note, .image-editor-error { margin: 0; font-size: 13px; line-height: 1.5; text-align: center; color: var(--editor-fg-2); }
+.image-editor-error { color: var(--editor-error); }
+.image-editor-colors { display: flex; gap: 16px; }
+.image-editor-colors button { width: 28px; height: 28px; padding: 0; border-radius: 50%; background: var(--swatch); box-shadow: inset 0 0 0 1.5px #ffffff4d; }
+.image-editor-colors button[aria-checked="true"] { box-shadow: 0 0 0 3px var(--editor-bg), 0 0 0 5px var(--editor-fg); }
+.image-editor-actions { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; width: min(100%, 420px); }
+.image-editor-actions > :first-child { justify-self: start; }
+.image-editor-actions .icon-button { width: 56px; min-width: 56px; height: 56px; padding: 15px; border-radius: 18px; background: var(--editor-chip); }
+.image-editor-done { display: grid; place-items: center; width: 72px; height: 72px; padding: 0; border-radius: 50%; background: var(--editor-fg); color: var(--editor-bg); }
+.image-editor-done svg { width: 34px; height: 34px; }
+.image-editor-done[aria-busy="true"] svg { animation: sending-pulse 1s ease-in-out infinite alternate; }
+@media (hover: hover) {
+  .image-editor .icon-button:not(.black):not(:disabled):hover { background: var(--editor-chip); color: var(--editor-fg); }
+  .image-editor-actions .icon-button:not(:disabled):hover { background: #ffffff2e; }
+}
+@media (prefers-reduced-motion: reduce) { .image-editor, .image-editor-done[aria-busy="true"] svg { animation: none; } }

@@ -9,7 +9,8 @@ import {diffSummary} from './diff-summary';
 import {SenderLabel} from './senders';
 import {usePacedText} from './text-reveal';
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
-const statusLabel:Record<string,string>={inProgress:'进行中',completed:'已完成',interrupted:'已停止',failed:'失败'};
+/** How a turn ended, when not by completing. A turn under way is not labelled: its activity summary and running step say so. */
+const endLabel:Record<string,string>={interrupted:'已停止',failed:'失败'};
 const activityLabel:Record<string,string>={commandExecution:'运行命令',fileChange:'修改文件',mcpToolCall:'使用工具',reasoning:'思考摘要',webSearch:'搜索',contextCompaction:'整理上下文',plan:'计划',fileRead:'读取文件',codeSearch:'搜索代码',subagent:'子任务',toolCall:'使用工具',nextStep:'下一步'};
 
 /** A sent message, shown until the conversation contains it. */
@@ -47,7 +48,7 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
       return item.role==='user'?<UserMessage key={item.id} sender={item.sender} text={item.text} editReason={editReason} disabled={disabled} blocked={onBlocked} copy={()=>onCopy(item.text)} resend={text=>onEdit(turn.id,item.id,text)}>{body}</UserMessage>:<article className={`message ${item.role}`} key={item.id}>{body}</article>;
     }))}
     {turn.plan&&<PlanCard steps={turn.plan} running={turn.status==='inProgress'}/>}
-    {turn.status!=='completed'&&<div className="turn-status">{statusLabel[turn.status]||turn.status}</div>}{turn.diff&&<DiffCard diff={turn.diff} open={()=>onDiff(turn)}/>}{turn.pages?.map(page=><button type="button" key={page.url} className="diff-card" onClick={()=>openPreview(page.url)} aria-label={`查看页面 ${page.title}`}><Icon name="browser" size={18}/><span className="diff-card-title">{page.title||'claude.ai 页面'}</span>{page.earlier&&<span className="diff-card-note">之前的轮次</span>}<span className="diff-card-open">查看<Icon name="chevron" size={14}/></span></button>)}{turn.error&&<p className="error">{turn.error}</p>}
+    {turn.status!=='completed'&&turn.status!=='inProgress'&&<div className="turn-status">{endLabel[turn.status]||turn.status}</div>}{turn.diff&&<DiffCard diff={turn.diff} open={()=>onDiff(turn)}/>}{turn.pages?.map(page=><button type="button" key={page.url} className="diff-card" onClick={()=>openPreview(page.url)} aria-label={`查看页面 ${page.title}`}><Icon name="browser" size={18}/><span className="diff-card-title">{page.title||'claude.ai 页面'}</span>{page.earlier&&<span className="diff-card-note">之前的轮次</span>}<span className="diff-card-open">查看<Icon name="chevron" size={14}/></span></button>)}{turn.error&&<p className="error">{turn.error}</p>}
     {lastReply&&<div className="assistant-actions"><IconButton icon="copy" label="复制回复文字" onClick={()=>onCopy(lastReply.text)}/><IconButton icon="fork" label="从这轮回复分叉" disabled={disabled} onClick={()=>onFork(turn)}/></div>}
   </section>;
 });
