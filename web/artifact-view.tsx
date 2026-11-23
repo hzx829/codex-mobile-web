@@ -133,13 +133,13 @@ function ArtifactSignIn({call,connected,done,challenge=false}:{call:Call;connect
   }
   useEffect(()=>{if(desk!=='open'||!connected)return;const timer=setInterval(()=>{if(document.visibilityState==='visible')void desktop('status');},2000);return()=>clearInterval(timer);},[desk,connected]);
   if(!started&&(desk==='open'||desk==='opening'))return <div className="preview-empty artifact-login-intro">
-    <p role="status">{desk==='opening'?'正在电脑上打开浏览器窗口…':'电脑屏幕上已打开浏览器窗口。请在里面完成验证、登录 claude.ai，然后关掉这个窗口，这里会自动继续。'}</p>
+    <p role="status">{desk==='opening'?'正在电脑上打开浏览器窗口…':'电脑屏幕上已打开浏览器窗口。请在里面完成验证、登录 claude.ai。进入 claude.ai 后窗口会自动关闭，这里随即继续。'}</p>
     {desk==='open'&&<button disabled={!connected} onClick={()=>{setDesk(null);void request.current('claude.artifact.login',{op:'close'}).catch(()=>{});}}>取消</button>}
   </div>;
   const off=!connected||waiting;
   if(!started&&check)return <div className="artifact-login artifact-login-intro">
     <p>{check}</p>
-    <small>电脑屏幕上会打开连接器自己的浏览器，它不受程序控制。在里面勾选“请验证您是真人”，还没登录的话顺便登录 claude.ai，然后关掉这个窗口。不在电脑旁时没法完成这一步。</small>
+    <small>电脑屏幕上会打开连接器自己的浏览器，它不受程序控制。在里面勾选“请验证您是真人”，还没登录的话顺便登录 claude.ai。进入 claude.ai 后窗口会自动关闭。不在电脑旁时没法完成这一步。</small>
     {desk==='closed'&&<p role="status">窗口已关闭。</p>}
     {error&&<p className="error" role="alert">{error}</p>}
     <div className="artifact-login-keys">

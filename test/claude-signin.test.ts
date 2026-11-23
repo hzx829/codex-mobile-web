@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {WebSocketServer} from 'ws';
 import {createServer} from 'node:http';
-import {ArtifactViewer, findBrowser, profileFolder} from '../src/connector/claude-artifacts.js';
+import {ArtifactViewer, appTitle, findBrowser, profileFolder} from '../src/connector/claude-artifacts.js';
 import {relayStatus} from '../scripts/setup-status.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 
@@ -117,4 +117,11 @@ test('claude.ai is signed in by email with the code handed back, or with a paste
     await new Promise(resolve => server.close(resolve));
     for (const dir of dirs) await removeTestTemp(dir);
   }
+});
+
+test('the window on the computer counts as signed in once its title shows claude.ai itself', () => {
+  for (const title of ['新建对话 - Claude - Google Chrome', 'Claude - Google Chrome', '\uFFFD\uFFFD\uFFFD\uFFFD - Claude - Google Chrome', 'Plan a trip - Claude - Microsoft​ Edge'])
+    assert.ok(appTitle(title), title);
+  for (const title of ['登录或创建账户 | Claude.ai - Google Chrome', 'Sign in or create an account | Claude.ai - Google Chrome', '请稍候… - Google Chrome', 'Just a moment... - Google Chrome', 'N/A', ''])
+    assert.ok(!appTitle(title), title);
 });

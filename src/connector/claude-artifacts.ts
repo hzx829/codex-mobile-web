@@ -1,8 +1,9 @@
-import {spawn, type ChildProcess} from 'node:child_process';
+import {execFile, spawn, type ChildProcess} from 'node:child_process';
 import {existsSync} from 'node:fs';
 import {lstat, mkdir, open as openFile, readdir, readFile, rm, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
+import {promisify} from 'node:util';
 import {WebSocket} from 'ws';
 import {BridgeError, type Json} from '../shared/types.js';
 import {downloadProjectFile, readProjectFile} from './project.js';
@@ -91,6 +92,23 @@ export async function profileInUse(profile: string) {
   try {const handle = await openFile(file, 'r+');await handle.close();return false;}
   catch (error) {return ['EBUSY', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code || '');}
 }
+
+const run = promisify(execFile);
+/** The title of a process's main window (Windows), read without touching the browser itself. */
+export async function windowTitle(pid: number): Promise<string> {
+  if (process.platform !== 'win32') return '';
+  try {
+    const {stdout} = await run('tasklist', ['/v', '/fo', 'csv', '/nh', '/fi', `PID eq ${pid}`], {windowsHide: true, timeout: 5000});
+    const fields = stdout.trim().match(/"[^"]*"/g);
+    return fields ? fields[fields.length - 1].slice(1, -1) : '';
+  } catch {return '';}
+}
+/**
+ * Whether a window title shows claude.ai's app rather than its sign-in or Cloudflare's check. The app names itself
+ * "… - Claude" ("新建对话 - Claude - Google Chrome"); sign-in pages end in "| Claude.ai" and the check says "请稍候…".
+ * Only the ASCII parts are relied on, as the title may arrive in another code page.
+ */
+export const appTitle = (title: string) => /(^|\s-\s)Claude(\s-\s|$)/.test(title) && !/Claude\.ai/i.test(title);
 
 type Message = {id?: number; method?: string; params?: Json; result?: Json; error?: {message?: string}; sessionId?: string};
 /** A minimal Chrome DevTools Protocol client over one browser-level WebSocket, with flattened sessions. */
@@ -267,7 +285,7 @@ export class ArtifactViewer {
       const exe = this.executable();
       if (!exe) throw new BridgeError('unavailable', '电脑上没有找到 Edge 或 Chrome，无法中转 claude.ai 页面。可在连接器环境变量 CLAUDE_ARTIFACT_BROWSER 指定浏览器。');
       const profile = join(this.dataDir, profileFolder(exe));
-      if (await profileInUse(profile)) throw new BridgeError('busy', '电脑屏幕上的 claude.ai 窗口还开着，请在那里完成后关掉它。');
+      if (await profileInUse(profile)) throw new BridgeError('busy', '电脑屏幕上的 claude.ai 窗口还开着，请先在那里完成登录。');
       await mkdir(profile, {recursive: true});
       const portFile = join(profile, 'DevToolsActivePort');
       await rm(portFile, {force: true});
@@ -589,7 +607,15 @@ export class ArtifactViewer {
       for (let i = 0; i < 100 && !(await profileInUse(profile)); i++) await delay(100);
       if (!await profileInUse(profile)) {this.desk = undefined;throw new BridgeError('unavailable', '电脑上的浏览器窗口没有打开');}
     }
-    if (this.desk && await profileInUse(profile)) return {desktop: true, open: true, signedIn: false};
+    if (this.desk && await profileInUse(profile)) {
+      // Signed in once the window shows claude.ai's app. It is then closed as a person would close it, so the
+      // browser saves its cookies first, and those are checked below as for a window the person closed.
+      const pid = this.desk.child.exitCode === null ? this.desk.child.pid : undefined;
+      if (!pid || !appTitle(await windowTitle(pid))) return {desktop: true, open: true, signedIn: false};
+      await run('taskkill', ['/PID', String(pid)], {windowsHide: true, timeout: 10_000}).catch(() => {});
+      for (let i = 0; i < 100 && await profileInUse(profile); i++) await delay(150);
+      if (await profileInUse(profile)) return {desktop: true, open: true, signedIn: false};
+    }
     if (!this.desk) return {desktop: true, open: false, signedIn: (await this.known()).signedIn === 'yes'};
     this.desk = undefined;
     // Closed: the connector's browser looks at the cookies the window left, without opening any page.

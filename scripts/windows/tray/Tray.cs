@@ -262,7 +262,7 @@ sealed class TrayContext : ApplicationContext {
     signingIn = true;
     UpdateUi();
     PostSignIn("started", null);
-    Notify("请在弹出的窗口里登录 claude.ai", "这是连接器自己的浏览器，和平时用的 Chrome 分开。登录完成后关掉这个窗口。用邮箱登录时，邮件里的链接在别的浏览器打开会显示验证码，填回这个窗口即可。", ToolTipIcon.Info, false);
+    Notify("请在弹出的窗口里登录 claude.ai", "这是连接器自己的浏览器，和平时用的 Chrome 分开。登录完成后窗口会自动关闭。用邮箱登录时，邮件里的链接在别的浏览器打开会显示验证码，填回这个窗口即可。", ToolTipIcon.Info, false);
     ProcessResult result = await RunNode(new[] {"--claude-signin"}, null, 16 * 60000);
     signingIn = false;
     UpdateUi();

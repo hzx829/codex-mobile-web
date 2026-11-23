@@ -126,7 +126,7 @@ function renderStatus() {
 
   const needsSignIn = h?.connector === 'online' && !!h.services?.includes('claude') && h.claudeSignIn === 'no';
   $('claude-signin').hidden = !(running && (signIn !== 'idle' || needsSignIn && !declined()));
-  setText('claude-signin-text', signIn === 'started' ? '已在屏幕上打开浏览器窗口。请在里面通过验证、登录 claude.ai，然后关掉这个窗口。这是连接器自己的浏览器，和平时用的 Chrome 分开；用邮箱登录时，邮件里的链接在别的浏览器打开会显示验证码，把验证码填回这个窗口即可。'
+  setText('claude-signin-text', signIn === 'started' ? '已在屏幕上打开浏览器窗口。请在里面通过验证、登录 claude.ai，进入 claude.ai 后窗口会自动关闭。这是连接器自己的浏览器，和平时用的 Chrome 分开；用邮箱登录时，邮件里的链接在别的浏览器打开会显示验证码，把验证码填回这个窗口即可。'
     : signIn === 'failed' ? `没能登录：${signInError}` : '登录 claude.ai 后，才能在手机或浏览器里查看 Claude 发布的页面。只需登录一次，用的是连接器自己单独的浏览器档案。');
   ($('claude-signin-go') as HTMLButtonElement).hidden = signIn === 'started';
   ($('claude-signin-go') as HTMLButtonElement).textContent = signIn === 'failed' ? '重试' : '登录';
