@@ -8,6 +8,7 @@ export type AntigravityPermissionMode = typeof ANTIGRAVITY_PERMISSION_MODES[numb
 export type ApprovalQuestion = {question:string; header:string; multiSelect:boolean; options:{label:string; description:string}[]};
 export type ApprovalRequest = {id:string; kind:'permission'|'question'|'plan'|'notice'; tool:string; title:string; detail:string; canRemember:boolean; rememberScope?:'session'|'project'|'user'; implementModes?:string[]; questions?:ApprovalQuestion[]};
 export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; text:string; sender?:TeamMember};
+export type AntigravityBackgroundTask = {id:string; stepIndex:number; title:string; command?:string; cwd?:string; output?:string; startedAt?:string};
 export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'};
 export const bridgeServices = ['codex', 'antigravity', 'claude'] as const;
 export type BridgeService = typeof bridgeServices[number];

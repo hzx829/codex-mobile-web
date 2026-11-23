@@ -9,6 +9,7 @@ import {
   ANTIGRAVITY_PERMISSION_MODES,
   BridgeError,
   textRequired,
+  type AntigravityBackgroundTask,
   type AntigravityIssue,
   type AntigravityMessage,
   type AntigravityModel,
@@ -28,14 +29,17 @@ const guid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const idle = 'CASCADE_RUN_STATUS_IDLE';
 const active = 'CASCADE_RUN_STATUS_RUNNING';
 const waitingStep = 'CORTEX_STEP_STATUS_WAITING';
+const runningStep = 'CORTEX_STEP_STATUS_RUNNING';
 // The full transcript keeps tool output too, so read a larger tail of it.
 const tailSize = 4 * 1024 * 1024;
 const WAITING_STEP_WINDOW = 25;
+const TASK_OUTPUT_LIMIT = 32 * 1024;
 type Summary = {id: string; title: string; status: string; notIdle: number | null; modified: string; steps: number; userStep: number | null; userTime: string | null; workspaces: string};
 const columns = 'conversation_id AS id, title, status, not_fully_idle AS notIdle, last_modified_time AS modified, step_count AS steps, last_user_input_step_index AS userStep, last_user_input_time AS userTime, workspace_uris AS workspaces';
 const workspaceEntries = "json_each(CASE WHEN json_valid(workspace_uris) THEN workspace_uris ELSE '[]' END)";
 const turnKey = (summary: Summary) => JSON.stringify([summary.userStep, summary.userTime]);
-const canSend = (summary: Summary) => summary.status === idle && !summary.notIdle;
+// `not_fully_idle` also stays set while a background command is running after the turn ended; desktop still accepts messages then.
+const canSend = (summary: Summary) => summary.status === idle;
 
 const PERMISSION_PRESET_SET = new Set<string>(ANTIGRAVITY_PERMISSION_MODES);
 const isPermissionPreset = (value: unknown): value is AntigravityPermissionMode =>
@@ -370,6 +374,135 @@ export function extractAntigravityRequests(steps: Json[], stepOffset: number): A
   return requests;
 }
 
+function tailText(text: string, limit = TASK_OUTPUT_LIMIT): string {
+  if (text.length <= limit) return text;
+  return '…\n' + text.slice(-limit);
+}
+
+function terminalBlockOf(step: Json): Json | null {
+  const blocks = step?.generic?.result?.stepRenderInfo?.contentBlocks;
+  if (!Array.isArray(blocks)) return null;
+  for (const block of blocks) {
+    if (block?.terminal && typeof block.terminal === 'object') return block.terminal;
+  }
+  return null;
+}
+
+function stepTitleOf(step: Json): string {
+  const td = step?.taskDetails;
+  if (typeof td?.title === 'string' && td.title.trim()) return td.title.trim();
+  const summary = step?.generic?.args?.toolSummary;
+  if (typeof summary === 'string' && summary.trim()) return summary.trim();
+  const parts = step?.generic?.result?.stepRenderInfo?.titleParts;
+  if (Array.isArray(parts)) {
+    const joined = parts.map((p: Json) => typeof p?.text === 'string' ? p.text : '').join('').trim();
+    if (joined) return joined;
+  }
+  const toolName = step?.metadata?.toolCall?.name;
+  if (typeof toolName === 'string' && toolName.trim()) return toolName.trim();
+  return '后台任务';
+}
+
+function stepIndexOf(step: Json, fallback: number): number {
+  if (Number.isSafeInteger(step?.stepIndex)) return step.stepIndex;
+  const sourceIdx = step?.metadata?.sourceTrajectoryStepInfo?.stepIndex;
+  if (Number.isSafeInteger(sourceIdx)) return sourceIdx;
+  return fallback;
+}
+
+function isBackgroundTaskStep(step: Json, conversationRunning: boolean): boolean {
+  if (!step || step.status !== runningStep) return false;
+  const td = step.taskDetails && typeof step.taskDetails === 'object' ? step.taskDetails : null;
+  return Boolean(td && (td.movedToBackgroundAt || td.id || td.logUri)) || !conversationRunning;
+}
+
+/** Extracts still-running background tasks (e.g. background commands) from Antigravity trajectory steps. */
+export function extractAntigravityBackgroundTasks(
+  steps: Json[],
+  stepOffset: number,
+  conversationRunning = false,
+): AntigravityBackgroundTask[] {
+  const tasks: AntigravityBackgroundTask[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < steps.length; index++) {
+    const step = steps[index];
+    if (!isBackgroundTaskStep(step, conversationRunning)) continue;
+    const td = step.taskDetails && typeof step.taskDetails === 'object' ? step.taskDetails : null;
+    const stepIndex = stepIndexOf(step, stepOffset + index);
+    const id = typeof td?.id === 'string' && td.id ? td.id : String(stepIndex);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const terminal = terminalBlockOf(step);
+    const command = typeof terminal?.command === 'string' && terminal.command.trim() ? terminal.command.trim()
+      : typeof td?.description === 'string' && td.description.trim() ? td.description.trim()
+      : typeof step.runCommand?.commandLine === 'string' && step.runCommand.commandLine.trim() ? step.runCommand.commandLine.trim()
+      : typeof step.runCommand?.command === 'string' && step.runCommand.command.trim() ? step.runCommand.command.trim()
+      : typeof step.generic?.args?.CommandLine === 'string' && step.generic.args.CommandLine.trim() ? step.generic.args.CommandLine.trim()
+      : '';
+    const cwd = typeof terminal?.cwd === 'string' && terminal.cwd.trim() ? terminal.cwd.trim()
+      : typeof step.runCommand?.cwd === 'string' && step.runCommand.cwd.trim() ? step.runCommand.cwd.trim()
+      : '';
+    const rawOutput = typeof td?.progress === 'string' && td.progress ? td.progress
+      : typeof terminal?.output === 'string' && terminal.output ? terminal.output
+      : '';
+    const output = rawOutput ? tailText(rawOutput) : '';
+    const startedAt = typeof td?.movedToBackgroundAt === 'string' && td.movedToBackgroundAt ? td.movedToBackgroundAt
+      : typeof step.metadata?.startedAt === 'string' && step.metadata.startedAt ? step.metadata.startedAt
+      : typeof step.metadata?.createdAt === 'string' && step.metadata.createdAt ? step.metadata.createdAt
+      : undefined;
+    tasks.push({
+      id,
+      stepIndex,
+      title: stepTitleOf(step),
+      ...(command ? {command} : {}),
+      ...(cwd ? {cwd} : {}),
+      ...(output ? {output} : {}),
+      ...(startedAt ? {startedAt} : {}),
+    });
+  }
+  return tasks;
+}
+
+function extractTaskLogPaths(steps: Json[], conversationRunning: boolean): Map<string, string> {
+  const paths = new Map<string, string>();
+  for (let index = 0; index < steps.length; index++) {
+    const step = steps[index];
+    if (!isBackgroundTaskStep(step, conversationRunning)) continue;
+    const td = step.taskDetails && typeof step.taskDetails === 'object' ? step.taskDetails : null;
+    const path = localWorkspace(td?.logUri);
+    if (!path) continue;
+    const stepIndex = stepIndexOf(step, index);
+    const id = typeof td?.id === 'string' && td.id ? td.id : String(stepIndex);
+    paths.set(id, path);
+  }
+  return paths;
+}
+
+async function readTaskLogTail(path: string): Promise<string> {
+  const file = await open(path, 'r').catch(() => null);
+  if (!file) return '';
+  try {
+    const {size} = await file.stat();
+    if (!size) return '';
+    const start = Math.max(0, size - TASK_OUTPUT_LIMIT);
+    const data = Buffer.alloc(size - start);
+    const {bytesRead} = await file.read(data, 0, data.length, start);
+    const text = data.toString('utf8', 0, bytesRead);
+    return start > 0 ? '…\n' + text : text;
+  } catch {
+    return '';
+  } finally { await file.close(); }
+}
+
+async function statTaskLogs(paths: string[]): Promise<string> {
+  if (!paths.length) return '';
+  const stats = await Promise.all(paths.slice(0, 16).map(async path => {
+    const info = await stat(path, {bigint: true}).catch(() => null);
+    return info ? `${info.mtimeNs}:${info.size}` : '';
+  }));
+  return stats.join(',');
+}
+
 /** Builds the native `CascadeUserInteraction` response payload for a waiting step. */
 export function buildAntigravityInteraction(
   trajectoryId: string,
@@ -482,10 +615,18 @@ async function transcript(path: string): Promise<{messages: AntigravityMessage[]
   } finally { await file.close(); }
 }
 
+type LiveState = {
+  permissionMode?: AntigravityPermissionMode;
+  defaultPermissionMode?: AntigravityPermissionMode;
+  requests: ApprovalRequest[];
+  backgroundTasks: AntigravityBackgroundTask[];
+  taskLogPaths: string[];
+};
+
 export class AntigravityBridge {
   private writing = new Set<string>();
   private watchers = 0;
-  private recent = new Map<string, {revision: string; messages: AntigravityMessage[]}>();
+  private recent = new Map<string, {revision: string; baseRevision: string; live: LiveState; messages: AntigravityMessage[]}>();
   constructor(private root: string, private ledger: Ledger, private hub = callHub,
     private projectsDir = join(dirname(root), 'config', 'projects')) {}
 
@@ -558,11 +699,69 @@ export class AntigravityBridge {
     };
   }
 
-  private async waitingSteps(id: string, stepCount: number): Promise<{offset: number; steps: Json[]}> {
-    const offset = Math.max(0, stepCount - WAITING_STEP_WINDOW);
-    const result = await this.hub(this.daemonDir(), 'GetCascadeTrajectorySteps', {cascadeId: id, stepOffset: offset}).catch(() => null);
-    const steps = Array.isArray(result?.steps) ? result.steps : [];
-    return {offset, steps};
+  private async fetchSteps(id: string, stepOffset: number): Promise<Json[]> {
+    const result = await this.hub(this.daemonDir(), 'GetCascadeTrajectorySteps', {cascadeId: id, stepOffset}).catch(() => null);
+    return Array.isArray(result?.steps) ? result.steps : [];
+  }
+
+  private async taskDirOffsets(id: string): Promise<number[]> {
+    const names = await readdir(join(this.root, 'brain', id, '.system_generated', 'tasks')).catch(() => [] as string[]);
+    const offsets: number[] = [];
+    for (const name of names) {
+      const match = /^task-(\d+)\.log$/i.exec(name);
+      if (!match) continue;
+      const stepIndex = Number(match[1]);
+      if (Number.isSafeInteger(stepIndex) && stepIndex >= 0) offsets.push(stepIndex);
+    }
+    return offsets.sort((a, b) => a - b);
+  }
+
+  private async liveSteps(
+    id: string,
+    summary: Summary,
+    opts?: {scanOlder?: boolean; previousBackgroundTasks?: AntigravityBackgroundTask[]; previousLogPaths?: string[]},
+  ): Promise<{requests: ApprovalRequest[]; backgroundTasks: AntigravityBackgroundTask[]; taskLogPaths: string[]}> {
+    const conversationRunning = summary.status === active;
+    const tailOffset = Math.max(0, summary.steps - WAITING_STEP_WINDOW);
+    const tail = await this.fetchSteps(id, tailOffset);
+    let requests = extractAntigravityRequests(tail, tailOffset);
+    let backgroundTasks = extractAntigravityBackgroundTasks(tail, tailOffset, conversationRunning);
+    let logPathMap = extractTaskLogPaths(tail, conversationRunning);
+
+    if (summary.notIdle && tailOffset > 0) {
+      if (opts?.scanOlder === false) {
+        const seen = new Set(backgroundTasks.map(task => task.id));
+        const keptOlder = (opts.previousBackgroundTasks || []).filter(task => task.stepIndex < tailOffset && !seen.has(task.id));
+        backgroundTasks = [...keptOlder, ...backgroundTasks];
+      } else {
+        const olderTaskSteps = (await this.taskDirOffsets(id)).filter(idx => idx < tailOffset);
+        const olderOffset = olderTaskSteps.length
+          ? olderTaskSteps[0]
+          : (!conversationRunning && !backgroundTasks.length && !requests.length ? 0 : null);
+        if (olderOffset !== null) {
+          const wider = await this.fetchSteps(id, olderOffset);
+          if (wider.length) {
+            requests = extractAntigravityRequests(wider, olderOffset);
+            backgroundTasks = extractAntigravityBackgroundTasks(wider, olderOffset, conversationRunning);
+            logPathMap = extractTaskLogPaths(wider, conversationRunning);
+          }
+        }
+      }
+    }
+
+    const taskLogPaths = new Set<string>(opts?.scanOlder === false ? (opts.previousLogPaths || []) : []);
+    const tasksDir = join(this.root, 'brain', id, '.system_generated', 'tasks');
+    backgroundTasks = await Promise.all(backgroundTasks.map(async task => {
+      const logPath = logPathMap.get(task.id) || join(tasksDir, `task-${task.stepIndex}.log`);
+      taskLogPaths.add(logPath);
+      const diskTail = await readTaskLogTail(logPath);
+      if (diskTail && (!task.output || diskTail.length > task.output.length)) {
+        return {...task, output: diskTail};
+      }
+      return task;
+    }));
+
+    return {requests, backgroundTasks, taskLogPaths: [...taskLogPaths]};
   }
 
   private async create(p: Json): Promise<Json> {
@@ -668,7 +867,11 @@ export class AntigravityBridge {
     return user.userConfig ?? {};
   }
 
-  private async snapshot(id: string, live?: {permissionMode?: AntigravityPermissionMode; defaultPermissionMode?: AntigravityPermissionMode; requests: ApprovalRequest[]}) {
+  private async snapshot(
+    id: string,
+    live?: LiveState,
+    opts?: {scanOlder?: boolean; previousBackgroundTasks?: AntigravityBackgroundTask[]; previousLogPaths?: string[]},
+  ) {
     const summary = this.summary(id);
     // transcript.jsonl cuts long steps short ("<truncated N bytes>"); transcript_full.jsonl keeps them whole.
     const logs = join(this.root, 'brain', id, '.system_generated', 'logs');
@@ -685,37 +888,51 @@ export class AntigravityBridge {
     const activeOrWaiting = summary.status === active || Boolean(summary.notIdle);
     let resolved = live;
     if (!resolved) {
-      const [meta, globalPreset, waiting] = await Promise.all([
+      const [meta, globalPreset, stepState] = await Promise.all([
         this.trajectoryMeta(id),
         this.defaultPermissionMode(),
-        activeOrWaiting ? this.waitingSteps(id, summary.steps) : Promise.resolve(null),
+        activeOrWaiting ? this.liveSteps(id, summary, opts) : Promise.resolve({requests: [], backgroundTasks: [], taskLogPaths: []}),
       ]);
       resolved = {
         permissionMode: meta.permissionMode,
         defaultPermissionMode: globalPreset,
-        requests: waiting ? extractAntigravityRequests(waiting.steps, waiting.offset) : [],
+        requests: stepState.requests,
+        backgroundTasks: stepState.backgroundTasks,
+        taskLogPaths: stepState.taskLogPaths,
       };
     }
-    const {permissionMode, defaultPermissionMode, requests} = resolved;
+    const {permissionMode, defaultPermissionMode, requests, backgroundTasks, taskLogPaths} = resolved;
+    const taskLogStat = await statTaskLogs(taskLogPaths);
     const requestFingerprint = requests.map(req => `${req.id}:${req.kind}:${req.title}`).join('|');
+    const taskFingerprint = backgroundTasks.map(task => `${task.id}:${task.title}:${task.output?.length ?? 0}:${task.output?.slice(-64) ?? ''}`).join('|');
     const baseRevision = JSON.stringify([
       summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, cwd,
-      String(file?.mtimeNs), String(file?.size),
+      String(file?.mtimeNs), String(file?.size), taskLogStat,
     ]);
-    const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint]);
+    const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint, taskFingerprint]);
     return {
       path, revision, baseRevision, live: resolved, turn: turnKey(summary), title: summary.title || '未命名对话', cwd,
-      running: summary.status === active, canSend: canSend(summary),
+      running: summary.status === active, canSend: canSend(summary) && !requests.length,
+      notIdle: Boolean(summary.notIdle),
       supportsModelSelection: true, supportsImages: true,
       ...(permissionMode ? {permissionMode} : {}),
       ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
-      ...(requests.length ? {requests} : {}),
+      requests,
+      backgroundTasks,
     };
   }
 
   private async read(id: string, known?: string) {
     const previous = this.recent.get(id);
-    let current = await this.snapshot(id);
+    let current;
+    if (known && previous && previous.revision === known) {
+      const local = await this.snapshot(id, previous.live);
+      current = local.baseRevision === previous.baseRevision && !local.running && local.canSend
+        ? local
+        : await this.snapshot(id);
+    } else {
+      current = await this.snapshot(id);
+    }
     if (known && known === current.revision) {
       if (this.watchers >= 32) throw new BridgeError('busy', '观察请求较多，请稍后重试');
       this.watchers++;
@@ -727,8 +944,14 @@ export class AntigravityBridge {
           ticks++;
           const nextLocal = await this.snapshot(id, current.live);
           const activeOrWaiting = nextLocal.running || !nextLocal.canSend;
-          if (nextLocal.baseRevision !== current.baseRevision || activeOrWaiting && ticks % 2 === 0) {
+          if (nextLocal.baseRevision !== current.baseRevision) {
             current = await this.snapshot(id);
+          } else if (activeOrWaiting && ticks % 2 === 0) {
+            current = await this.snapshot(id, undefined, {
+              scanOlder: false,
+              previousBackgroundTasks: current.live.backgroundTasks,
+              previousLogPaths: current.live.taskLogPaths,
+            });
           } else {
             current = nextLocal;
           }
@@ -736,7 +959,7 @@ export class AntigravityBridge {
       } finally { this.watchers--; }
       if (known === current.revision) return {unchanged: true};
     }
-    const {path, baseRevision: _base, live: _live, ...view} = current;
+    const {path, baseRevision, live, ...view} = current;
     const {messages: items, issue} = await transcript(path);
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
     const records = this.ledger.senders('antigravity', id);
@@ -745,7 +968,7 @@ export class AntigravityBridge {
       for (const item of items) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
     }
     this.recent.delete(id);
-    this.recent.set(id, {revision: view.revision, messages: items});
+    this.recent.set(id, {revision: view.revision, baseRevision, live, messages: items});
     if (this.recent.size > 8) this.recent.delete(this.recent.keys().next().value!);
     if (previous && previous.revision === known) {
       let keep = 0;
@@ -843,6 +1066,7 @@ export class AntigravityBridge {
     if (action === 'antigravity.watch') return this.read(id, textRequired(p.revision, '会话版本', 4096));
     if (action !== 'antigravity.send' && action !== 'antigravity.stop') throw new BridgeError('unsupported', '不支持此 Antigravity 操作');
     const sending = action === 'antigravity.send';
+    const killBackgroundTasks = !sending && p.killBackgroundTasks === true;
     const files = sending ? requestFiles(p.files) : [], text = sending ? messageText(p.text, files) : undefined;
     const opId = textRequired(p.opId, '操作标识', 100);
     const turn = textRequired(p.turn, '对话轮次', 200);
@@ -853,10 +1077,12 @@ export class AntigravityBridge {
     return this.ledger.run(opId, {
       action, id, text, turn, ...attached(images, files),
       ...(model ? {model} : {}), ...(permissionMode ? {permissionMode} : {}),
+      ...(killBackgroundTasks ? {killBackgroundTasks: true} : {}),
     }, async () => {
       if (this.writing.has(id)) throw new BridgeError('busy', '此会话正在处理另一次操作');
       const summary = this.summary(id);
-      if (turnKey(summary) !== turn || !(sending ? canSend(summary) : summary.status === active)) throw new BridgeError('changed', '会话状态已变化，请刷新后再操作');
+      const canStop = summary.status === active || (killBackgroundTasks && Boolean(summary.notIdle));
+      if (turnKey(summary) !== turn || !(sending ? canSend(summary) : canStop)) throw new BridgeError('changed', '会话状态已变化，请刷新后再操作');
       this.writing.add(id);
       try {
         const directory = this.daemonDir();
@@ -879,7 +1105,7 @@ export class AntigravityBridge {
           this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: prompt});
           return {submitted: true};
         }
-        await this.hub(directory, 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks: false});
+        await this.hub(directory, 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks});
         return {stopRequested: true};
       } finally { this.writing.delete(id); }
     });

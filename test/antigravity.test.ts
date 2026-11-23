@@ -12,7 +12,8 @@ import {fileReference} from '../web/preview-target.js';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
-import {AntigravityBridge,parseAntigravityModels,extractAntigravityRequests} from '../src/connector/antigravity.js';
+import {AntigravityBridge,parseAntigravityModels,extractAntigravityRequests,extractAntigravityBackgroundTasks} from '../src/connector/antigravity.js';
+import {BackgroundTasksBar,BackgroundTasksPanel} from '../web/antigravity.js';
 import {antigravityModelSupportsImages,antigravityPickerModels,concreteAntigravityModel,splitAntigravityModel} from '../web/antigravity-model-picker.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {BridgeError} from '../src/shared/types.js';
@@ -364,4 +365,107 @@ test('Antigravity syncs permission presets and responds to waiting approval and 
   // Unknown interaction branches render as a safe desktop-only notice card.
   const notices = extractAntigravityRequests([{stepIndex: 9, status: 'CORTEX_STEP_STATUS_WAITING', requestedInteraction: {futureCustom: {}}}], 0);
   assert.equal(notices[0].kind, 'notice');
+});
+
+test('Antigravity stays sendable and surfaces stoppable background tasks when idle with not_fully_idle=1', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-bgtask-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  t.after(async () => { db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+  const id = randomUUID();
+  const tasksDir = join(dir, 'brain', id, '.system_generated', 'tasks');
+  const logsDir = join(dir, 'brain', id, '.system_generated', 'logs');
+  await mkdir(tasksDir, {recursive: true});
+  await mkdir(logsDir, {recursive: true});
+  const taskLogPath = join(tasksDir, 'task-120.log');
+  await writeFile(taskLogPath, 'line 1\nvenv: command not found\n');
+  await writeFile(join(logsDir, 'transcript.jsonl'), JSON.stringify({type: 'PLANNER_RESPONSE', step_index: 284, content: '阶段一完成'}) + '\n');
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const project = pathToFileURL(dir).href;
+  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(id, 'Stuck Bg Task', 'CASCADE_RUN_STATUS_IDLE', '2026-11-23T11:55:13.000Z', 285, 83, 't83', 1, JSON.stringify([project]));
+
+  const stepOffsets: number[] = [];
+  const writes: {method: string; body: any}[] = [];
+  const bgStep = {
+    type: 'CORTEX_STEP_TYPE_GENERIC',
+    status: 'CORTEX_STEP_STATUS_RUNNING',
+    metadata: {startedAt: '2026-11-23T11:36:29.202Z', sourceTrajectoryStepInfo: {stepIndex: 120}},
+    taskDetails: {
+      id: `${id}/task-120`,
+      logUri: pathToFileURL(taskLogPath).href,
+      progress: 'line 1\n',
+      description: 'wsl.exe bash -lc grep',
+      title: 'Locate capture-service WSL virtualenv',
+      movedToBackgroundAt: '2026-11-23T11:36:35.904Z',
+    },
+    generic: {
+      result: {
+        stepRenderInfo: {
+          contentBlocks: [{terminal: {command: 'wsl.exe bash -lc grep', cwd: 'd:\\lingan', output: 'line 1\n'}}],
+        },
+      },
+    },
+  };
+  let taskStillRunning = true;
+  const bridge = new AntigravityBridge(dir, ledger, async (_dir, method, body) => {
+    if (method === 'GetPermissionSettings' || method === 'GetAllCascadeTrajectories') return {};
+    if (method === 'GetCascadeTrajectorySteps') {
+      stepOffsets.push(body.stepOffset);
+      if (body.stepOffset <= 120 && taskStillRunning) return {steps: [bgStep]};
+      return {steps: [{stepIndex: 284, status: 'CORTEX_STEP_STATUS_DONE'}]};
+    }
+    writes.push({method, body});
+    return {};
+  });
+
+  // Reading an idle conversation with not_fully_idle=1 must stay sendable and discover the older background task at step 120.
+  const view = await bridge.handle('antigravity.read', {conversationId: id});
+  assert.equal(view.running, false);
+  assert.equal(view.canSend, true);
+  assert.equal(view.notIdle, true);
+  assert.deepEqual(stepOffsets, [260, 120]);
+  assert.equal(view.backgroundTasks.length, 1);
+  assert.deepEqual(view.backgroundTasks[0], {
+    id: `${id}/task-120`,
+    stepIndex: 120,
+    title: 'Locate capture-service WSL virtualenv',
+    command: 'wsl.exe bash -lc grep',
+    cwd: 'd:\\lingan',
+    output: 'line 1\nvenv: command not found\n',
+    startedAt: '2026-11-23T11:36:35.904Z',
+  });
+
+  // User is NOT deadlocked: sending a follow-up message succeeds even while background task runs.
+  const makeOp = () => `${Date.now()}:${randomUUID()}`;
+  assert.equal((await bridge.handle('antigravity.send', {conversationId: id, turn: view.turn, text: '继续', opId: makeOp()})).state, 'accepted');
+  assert.equal(writes[0].method, 'SendUserCascadeMessage');
+
+  // Normal stop (without killBackgroundTasks) refuses when the turn itself is idle, whereas killBackgroundTasks=true succeeds.
+  assert.equal((await bridge.handle('antigravity.stop', {conversationId: id, turn: view.turn, opId: makeOp()})).state, 'failed');
+  assert.equal((await bridge.handle('antigravity.stop', {conversationId: id, turn: view.turn, killBackgroundTasks: true, opId: makeOp()})).state, 'accepted');
+  assert.deepEqual(writes[1], {method: 'CancelCascadeInvocation', body: {cascadeId: id, killBackgroundTasks: true}});
+
+  // When the task ends and not_fully_idle clears, watch returns cleared backgroundTasks and notIdle=false.
+  taskStillRunning = false;
+  db.exec('UPDATE conversation_summaries SET not_fully_idle=0');
+  const cleared = await bridge.handle('antigravity.watch', {conversationId: id, revision: view.revision});
+  assert.equal(cleared.notIdle, false);
+  assert.deepEqual(cleared.backgroundTasks, []);
+
+  // Pure extractor ignores foreground synchronous steps while the conversation is running, but keeps background tasks.
+  const foregroundStep = {stepIndex: 5, status: 'CORTEX_STEP_STATUS_RUNNING', metadata: {toolCall: {name: 'read_file'}}};
+  assert.equal(extractAntigravityBackgroundTasks([foregroundStep, bgStep], 0, true).length, 1);
+  assert.equal(extractAntigravityBackgroundTasks([foregroundStep], 0, false).length, 1);
+
+  // Web bar & panel SSR render task count, command, output, and stop action.
+  const barHtml = renderToStaticMarkup(createElement(BackgroundTasksBar, {tasks: view.backgroundTasks, onOpen: () => {}}));
+  assert.match(barHtml, /1 个后台任务运行中/);
+  assert.match(barHtml, /Locate capture-service WSL virtualenv/);
+  const panelHtml = renderToStaticMarkup(createElement(BackgroundTasksPanel, {
+    tasks: view.backgroundTasks, hasTasks: true, turnRunning: false, canOperate: true, busy: false, connected: true,
+    onRefresh: () => {}, onStop: () => {}, onCopy: () => {},
+  }));
+  assert.match(panelHtml, /wsl\.exe bash -lc grep/);
+  assert.match(panelHtml, /venv: command not found/);
+  assert.match(panelHtml, /结束后台任务/);
 });

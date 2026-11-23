@@ -9,13 +9,13 @@ import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {AntigravityMessages,antigravityIssueText} from './antigravity-messages';
 import {AntigravityModelPicker,antigravityModelSupportsImages,type AntigravityCatalog} from './antigravity-model-picker';
-import {connectionLost,ConversationStatus} from './conversation';
+import {connectionLost,ConversationStatus,elapsedLabel} from './conversation';
 import {ThreadHeader,useComposerHeight,workspaceName} from './chat-layout';
 import {IconButton} from './icon-button';
 import {Icon} from './icons';
 import {useStableEvent} from './use-event';
 import {operationId} from './client';
-import type {ApprovalRequest,Json,RequestAction} from '../src/shared/types';
+import type {AntigravityBackgroundTask,ApprovalRequest,Json,RequestAction} from '../src/shared/types';
 import {SenderScope} from './senders';
 
 const IMAGES_BLOCKED='请更新这台电脑上的连接器后再给 Antigravity 发送图片。';
@@ -52,6 +52,54 @@ type Props={
   voiceMode:VoiceProvider;chooseVoice:()=>void;
 };
 
+export function BackgroundTasksBar({tasks,onOpen}:{tasks:AntigravityBackgroundTask[];onOpen:()=>void}){
+  const count=tasks.length;
+  const label=count?`${count} 个后台任务运行中`:'后台任务运行中';
+  const title=tasks[0]?.title||'';
+  return <button type="button" className="bg-tasks-bar" onClick={onOpen} aria-label={count?`查看 ${count} 个运行中的后台任务`:'查看运行中的后台任务'}>
+    <i className="dot online" aria-hidden="true"/>
+    <span className="bg-tasks-count">{label}</span>
+    {title&&<span className="bg-tasks-title">{title}</span>}
+    <span className="bg-tasks-open">查看<Icon name="chevron" size={14}/></span>
+  </button>;
+}
+
+export function BackgroundTasksPanel({tasks,hasTasks,turnRunning,canOperate,busy,connected,onRefresh,onStop,onCopy}:{
+  tasks:AntigravityBackgroundTask[];hasTasks:boolean;turnRunning:boolean;canOperate:boolean;busy:boolean;connected:boolean;
+  onRefresh:()=>void;onStop:()=>void;onCopy:(text:string)=>void;
+}){
+  const [now,setNow]=useState(Date.now);
+  useEffect(()=>{
+    if(!tasks.some(task=>task.startedAt))return;
+    setNow(Date.now());
+    const timer=setInterval(()=>setNow(Date.now()),1000);
+    return()=>clearInterval(timer);
+  },[tasks]);
+  if(!hasTasks)return <p className="muted">当前没有运行中的后台任务。</p>;
+  return <div className="bg-tasks-sheet">
+    {tasks.length>0?tasks.map(task=>{
+      const since=task.startedAt?Date.parse(task.startedAt):NaN;
+      return <section className="bg-task-card" key={task.id}>
+        <div className="bg-task-head">
+          <strong>{task.title}</strong>
+          {Number.isFinite(since)&&<span className="bg-task-time">{elapsedLabel(now-since)}</span>}
+        </div>
+        {task.command&&<div className="bg-task-cmd">
+          <code>{task.command}</code>
+          <IconButton icon="copy" label="复制命令" onClick={()=>onCopy(task.command!)}/>
+        </div>}
+        {task.cwd&&<p className="bg-task-cwd">目录：{task.cwd}</p>}
+        <pre className="bg-task-output">{task.output||'暂无输出'}</pre>
+      </section>;
+    }):<p className="muted">Antigravity 报告当前会话仍有后台任务在运行，但未能读取任务详情。你可以继续发送消息，或结束后台任务。</p>}
+    {turnRunning&&<p className="muted">当前对话也在处理中，结束后台任务会同时停止本轮回复。</p>}
+    <div className="bg-tasks-actions">
+      <button type="button" disabled={!connected||busy} onClick={onRefresh}>刷新状态</button>
+      <button type="button" className="danger" disabled={!canOperate} onClick={onStop}>{tasks.length>1?'结束全部后台任务':'结束后台任务'}</button>
+    </div>
+  </div>;
+}
+
 export function AntigravityPanel(props:Props){
   const {machine,connected,conversationId,call,go,inert,openFile,openPreview,previewError}=props;
   const creating=!conversationId;
@@ -70,7 +118,7 @@ export function AntigravityPanel(props:Props){
   const [defaultMode,setDefaultMode]=useState('');
   const [catalog,setCatalog]=useState<AntigravityCatalog|null>(()=>storedCatalog(machine));
   // Unknown (null) until the desktop's model list for the new conversation's project has been read.
-  const [createImages,setCreateImages]=useState<boolean|null>(null),[adding,setAdding]=useState(false);
+  const [createImages,setCreateImages]=useState<boolean|null>(null),[adding,setAdding]=useState(false),[tasksOpen,setTasksOpen]=useState(false);
   // An older connector drops images without saying so; it only advertises them once it can send them.
   const readModels=useStableEvent(async()=>{
     const result:AntigravityCatalog=await request.current('antigravity.models',creating?{project:target}:{conversationId});
@@ -156,7 +204,13 @@ export function AntigravityPanel(props:Props){
           setView(current=>{
             if(!current||current.revision!==view!.revision)return current;
             if(!next.base)return next;
-            return {...current,...next,messages:[...current.messages.slice(0,next.keep),...next.messages]};
+            return {
+              ...current,...next,
+              requests:next.requests||[],
+              backgroundTasks:next.backgroundTasks||[],
+              notIdle:Boolean(next.notIdle),
+              messages:[...current.messages.slice(0,next.keep),...next.messages],
+            };
           });
           return;
         }
@@ -211,12 +265,15 @@ export function AntigravityPanel(props:Props){
     }catch(e:any){if(!e?.uncertain&&alive.current)remember('');failed(e);}
     finally{lock.current=false;if(alive.current)setBusy(false);}
   }
-  async function mutate(action:'send'|'stop'){
+  const backgroundTasks:AntigravityBackgroundTask[]=Array.isArray(view?.backgroundTasks)?view.backgroundTasks:[];
+  const hasBackgroundTasks=backgroundTasks.length>0||Boolean(!view?.running&&view?.notIdle);
+  async function mutate(action:'send'|'stop',options?:{killBackgroundTasks?:boolean}){
     if(action==='send'&&(attachments.loading||voiceBusy))return;
     if(creating){if(action==='send')void start();return;}
     if(lock.current||pending||!connected)return;
     if(action==='send'&&(!draft.trim()&&!files.length||!view?.canSend))return;
-    if(action==='stop'&&!view?.running)return;
+    const killBackgroundTasks=action==='stop'&&Boolean(options?.killBackgroundTasks);
+    if(action==='stop'&&!view?.running&&!(killBackgroundTasks&&hasBackgroundTasks))return;
     if(action==='send'&&imagesBlocked())return;
     if(action==='send'&&model&&!view?.supportsModelSelection){setError('请更新电脑连接器后使用所选模型，或恢复当前对话模型。');return;}
     let attached:Json|null={};
@@ -228,10 +285,12 @@ export function AntigravityPanel(props:Props){
       const result=await request.current(`antigravity.${action}`,{
         conversationId,opId,turn:view?.turn,
         ...(action==='send'?{...message(),...attached,...(model?{model}:{}),...(permissionMode?{permissionMode}:{})}:{}),
+        ...(killBackgroundTasks?{killBackgroundTasks:true}:{}),
       });
       if(!alive.current)return;
       if(result.state==='accepted'){
         if(action==='send'){sent();if(permissionMode)setPermissionMode('');}
+        if(killBackgroundTasks)setNotice('已请求结束后台任务');
         remember('');stick.current=true;
       }
       else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
@@ -291,6 +350,7 @@ export function AntigravityPanel(props:Props){
       {notice&&<div className="feedback" role="status">{notice}</div>}
       {pending&&!busy&&<div className="pending">{checkPending}</div>}
       {view?.running&&!antigravityStatus&&!requests.length&&<div className="running-status"><i className="dot online"/>Antigravity 正在处理</div>}
+      {hasBackgroundTasks&&<BackgroundTasksBar tasks={backgroundTasks} onOpen={()=>setTasksOpen(true)}/>}
       <Composer attachments={attachments} input={composer} draft={draft} edit={edit} maxLength={50_000} readOnly={Boolean(pending)} submit={()=>void mutate('send')}
         placeholder={creating?'想让 Antigravity 做什么？':view?.running?'当前任务结束后可发送':`在 ${props.machineName} 上继续…`}
         locked={busy||Boolean(pending)} showImage={props.showImage} uploadProgress={uploadProgress}
@@ -303,6 +363,11 @@ export function AntigravityPanel(props:Props){
         send={{label:'发送消息',sending,disabled:!canOperate||attachments.loading||voiceBusy||!(creating?target:view?.canSend)||!draft.trim()&&!files.length}}/>
       {pick.inputs}
     </footer>
+    {tasksOpen&&<SheetPanel title="后台任务" close={()=>setTasksOpen(false)}>
+      <BackgroundTasksPanel tasks={backgroundTasks} hasTasks={hasBackgroundTasks} turnRunning={Boolean(view?.running)}
+        canOperate={canOperate} busy={busy} connected={connected}
+        onRefresh={()=>void refresh()} onStop={()=>void mutate('stop',{killBackgroundTasks:true})} onCopy={copy}/>
+    </SheetPanel>}
     {adding&&<SheetPanel title="添加与选项" close={()=>setAdding(false)}>
       <AddOptions attachments={attachments} pick={pick} disabled={busy||Boolean(pending)} connected={connected} error={error}
         imagesBlocked={imagesBlockedReason}

@@ -109,7 +109,7 @@ export async function callHub(dir: string, method: HubMethod, body: Json): Promi
           return;
         }
         const chunks: Buffer[] = [];
-        const limit = reading ? 16 * 1024 * 1024 : 8192;
+        const limit = method === 'GetCascadeTrajectorySteps' ? 64 * 1024 * 1024 : reading ? 16 * 1024 * 1024 : 8192;
         let length = 0;
         res.on('data', (part: Buffer) => {
           length += part.length;
