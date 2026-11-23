@@ -477,3 +477,51 @@ test('a compacted session shows what came before the compaction, and the phone c
     await removeTestTemp(root);
   }
 });
+
+test('what a released session’s own process saves as it exits does not look like a turn under way', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, transcript(cwd));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const query: QueryFn = ({prompt}) => {
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const _ of prompt) yield {type: 'result', subtype: 'success', session_id: sid, errors: []};
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      return generator;
+    };
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000));
+    const sent = await bridge.handle('claude.send', {conversationId: sid, opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-000000000001`, text: '继续'});
+    assert.equal(sent.state, 'accepted', JSON.stringify(sent));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const live = bridge.runtime.get(sid)!;
+    assert.equal(live.running, false);
+
+    // Claude Code saves the session's title, mode and cost as it exits, minutes after the last turn.
+    await writeFile(file, transcript(cwd) + JSON.stringify({type: 'ai-title', sessionId: sid, aiTitle: '修复登录 bug'}) + '\n');
+    await bridge.runtime.shutdown(live);
+    const view = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(view.controlled, false);
+    assert.equal(view.external, false);assert.equal(view.running, false);
+    assert.notEqual(view.turns.at(-1).status, 'inProgress');
+    assert.equal((await bridge.handle('claude.list', {refresh: true})).data[0].running, false);
+
+    // A terminal that takes the session up afterwards still shows.
+    const later = new Date(Date.now() + 10_000);await utimes(file, later, later);
+    const resumed = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(resumed.external, true);assert.equal(resumed.running, true);
+  } finally {
+    bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});

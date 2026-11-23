@@ -170,7 +170,7 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
 
     // Resuming a session someone just used elsewhere needs confirmation.
     const file = join(config, 'projects', 'work', id + '.jsonl');
-    const now = new Date();await utimes(file, now, now);
+    const now = new Date(Date.now() + 5000);await utimes(file, now, now);
     const blocked = await bridge.handle('claude.send', {conversationId: id, text: '继续', opId: opId()});
     assert.equal(blocked.state, 'failed');assert.equal(blocked.error.code, 'active');
     const beforeResume = fake.calls.filter(call => call.type === 'start').length;

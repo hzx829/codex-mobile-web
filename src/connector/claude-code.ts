@@ -39,6 +39,8 @@ function readWindow(p: Json): ReadWindow {
 }
 /** A transcript written to this recently is treated as an active terminal or IDE session. */
 const ACTIVE_MS = 20_000;
+/** The file system's clock and this process's can differ a little; a write this soon after a release is still the released process's. */
+const RELEASE_SLACK_MS = 1000;
 
 type SessionInfo = {sessionId: string; summary: string; customTitle?: string; lastModified: number; fileSize?: number; cwd?: string; archived?: boolean};
 /** The subset of the Agent SDK used here; injectable so tests run without real transcripts. */
@@ -116,6 +118,8 @@ export class ClaudeCodeBridge {
   private closed = false;
   /** Transcript versions this connector wrote itself (a rename), which must not look like a terminal at work. */
   private ownWrites = new Map<string, bigint>();
+  /** When this connector's own process let each session go. It saves the session's closing entries as it exits. */
+  private released = new Map<string, number>();
   private peers?: {at: number; value: Promise<Map<string, PeerStatus>>};
   /** Claude Code's guess at the next prompt, by session, with the turn it follows; it outlives the released process. */
   private suggestions = new Map<string, {text: string; turn: string}>();
@@ -128,6 +132,7 @@ export class ClaudeCodeBridge {
     private now = Date.now, runtime?: ClaudeRuntime) {
     this.runtime = runtime || new ClaudeRuntime(sdkQuery);
     this.runtime.on('change', (id: string) => {this.catalog = undefined;if (id) setImmediate(() => this.drainSoon(id));});
+    this.runtime.on('closed', (id: string) => {if (id) this.released.set(id, this.now());});
     // Also picks up messages left queued across a connector restart, or behind a session that was busy elsewhere.
     this.queueTimer = setInterval(() => {
       try {if (!this.closed) for (const id of new Set(this.queue?.queued().map(message => message.threadId))) this.drainSoon(id);} catch {}
@@ -224,10 +229,19 @@ export class ClaudeCodeBridge {
     // this connector's processes add, so the phone is told.
     const holder = !guestWorkspace() && info !== null ? (await this.peerStatuses()).get(id) : undefined;
     const peer = elsewhere ? holder : undefined;
-    const external = elsewhere && (peer ? peer.status !== 'idle' : this.now() - Number(info!.mtimeMs) < ACTIVE_MS && this.ownWrites.get(id) !== info!.mtimeNs);
+    const external = elsewhere && (peer ? peer.status !== 'idle' : this.writtenElsewhere(id, Number(info!.mtimeMs)) && this.ownWrites.get(id) !== info!.mtimeNs);
     const marker = live ? live.version : external ? peer?.status || 'external' : '-';
     return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${marker}:${this.queueVersions.get(id) || 0}:${holder?.pid ?? ''}`, external,
       peer: external ? peer : undefined, holder, exists: Boolean(info)};
+  }
+
+  /**
+   * A transcript written to just now, by something other than this connector's own process on its way out: the only
+   * sign of a terminal or IDE at work when no process reports holding the session.
+   */
+  private writtenElsewhere(id: string, mtimeMs: number, now = this.now()) {
+    const released = this.released.get(id);
+    return now - mtimeMs < ACTIVE_MS && (released === undefined || mtimeMs > released + RELEASE_SLACK_MS);
   }
 
   /** Claude Code's own reports of the sessions its processes hold, read at most twice a second. */
@@ -409,7 +423,7 @@ export class ClaudeCodeBridge {
         ? guestWorkspace() ? (await workspaceProjects(paths)).map(item => ({...item, id: item.path})) : paths.map(path => ({id: path, path}))
         : undefined;
       const now = this.now(), peers = guestWorkspace() ? new Map<string, PeerStatus>() : await this.peerStatuses();
-      const elsewhere = (info: SessionInfo) => {const peer = peers.get(info.sessionId);return peer ? peer.status !== 'idle' : !guestWorkspace() && now - info.lastModified < ACTIVE_MS;};
+      const elsewhere = (info: SessionInfo) => {const peer = peers.get(info.sessionId);return peer ? peer.status !== 'idle' : !guestWorkspace() && this.writtenElsewhere(info.sessionId, info.lastModified, now);};
       return {data: page.map(info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,
         running: this.runtime.get(info.sessionId)?.running ?? elsewhere(info)})), hasMore: matches.length > offset + PAGE, projects,
         defaultPermissionMode: this.runtime.defaultMode};
