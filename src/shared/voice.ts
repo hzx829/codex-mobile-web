@@ -1,8 +1,48 @@
-/** `claude`: streamed to Claude's dictation service through the computer's Claude Code login; `codex`: one clip sent to ChatGPT's. */
-export type VoiceProvider = 'claude' | 'codex' | 'keyboard';
-export const voiceProvider=(value:unknown):VoiceProvider=>value==='keyboard'||value==='codex'?value:'claude';
-export const voiceProviderLabel=(provider:VoiceProvider)=>provider==='claude'?'Claude 识别':provider==='codex'?'Codex 识别':'系统键盘';
-export const MAX_VOICE_BYTES=8*1024*1024;
+import type {BridgeService} from './types.js';
+
+/**
+ * `claude`: streamed to Claude's dictation service through the computer's Claude Code login;
+ * `antigravity`: streamed to the computer's Antigravity desktop Hub;
+ * `codex`: one clip sent to ChatGPT's service through Codex's login.
+ */
+export type VoiceProvider = 'claude' | 'antigravity' | 'codex' | 'keyboard';
+export const VOICE_PROVIDERS: readonly VoiceProvider[] = ['claude', 'antigravity', 'codex', 'keyboard'];
+export const defaultVoiceProvider = (service: BridgeService): VoiceProvider => service;
+export const voiceProvider = (value: unknown, fallback: VoiceProvider = 'claude'): VoiceProvider =>
+  value === 'claude' || value === 'antigravity' || value === 'codex' || value === 'keyboard' ? value : fallback;
+export const isStreamingVoice = (provider: VoiceProvider) => provider === 'claude' || provider === 'antigravity';
+export const voiceProviderLabel = (provider: VoiceProvider) =>
+  provider === 'claude' ? 'Claude 识别'
+  : provider === 'antigravity' ? 'Antigravity 识别'
+  : provider === 'codex' ? 'Codex 识别'
+  : '系统键盘';
+
+/** Falls back to an available service when the connected computer does not offer the chosen provider. */
+export function resolveVoiceProvider(choice: VoiceProvider, available?: readonly BridgeService[]): VoiceProvider {
+  if (choice === 'keyboard' || !available?.length || available.includes(choice)) return choice;
+  for (const fallback of ['claude', 'antigravity', 'codex'] as const) {
+    if (available.includes(fallback)) return fallback;
+  }
+  return 'keyboard';
+}
+
+export const voiceEngineKey = (service: BridgeService) => `voice-engine:${service}`;
+
+/**
+ * Loads one app's saved voice provider. Each app keeps its own setting under `voice-engine:<service>`
+ * and defaults to its own native service (`codex` -> Codex, `claude` -> Claude, `antigravity` -> Antigravity).
+ * A legacy global choice (`voice-engine` or `voice-provider: keyboard`) is respected until this app is configured.
+ */
+export function loadVoiceChoice(service: BridgeService, read: (key: string) => unknown): VoiceProvider {
+  const own = read(voiceEngineKey(service));
+  if (own === 'claude' || own === 'antigravity' || own === 'codex' || own === 'keyboard') return own;
+  const legacy = read('voice-engine');
+  if (legacy === 'keyboard' || read('voice-provider') === 'keyboard') return 'keyboard';
+  if (service !== 'antigravity' && (legacy === 'claude' || legacy === 'codex')) return legacy;
+  return defaultVoiceProvider(service);
+}
+
+export const MAX_VOICE_BYTES = 8 * 1024 * 1024;
 /** The longest Codex recording, sent as one clip after it ends. */
 export const MAX_VOICE_DURATION_MS=120_000;
 /** How long one streamed dictation may run before it stops by itself. */

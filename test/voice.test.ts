@@ -7,10 +7,11 @@ import {promisify} from 'node:util';
 import {WebSocket} from 'ws';
 import {createRelay} from '../src/server/relay.js';
 import {transcribeVoice} from '../src/connector/voice.js';
+import {AntigravityVoiceStreams} from '../src/connector/antigravity-voice.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {MAX_FRAME} from '../src/shared/types.js';
-import {MAX_VOICE_BYTES,MAX_VOICE_DURATION_MS,voiceProvider,type VoiceRecording} from '../src/shared/voice.js';
+import {MAX_VOICE_BYTES,MAX_VOICE_DURATION_MS,defaultVoiceProvider,loadVoiceChoice,resolveVoiceProvider,voiceEngineKey,voiceProvider,type VoiceRecording} from '../src/shared/voice.js';
 import {applyDictation,createVoiceInput,joinDictation,type DictationSpan,type VoiceCallbacks,type VoiceState} from '../web/voice-input.js';
 import {Client} from '../web/client.js';
 
@@ -356,4 +357,81 @@ test('the audio worklet turns any device rate into 16 kHz 16-bit PCM about every
     assert.ok(peak>0.45*0x7fff&&peak<=0.5*0x7fff+1,`${rate}: peak ${peak}`);
     assert.equal(processor.process([[]]),true,'a block without input keeps the node alive');
   }
+});
+
+test('per-app voice settings default to each app, isolate overrides, and fall back when a service is absent',()=>{
+  const store=new Map<string,string>();
+  const read=(key:string)=>store.get(key)||'';
+  // Fresh browser: each app uses its own native provider.
+  assert.equal(defaultVoiceProvider('codex'),'codex');
+  assert.equal(defaultVoiceProvider('claude'),'claude');
+  assert.equal(defaultVoiceProvider('antigravity'),'antigravity');
+  assert.equal(loadVoiceChoice('codex',read),'codex');
+  assert.equal(loadVoiceChoice('claude',read),'claude');
+  assert.equal(loadVoiceChoice('antigravity',read),'antigravity');
+  // Overriding one app leaves the other two untouched.
+  store.set(voiceEngineKey('antigravity'),'claude');
+  store.set(voiceEngineKey('codex'),'keyboard');
+  assert.equal(loadVoiceChoice('antigravity',read),'claude');
+  assert.equal(loadVoiceChoice('codex',read),'keyboard');
+  assert.equal(loadVoiceChoice('claude',read),'claude');
+  // Legacy global keyboard choice is preserved for unconfigured apps.
+  const legacy=new Map<string,string>([['voice-engine','keyboard']]);
+  assert.equal(loadVoiceChoice('antigravity',k=>legacy.get(k)||''),'keyboard');
+  // Unavailable provider falls back to an available service on the connected machine.
+  assert.equal(resolveVoiceProvider('antigravity',['codex','claude']),'claude');
+  assert.equal(resolveVoiceProvider('claude',['codex']),'codex');
+  assert.equal(resolveVoiceProvider('keyboard',['codex']),'keyboard');
+});
+
+test('Antigravity dictation opens a stream with provider antigravity and connector streams PCM through the Hub',async t=>{
+  // Frontend sends provider: 'antigravity' on voice.stream.open.
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  const f=streamFixture(t);
+  const agInput=createVoiceInput('antigravity', {
+    state:s=>f.states.push(s),text:()=>{},live:text=>f.live.push(text),error:e=>f.errors.push(e),keyboard:()=>{},
+    transcribe:async()=>{throw new Error('Antigravity streams');},
+    stream:async(action,payload)=>{f.requests.push({action,payload});return action==='voice.stream.open'?{id:payload.id}:{text:'你好'};},
+  });
+  t.after(()=>agInput.cancel());
+  agInput.start();await drain();
+  assert.equal(f.requests[0].action,'voice.stream.open');
+  assert.equal(f.requests[0].payload.provider,'antigravity');
+  agInput.cancel();
+  t.mock.timers.reset();
+
+  // Connector AntigravityVoiceStreams queues PCM until ready, sends chunks in order, and finishes on EndAudioSession.
+  let handlers:any;
+  let closed=0;
+  const hubCalls:{method:string;body:any}[]=[];
+  const streams=new AntigravityVoiceStreams('/tmp/ag',async(_dir,method,body)=>{
+    hubCalls.push({method,body});
+    if(method==='EndAudioSession'){
+      queueMicrotask(()=>{
+        handlers.onMessage({transcription:{text:'你好世界',isFinal:true}});
+        handlers.onMessage({complete:{}});
+      });
+    }
+    return {};
+  },async(_dir,method,body,h)=>{
+    assert.equal(method,'StreamAudioTranscription');
+    assert.equal(body.mimeType,'audio/pcm;rate=16000');
+    handlers=h;
+    return {close(){closed++;}};
+  });
+  t.after(()=>streams.close());
+  const id='0123456789abcdef';
+  await streams.handle('voice.stream.open',{id,provider:'antigravity'});
+  const pcm=Buffer.from(new Int16Array([10,20,30]).buffer).toString('base64');
+  // Chunk sent before ready is queued, then flushed once ready arrives.
+  assert.deepEqual(await streams.handle('voice.stream.audio',{id,seq:0,audio:pcm}),{text:''});
+  handlers.onMessage({ready:{sessionId:'hub-session-1'}});
+  await drain();
+  assert.deepEqual(hubCalls[0],{method:'SendAudioChunk',body:{sessionId:'hub-session-1',data:pcm,sequenceNumber:0}});
+  handlers.onMessage({transcription:{text:'你好'}});
+  assert.deepEqual(await streams.handle('voice.stream.audio',{id,seq:1,audio:pcm}),{text:'你好'});
+  const done=await streams.handle('voice.stream.close',{id,seq:2});
+  assert.deepEqual(done,{text:'你好世界'});
+  assert.equal(hubCalls.at(-1)!.method,'EndAudioSession');
+  assert.equal(closed,1);
 });

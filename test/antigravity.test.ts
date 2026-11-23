@@ -12,7 +12,8 @@ import {fileReference} from '../web/preview-target.js';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
-import {AntigravityBridge} from '../src/connector/antigravity.js';
+import {AntigravityBridge,parseAntigravityModels,extractAntigravityRequests} from '../src/connector/antigravity.js';
+import {antigravityModelSupportsImages,antigravityPickerModels,concreteAntigravityModel,splitAntigravityModel} from '../web/antigravity-model-picker.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {BridgeError} from '../src/shared/types.js';
 import {home, parseLocation} from '../web/route-state.js';
@@ -83,6 +84,7 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   const writes:unknown[]=[];
   const bridge = new AntigravityBridge(dir,ledger,async (_dir,method,body)=>{
     if(method==='GetCascadeModelConfigData')return {clientModelConfigs:models};
+    if(method==='GetPermissionSettings'||method==='GetAllCascadeTrajectories'||method==='GetCascadeTrajectorySteps')return {};
     if(method==='GetTrajectoryTurns'){
       assert.deepEqual(body,{cascadeId:id,stepIndices:[1]});
       if(advanceTurn)db.exec("UPDATE conversation_summaries SET last_user_input_time='changed'");
@@ -197,6 +199,7 @@ test('Antigravity reads the untruncated transcript and starts new conversations 
   let failSend:BridgeError|null = null;
   const bridge = new AntigravityBridge(dir,ledger,async (_dir,method,body)=>{
     if(method==='GetCascadeModelConfigData')return {clientModelConfigs:[{label:'B',modelOrAlias:{model:'MODEL_B'}}]};
+    if(method==='GetPermissionSettings'||method==='GetAllCascadeTrajectories'||method==='GetCascadeTrajectorySteps')return {};
     if(method==='GetTrajectoryTurns'){
       // The conversation in the same project is preferred, and its user step of -1 is read as the first step.
       assert.deepEqual(body,{cascadeId:id,stepIndices:[0]});
@@ -249,4 +252,116 @@ test('Antigravity reads the untruncated transcript and starts new conversations 
   const sent = lastText();
   assert.match(sent,/^看附件\n\n附件/);
   assert.equal(await readFile(linked(sent)[0],'utf8'),'word');
+});
+
+test('Antigravity groups models by thinking effort and maps concrete IDs and image support', () => {
+  const parsed = parseAntigravityModels({
+    defaultOverrideModelConfig: {modelOrAlias: {model: 'MODEL_NEON_HIGH'}},
+    clientModelSorts: [{name: 'Recommended', groups: [{modelLabels: [
+      'Gemini 4 Neon (High)', 'Gemini 4 Neon (Medium)', 'Gemini 4 Neon (Low)',
+      'Orchestrator (Neon)', 'GPT-OSS 120B (Medium)', 'Gemini 4 Carbon',
+    ]}]}],
+    groupedModels: {
+      'gemini-4-neon': {
+        displayName: 'Gemini 4 Neon',
+        supportedThinkingLevels: [
+          {thinkingSuffix: 'low', thinkingDisplayName: 'Low'},
+          {thinkingSuffix: 'medium', thinkingDisplayName: 'Medium'},
+          {thinkingSuffix: 'high', thinkingDisplayName: 'High'},
+          {thinkingSuffix: 'xhigh', thinkingDisplayName: 'Extra High'},
+        ],
+      },
+    },
+    clientModelConfigs: [
+      {label: 'GPT-OSS 120B (Medium)', modelOrAlias: {model: 'MODEL_GPT_OSS'}, modelId: 'gpt-oss-120b-medium', tagDescription: 'Notice'},
+      {label: 'Gemini 4 Neon (Low)', modelOrAlias: {model: 'MODEL_NEON_LOW'}, modelId: 'gemini-4-neon-low', supportsImages: true},
+      {label: 'Gemini 4 Neon (High)', modelOrAlias: {model: 'MODEL_NEON_HIGH'}, modelId: 'gemini-4-neon-high', supportsImages: true, tagDescription: 'Deep reasoning'},
+      {label: 'Gemini 4 Neon (Medium)', modelOrAlias: {model: 'MODEL_NEON_MED'}, modelId: 'gemini-4-neon-medium', supportsImages: true},
+      {label: 'Orchestrator (Neon)', modelOrAlias: {model: 'MODEL_ORCH'}, modelId: 'gemini-pro-orchestrator-neon', supportsImages: true},
+      {label: 'Gemini 4 Carbon', modelOrAlias: {model: 'MODEL_CARBON'}, modelId: 'gemini-4-carbon', disabled: true, supportsImages: true},
+    ],
+  });
+  assert.equal(parsed.defaultModel, 'MODEL_NEON_HIGH');
+  assert.deepEqual(parsed.groups?.map(g => g.id), ['gemini-4-neon', 'MODEL_ORCH', 'MODEL_GPT_OSS']);
+  assert.deepEqual(parsed.groups?.[0], {
+    id: 'gemini-4-neon',
+    label: 'Gemini 4 Neon',
+    description: 'Deep reasoning',
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'high',
+    variants: {low: 'MODEL_NEON_LOW', medium: 'MODEL_NEON_MED', high: 'MODEL_NEON_HIGH'},
+    supportsImages: true,
+  });
+  const catalog = {...parsed, current: 'MODEL_NEON_MED', supportsImages: true};
+  assert.equal(antigravityPickerModels(catalog).length, 3);
+  assert.deepEqual(splitAntigravityModel(catalog, 'MODEL_NEON_HIGH'), {model: 'gemini-4-neon', effort: 'high'});
+  assert.deepEqual(splitAntigravityModel(catalog, 'MODEL_ORCH'), {model: 'MODEL_ORCH', effort: ''});
+  assert.equal(concreteAntigravityModel(catalog, {model: 'gemini-4-neon', effort: 'low'}), 'MODEL_NEON_LOW');
+  assert.equal(concreteAntigravityModel(catalog, {model: 'MODEL_ORCH', effort: 'high'}), 'MODEL_ORCH');
+  assert.equal(antigravityModelSupportsImages(catalog, 'MODEL_NEON_HIGH'), true);
+  assert.equal(antigravityModelSupportsImages(catalog, 'MODEL_GPT_OSS'), false);
+});
+
+test('Antigravity syncs permission presets and responds to waiting approval and question steps', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-perm-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  t.after(async () => { db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+  const id = randomUUID(), trajectoryId = randomUUID(), created = randomUUID();
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const project = pathToFileURL(dir).href;
+  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(id, 'Perm Test', 'CASCADE_RUN_STATUS_IDLE', '2026-11-23T00:00:00.000Z', 5, 0, 't0', 0, JSON.stringify([project]));
+  const writes: {method: string; body: any}[] = [];
+  let waitingSteps: any[] = [];
+  const config = {plannerConfig: {planModel: 'MODEL_A', toolConfig: {runCommand: {autoCommandConfig: {autoExecutionPolicy: 'CASCADE_COMMANDS_AUTO_EXECUTION_EAGER'}}}}};
+  const bridge = new AntigravityBridge(dir, ledger, async (_dir, method, body) => {
+    if (method === 'GetPermissionSettings') return {globalPreset: 'AGENT_PERMISSION_PRESET_TURBO'};
+    if (method === 'GetAllCascadeTrajectories') return {trajectorySummaries: {[id]: {trajectoryId, annotations: {permissionPreset: 'AGENT_PERMISSION_PRESET_AUTO'}}}};
+    if (method === 'GetCascadeTrajectorySteps') return {steps: waitingSteps};
+    if (method === 'GetCascadeModelConfigData') return {clientModelConfigs: [{label: 'A', modelOrAlias: {model: 'MODEL_A'}}]};
+    if (method === 'GetTrajectoryTurns') return {turns: [{startStepIndex: 0, firstStep: {userInput: {userConfig: config}}}]};
+    writes.push({method, body});
+    if (method === 'StartCascade') return {cascadeId: created};
+    return {};
+  });
+  const list = await bridge.handle('antigravity.list', {});
+  assert.equal(list.defaultPermissionMode, 'AGENT_PERMISSION_PRESET_TURBO');
+  const read = await bridge.handle('antigravity.read', {conversationId: id});
+  assert.equal(read.permissionMode, 'AGENT_PERMISSION_PRESET_AUTO');
+  assert.equal(read.defaultPermissionMode, 'AGENT_PERMISSION_PRESET_TURBO');
+  // Switching to DEFAULT clears stale EAGER autoExecutionPolicy and updates conversation annotations.
+  const makeOp = () => `${Date.now()}:${randomUUID()}`;
+  assert.equal((await bridge.handle('antigravity.send', {conversationId: id, turn: read.turn, text: 'hi', permissionMode: 'AGENT_PERMISSION_PRESET_DEFAULT', opId: makeOp()})).state, 'accepted');
+  assert.deepEqual(writes[0], {method: 'UpdateConversationAnnotations', body: {cascadeId: id, annotations: {permissionPreset: 'AGENT_PERMISSION_PRESET_DEFAULT'}, mergeAnnotations: true}});
+  assert.equal(writes[1].method, 'SendUserCascadeMessage');
+  assert.equal(writes[1].body.cascadeConfig.plannerConfig.toolConfig.runCommand.autoCommandConfig.autoExecutionPolicy, undefined);
+  // Creating a conversation with REQUEST_REVIEW sets both annotation and OFF policy.
+  assert.equal((await bridge.handle('antigravity.create', {project, text: 'start', permissionMode: 'AGENT_PERMISSION_PRESET_REQUEST_REVIEW', opId: makeOp()})).state, 'accepted');
+  assert.equal(writes[3].method, 'UpdateConversationAnnotations');
+  assert.equal(writes[3].body.annotations.permissionPreset, 'AGENT_PERMISSION_PRESET_REQUEST_REVIEW');
+  assert.equal(writes[4].body.cascadeConfig.plannerConfig.toolConfig.runCommand.autoCommandConfig.autoExecutionPolicy, 'CASCADE_COMMANDS_AUTO_EXECUTION_OFF');
+  await assert.rejects(bridge.handle('antigravity.send', {conversationId: id, turn: read.turn, text: 'bad', permissionMode: 'INVALID', opId: makeOp()}), /权限模式无效/);
+
+  // Waiting steps appear as unified ApprovalRequest cards and map cleanly to HandleCascadeUserInteraction.
+  db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING', not_fully_idle=1");
+  waitingSteps = [
+    {stepIndex: 3, status: 'CORTEX_STEP_STATUS_WAITING', requestedInteraction: {permission: {actionDescription: '运行测试命令', resource: {action: 'run_command', target: 'npm test'}, approvalScopeFilter: 'PERMISSION_SCOPE_WORKSPACE'}}},
+    {stepIndex: 4, status: 'CORTEX_STEP_STATUS_WAITING', requestedInteraction: {askQuestion: {questions: [{question: '选择方案', isMultiSelect: false, options: [{id: 'opt1', text: '方案 A'}, {id: 'opt2', text: '方案 B'}]}]}}},
+  ];
+  const runningView = await bridge.handle('antigravity.read', {conversationId: id});
+  assert.equal(runningView.requests.length, 2);
+  assert.deepEqual(runningView.requests[0], {id: '3', kind: 'permission', tool: 'run_command', title: '运行测试命令', detail: 'npm test', canRemember: true, rememberScope: 'project'});
+  assert.equal(runningView.requests[1].kind, 'question');
+  assert.equal((await bridge.handle('antigravity.respond', {conversationId: id, requestId: '3', decision: 'allowSession', opId: makeOp()})).state, 'accepted');
+  assert.deepEqual(writes.at(-1), {method: 'HandleCascadeUserInteraction', body: {cascadeId: id, interaction: {trajectoryId, stepIndex: 3, permission: {allow: true, scope: 'PERMISSION_SCOPE_WORKSPACE'}}}});
+  assert.equal((await bridge.handle('antigravity.respond', {conversationId: id, requestId: '4', decision: 'allow', answers: {'选择方案': '方案 B'}, opId: makeOp()})).state, 'accepted');
+  assert.equal(writes.at(-1)!.body.interaction.askQuestion.responses[0].selectedOptionIds[0], 'opt2');
+  // An already-resolved step cannot be responded to again.
+  waitingSteps = [{stepIndex: 3, status: 'CORTEX_STEP_STATUS_DONE', requestedInteraction: {}}];
+  const stale = await bridge.handle('antigravity.respond', {conversationId: id, requestId: '3', decision: 'allow', opId: makeOp()});
+  assert.equal(stale.state, 'failed');
+  assert.match(stale.error!.message, /已处理|已过期/);
+  // Unknown interaction branches render as a safe desktop-only notice card.
+  const notices = extractAntigravityRequests([{stepIndex: 9, status: 'CORTEX_STEP_STATUS_WAITING', requestedInteraction: {futureCustom: {}}}], 0);
+  assert.equal(notices[0].kind, 'notice');
 });

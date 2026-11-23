@@ -20,6 +20,10 @@ export const CONNECTOR_FEATURES = [
   'live',
   /** A Claude Code plan can be approved in a chosen permission mode (`implementModes` on the request). */
   'claude.implementModes',
+  /** Antigravity dictation streams through the desktop Hub (`voice.stream.open` with `provider: 'antigravity'`). */
+  'voice.antigravity',
+  /** Antigravity supports grouped models, permission presets and approval cards (`antigravity.respond`). */
+  'antigravity.composer',
 ] as const;
 export type ConnectorFeature = typeof CONNECTOR_FEATURES[number];
 

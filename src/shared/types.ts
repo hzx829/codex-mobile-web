@@ -1,7 +1,12 @@
 export type Json = Record<string, any>;
-export type AntigravityAction = `antigravity.${'list' | 'create' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'operation' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk'}`;
+export type AntigravityAction = `antigravity.${'list' | 'create' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'respond' | 'operation' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk'}`;
 export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation' | 'project.get' | 'project.save' | 'fork' | 'rename' | 'archive' | 'edit' | 'steerQueued' | 'withdrawQueued' | 'cancelQueued' | 'artifact.snapshot' | 'artifact.download' | 'artifact.login'}`;
-export type AntigravityModel = {id:string; label:string};
+export type AntigravityModel = {id:string; label:string; description?:string; supportsImages?:boolean; group?:string; groupLabel?:string; effort?:string};
+export type AntigravityModelGroup = {id:string; label:string; description?:string; efforts?:string[]; defaultEffort?:string; variants?:Record<string,string>; supportsImages?:boolean};
+export const ANTIGRAVITY_PERMISSION_MODES = ['AGENT_PERMISSION_PRESET_AUTO', 'AGENT_PERMISSION_PRESET_DEFAULT', 'AGENT_PERMISSION_PRESET_REQUEST_REVIEW', 'AGENT_PERMISSION_PRESET_TURBO'] as const;
+export type AntigravityPermissionMode = typeof ANTIGRAVITY_PERMISSION_MODES[number];
+export type ApprovalQuestion = {question:string; header:string; multiSelect:boolean; options:{label:string; description:string}[]};
+export type ApprovalRequest = {id:string; kind:'permission'|'question'|'plan'|'notice'; tool:string; title:string; detail:string; canRemember:boolean; rememberScope?:'session'|'project'|'user'; implementModes?:string[]; questions?:ApprovalQuestion[]};
 export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; text:string; sender?:TeamMember};
 export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'};
 export const bridgeServices = ['codex', 'antigravity', 'claude'] as const;

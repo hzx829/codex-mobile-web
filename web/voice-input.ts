@@ -1,5 +1,5 @@
 import type {Json} from '../src/shared/types';
-import {MAX_VOICE_BYTES,MAX_VOICE_CHUNK_BYTES,MAX_VOICE_DURATION_MS,MAX_VOICE_SESSION_MS,joinDictation,voiceMimeTypes,type VoiceProvider,type VoiceRecording} from '../src/shared/voice';
+import {MAX_VOICE_BYTES,MAX_VOICE_CHUNK_BYTES,MAX_VOICE_DURATION_MS,MAX_VOICE_SESSION_MS,isStreamingVoice,joinDictation,voiceMimeTypes,voiceProviderLabel,type VoiceProvider,type VoiceRecording} from '../src/shared/voice';
 export {joinDictation};
 
 export type VoiceState='idle'|'starting'|'recording'|'transcribing';
@@ -9,7 +9,7 @@ export interface VoiceCallbacks {
   state:(state:VoiceState)=>void;
   /** A finished piece of text to add to the draft (Codex: the whole recording). */
   text:(text:string)=>void;
-  /** Everything heard so far in this dictation; each call replaces the previous one (Claude). */
+  /** Everything heard so far in this dictation; each call replaces the previous one (Claude / Antigravity). */
   live:(text:string)=>void;
   error:(error:Error)=>void;
   keyboard:()=>void;
@@ -19,7 +19,7 @@ export interface VoiceCallbacks {
 
 export function createVoiceInput(provider:VoiceProvider,callbacks:VoiceCallbacks):VoiceInput {
   if(provider==='keyboard')return {start(){callbacks.keyboard();callbacks.state('idle');},stop(){},cancel(){callbacks.state('idle');}};
-  return provider==='claude'?new ClaudeVoiceInput(callbacks):new CodexVoiceInput(callbacks);
+  return isStreamingVoice(provider)?new StreamVoiceInput(callbacks,provider):new CodexVoiceInput(callbacks);
 }
 
 /**
@@ -58,11 +58,11 @@ const SEND_MS=200;
 const MAX_IN_FLIGHT=4;
 
 /**
- * Streams the microphone to Claude's dictation service through the computer: 16 kHz PCM every 200 ms,
- * each answer carrying the text so far, which replaces what this dictation put in the draft. On the tick
- * the service finishes the text, which may still correct earlier words.
+ * Streams the microphone to Claude's or Antigravity's dictation service through the computer: 16 kHz PCM
+ * every 200 ms, each answer carrying the text so far, which replaces what this dictation put in the draft.
+ * On the tick the service finishes the text, which may still correct earlier words.
  */
-class ClaudeVoiceInput implements VoiceInput {
+class StreamVoiceInput implements VoiceInput {
   private cancelled=false;
   private started=false;
   private stopping=false;
@@ -80,7 +80,7 @@ class ClaudeVoiceInput implements VoiceInput {
   private shown='';
   private sender?:ReturnType<typeof setInterval>;
   private timer?:ReturnType<typeof setTimeout>;
-  constructor(private callbacks:VoiceCallbacks){}
+  constructor(private callbacks:VoiceCallbacks,private provider:'claude'|'antigravity'='claude'){}
   start(){
     if(this.started||this.cancelled)return;
     this.started=true;
@@ -95,8 +95,9 @@ class ClaudeVoiceInput implements VoiceInput {
       if(!navigator.mediaDevices?.getUserMedia||!this.audio?.audioWorklet)throw new Error('当前浏览器不支持边说边识别，请在语音设置切换识别方式');
       // The computer connects to the service while the microphone is being granted.
       this.opened=true;
-      this.callbacks.stream('voice.stream.open',{id:this.id}).catch(error=>this.fail(error?.code==='unsupported'
-        ?new Error('电脑上的连接器版本较旧，不支持 Claude 识别，请更新连接器或在语音设置切换识别方式'):error));
+      const openPayload:Json=this.provider==='antigravity'?{id:this.id,provider:'antigravity'}:{id:this.id};
+      this.callbacks.stream('voice.stream.open',openPayload).catch(error=>this.fail(error?.code==='unsupported'
+        ?new Error(`电脑上的连接器版本较旧，不支持 ${voiceProviderLabel(this.provider)}，请更新连接器或在语音设置切换识别方式`):error));
       const [stream]=await Promise.all([navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}}),this.audio.audioWorklet.addModule('/pcm-worklet.js')]);
       // A permission prompt may outlive navigation, cancellation, or a provider change.
       if(this.cancelled){stream.getTracks().forEach(track=>track.stop());return;}

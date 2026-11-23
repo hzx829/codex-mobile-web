@@ -32,7 +32,7 @@ export const MUTATION_ACTIONS = new Set([
   'turn.send', 'turn.cancelQueued', 'turn.withdrawQueued', 'turn.steerQueued', 'turn.edit', 'turn.stop', 'request.respond',
   'claude.create', 'claude.send', 'claude.stop', 'claude.respond', 'claude.project.save', 'claude.fork', 'claude.rename', 'claude.archive', 'claude.edit',
   'claude.steerQueued', 'claude.withdrawQueued', 'claude.cancelQueued',
-  'antigravity.create', 'antigravity.send', 'antigravity.stop',
+  'antigravity.create', 'antigravity.send', 'antigravity.stop', 'antigravity.respond',
 ]);
 
 const text = (value: unknown) => typeof value === 'string' && value ? value : undefined;

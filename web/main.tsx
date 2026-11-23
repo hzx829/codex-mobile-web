@@ -45,7 +45,7 @@ import {type Json,type Machine,type SessionView,type RequestAction,type TurnView
 import {submitTurn,editTurn} from './turn-request';
 import {modelDisplayName,reasoningLabel,resolveModelSelection} from '../src/shared/models';
 import {ModelButton,ModelPicker} from './model-picker';
-import {voiceProvider,voiceProviderLabel} from '../src/shared/voice';
+import {defaultVoiceProvider,loadVoiceChoice,resolveVoiceProvider,voiceEngineKey,voiceProvider,voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {useVoiceInput} from './use-voice-input';
 import {useStableEvent} from './use-event';
 import {TeamPanel,type TeamUser} from './team';
@@ -106,8 +106,13 @@ function App(){
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   const draftSave=useRef(new DraftSave(save));
   const [serviceTier,setServiceTier]=useState<string|null|undefined>(undefined);
-  // Claude's streamed dictation is the default; an earlier choice of the system keyboard is kept.
-  const [voiceChoice,setVoiceChoice]=useState(()=>voiceProvider(load('voice-engine',load('voice-provider','')==='keyboard'?'keyboard':'claude')));
+  // Each app (Codex, Claude Code, Antigravity) keeps its own voice engine, defaulting to its native service.
+  const [voiceChoices,setVoiceChoices]=useState<Record<Service,VoiceProvider>>(()=>({
+    codex:loadVoiceChoice('codex',key=>load(key,'')),
+    claude:loadVoiceChoice('claude',key=>load(key,'')),
+    antigravity:loadVoiceChoice('antigravity',key=>load(key,'')),
+  }));
+  const voiceChoice=voiceChoices[service];
   const [threadMenu,setThreadMenu]=useState<{thread:Json;point:MenuPoint;machine:string;archived:boolean;compact?:boolean}|null>(null);
   const [modelPoint,setModelPoint]=useState<MenuPoint|null>(null),modelButton=useRef<HTMLButtonElement>(null);
   const [permissionPoint,setPermissionPoint]=useState<MenuPoint|null>(null),permissionButton=useRef<HTMLButtonElement>(null);
@@ -124,8 +129,8 @@ function App(){
   const browserBusy=browserRequest!==null,browserSession=!browserState?.filePath&&belongsToThread(browserState,machine,previewThread)?browserState:null;
   const activeMachine=machines.find(m=>m.id===machine),guest=Boolean(activeMachine?.guest);
   const available=activeMachine?.services;
-  // A computer without Claude Code dictates through Codex instead.
-  const voiceMode=voiceChoice==='claude'&&available&&!available.includes('claude')&&available.includes('codex')?'codex':voiceChoice;
+  // Fall back to another available service when the connected computer does not offer the chosen provider.
+  const voiceMode=resolveVoiceProvider(voiceChoice,available);
   const connected=status==='online'&&Boolean(activeMachine)&&(!available||available.includes(service));
   const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived,service,connected}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),timelineContent=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),submitting=useRef(false);
@@ -568,8 +573,26 @@ function App(){
        </div>)}
      </PreviewPane>;
   const computerOptions=<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=>{const gap=versionGap(m);return <MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{computerName(m)}{gap&&<span className="menu-detail">{gap==='page'?'请刷新网页':'需更新'}</span>}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>;})}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}{activeMachine&&versionGap(activeMachine)&&<p className="muted">{versionGapNotice[versionGap(activeMachine)!]}</p>}<p className="muted">{location.origin}</p></>;
-  // One choice for Codex, Claude Code and Antigravity; transcription always runs through Codex on the computer.
-  const voiceOptions=<><label>识别方式<select value={voiceChoice} onChange={e=>{const mode=voiceProvider(e.target.value);setVoiceChoice(mode);save('voice-engine',mode);}}><option value="claude">Claude 识别（推荐）</option><option value="codex">Codex 识别</option><option value="keyboard">系统键盘</option></select></label><p className="muted">{voiceChoice==='claude'?'点麦克风开始说话，文字边说边出现，说完点 ✓，最后会再校对一遍。用电脑上 Claude Code 的 claude.ai 登录，与 Claude Code 自带的语音输入是同一个服务；需要 HTTPS。声音经中继、电脑实时发送到语音服务。':voiceChoice==='codex'?'点麦克风开始录音，说完点 ✓，整段识别后填入输入框。需要 HTTPS 和电脑上 Codex 的 ChatGPT 登录。录音经中继、电脑发送到语音服务。':'点麦克风打开输入框，再使用手机键盘上的听写。'}</p>{voiceMode!==voiceChoice&&<p className="muted">这台电脑没有 Claude Code，当前改用 Codex 识别。</p>}<p className="muted">选择保存在当前浏览器，三个应用共用。</p><button className="primary" onClick={()=>setSheet(null)}>完成</button></>;
+  // Each app keeps its own voice input setting in this browser; the active sheet edits the current app's choice.
+  const nativeVoice=defaultVoiceProvider(service);
+  const voiceOptionLabel=(provider:VoiceProvider)=>`${voiceProviderLabel(provider)}${provider===nativeVoice?'（推荐）':''}`;
+  const voiceOptions=<>
+    <label>识别方式<select value={voiceChoice} onChange={e=>{const mode=voiceProvider(e.target.value,nativeVoice);setVoiceChoices(old=>({...old,[service]:mode}));save(voiceEngineKey(service),mode);}}>
+      <option value="claude">{voiceOptionLabel('claude')}</option>
+      <option value="antigravity">{voiceOptionLabel('antigravity')}</option>
+      <option value="codex">{voiceOptionLabel('codex')}</option>
+      <option value="keyboard">{voiceOptionLabel('keyboard')}</option>
+    </select></label>
+    <p className="muted">{
+      voiceChoice==='claude'?'点麦克风开始说话，文字边说边出现，说完点 ✓，最后会再校对一遍。用电脑上 Claude Code 的 claude.ai 登录，与 Claude Code 自带的语音输入是同一个服务；需要 HTTPS。声音经中继、电脑实时发送到语音服务。'
+      :voiceChoice==='antigravity'?'点麦克风开始说话，文字边说边出现，说完点 ✓。使用电脑上 Antigravity 桌面的语音服务，无需额外登录；需要 HTTPS。声音经中继、电脑实时发送到本机 Antigravity。'
+      :voiceChoice==='codex'?'点麦克风开始录音，说完点 ✓，整段识别后填入输入框。需要 HTTPS 和电脑上 Codex 的 ChatGPT 登录。录音经中继、电脑发送到语音服务。'
+      :'点麦克风打开输入框，再使用手机键盘上的听写。'
+    }</p>
+    {voiceMode!==voiceChoice&&<p className="muted">这台电脑暂不支持 {voiceProviderLabel(voiceChoice)}，当前改用 {voiceProviderLabel(voiceMode)}。</p>}
+    <p className="muted">此设置仅用于 {serviceLabel(service)}，保存在当前浏览器；不同应用可分别选择。</p>
+    <button className="primary" onClick={()=>setSheet(null)}>完成</button>
+  </>;
   const teamItems=me&&<><MenuItem icon="team" onClick={()=>setSheet('team')}>团队<span className="menu-detail">{me.name}</span></MenuItem>
     <MenuItem icon="chat" onClick={()=>{setOnlyMine(!onlyMine);save('only-mine',!onlyMine);setSheet(null);}}>只看我的会话{onlyMine&&<Icon name="check" size={18}/>}</MenuItem></>;
   const teamPanel=me&&<TeamPanel me={me} team={(action,payload)=>client.current?client.current.team(action,payload):Promise.reject({message:'尚未连接中继'})} logout={logout} copy={copyText}
@@ -617,7 +640,7 @@ function App(){
         <MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>
         <MenuItem icon="logout" onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem>
       </SheetPanel>}
-      {sheet==='voice'&&<SheetPanel title="语音输入" close={()=>setSheet(null)}>{voiceOptions}</SheetPanel>}
+      {sheet==='voice'&&<SheetPanel title={`语音输入 · ${serviceLabel(service)}`} close={()=>setSheet(null)}>{voiceOptions}</SheetPanel>}
       {sheet==='team'&&teamPanel&&<SheetPanel title="团队" close={()=>setSheet(null)}>{teamPanel}</SheetPanel>}
       {sheet==='computer'&&<SheetPanel title="电脑" close={()=>setSheet(null)}>{computerOptions}</SheetPanel>}
       {sheet==='file'&&<SheetPanel title="查看项目文件" close={()=>setSheet(null)}>{fileOptions}</SheetPanel>}
@@ -680,7 +703,7 @@ function App(){
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
      {permissionPoint&&<PermissionPicker anchor={permissionButton.current} point={permissionPoint} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} title="许可" disabled={busy} onChange={setApproval} close={()=>setPermissionPoint(null)}/>}
      {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
-     {sheet&&<SheetPanel title={({home:'选项',computer:'电脑',projects:'选择项目',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页',voice:'语音输入','claude-project':'项目',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
+     {sheet&&<SheetPanel title={sheet==='voice'?`语音输入 · ${serviceLabel(service)}`:({home:'选项',computer:'电脑',projects:'选择项目',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页','claude-project':'项目',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
        {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>{teamItems}<MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem></>}
       {sheet==='computer'&&computerOptions}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>selectProject(p)}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div>

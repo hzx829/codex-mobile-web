@@ -11,6 +11,7 @@ import { Ledger, actorOf, requestActor } from './ledger.js';
 import { Control } from './control.js';
 import { BrowserPreview } from './browser-preview.js';
 import { AntigravityBridge } from './antigravity.js';
+import { AntigravityVoiceStreams } from './antigravity-voice.js';
 import { ServiceRouter, type ServiceBridge } from './services.js';
 import { ClaudeCodeBridge, sdkQuery } from './claude-code.js';
 import { ClaudeRuntime, PERMISSION_MODES } from './claude-runtime.js';
@@ -55,9 +56,30 @@ const control=new Control(ledger,undefined,guest?new NoDesktop():undefined);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const browserPreview=new BrowserPreview();
 const bridges:ServiceBridge[]=[];
-// Dictation streams through Claude Code's login on this computer; Claude Code renews that login when it has expired.
+// Dictation streams through Claude Code's login or the local Antigravity Hub, routed by each stream's provider.
 let renewClaudeLogin=async()=>{};
-const voiceStreams=new ClaudeVoiceStreams(new ClaudeVoiceAuth(()=>renewClaudeLogin()));
+const claudeVoiceStreams=new ClaudeVoiceStreams(new ClaudeVoiceAuth(()=>renewClaudeLogin()));
+const antigravityVoiceStreams=guest?undefined:new AntigravityVoiceStreams(join(homedir(),'.gemini','antigravity'));
+const voiceProviders=new Map<string,'claude'|'antigravity'>();
+function handleVoiceStream(action:string,payload:Json):Promise<Json>{
+  const id=typeof payload.id==='string'?payload.id:'';
+  if(action==='voice.stream.open'){
+    const provider=payload.provider==='antigravity'?'antigravity':'claude';
+    if(provider==='antigravity'){
+      if(!antigravityVoiceStreams)return Promise.reject(new BridgeError('unsupported','借用电脑不支持 Antigravity 语音识别'));
+      if(id)voiceProviders.set(id,'antigravity');
+      return antigravityVoiceStreams.handle(action,payload);
+    }
+    if(id)voiceProviders.set(id,'claude');
+    return claudeVoiceStreams.handle(action,payload);
+  }
+  const owner=id?voiceProviders.get(id):undefined;
+  if(action==='voice.stream.close'||action==='voice.stream.cancel')if(id)voiceProviders.delete(id);
+  if(owner==='antigravity'&&antigravityVoiceStreams)return antigravityVoiceStreams.handle(action,payload);
+  return claudeVoiceStreams.handle(action,payload);
+}
+function dropVoiceStreams(){voiceProviders.clear();claudeVoiceStreams.dropAll();antigravityVoiceStreams?.dropAll();}
+function closeVoiceStreams(){voiceProviders.clear();claudeVoiceStreams.close();antigravityVoiceStreams?.close();}
 if(available.includes('claude')){
   // CLAUDE_CODE_ENTRYPOINT: by default 'codex-mobile-web', which the terminal's `claude --resume` list shows; `claudeEntrypoint`
   // overrides it. A guest's sessions use 'sdk-ts', which that list hides. See docs/claude-local/M1-RESULTS.md.
@@ -78,7 +100,7 @@ if(available.includes('claude')){
 }
 if(!guest){
   const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
-  bridges.push({prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.create','antigravity.send','antigravity.stop']});
+  bridges.push({prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.create','antigravity.send','antigravity.stop','antigravity.respond']});
 }
 const useCodex=available.includes('codex');
 const services=new ServiceRouter(bridges,request=>{
@@ -133,7 +155,7 @@ function connect() {
       if(socket===ws)send({type:'response',id:m.id,error:{code:err.code,message:err.message,uncertain:err.uncertain}});
     });
     // Audio is taken in the order it arrives, before anything else can interleave.
-    if(typeof m.action==='string'&&m.action.startsWith('voice.stream.')){void respond(voiceStreams.handle(m.action,m.payload&&typeof m.payload==='object'?m.payload:{}));return;}
+    if(typeof m.action==='string'&&m.action.startsWith('voice.stream.')){void respond(handleVoiceStream(m.action,m.payload&&typeof m.payload==='object'?m.payload:{}));return;}
     try{
       // Operations started by this request record the team member the relay names as its sender.
       const result=await requestActor.run(actorOf(m.actor),async()=>m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
@@ -146,7 +168,7 @@ function connect() {
   ws.on('error',()=>{});
   ws.on('close',code=>{
     clearInterval(proxyBackpressure);proxyBackpressure=undefined;usageSending=false;
-    void browserPreview.stop();voiceStreams.dropAll();
+    void browserPreview.stop();dropVoiceStreams();
     clearTimeout(authTimer);clearInterval(pulse);if(stopping)return;
     if(code===4401||code===4409){
       console.error(code===4401?(guest?'连接 Token 不匹配，请检查中继配置':'连接 Token 不匹配，请在电脑更新配置'):'同一电脑连接已被替换');
@@ -190,4 +212,4 @@ if(guest&&process.env.BRIDGE_GUEST_CHECK!=='0'){
     void checkClaude(sdkQuery as unknown as ClaudeLoader,guest.workspace).then(result=>report('Claude Code',result));
   }
 }
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();voiceStreams.close();services.close();socket?.close();control.close();process.exit(0);});
+for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();closeVoiceStreams();services.close();socket?.close();control.close();process.exit(0);});

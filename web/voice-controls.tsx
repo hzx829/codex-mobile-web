@@ -1,5 +1,5 @@
 import {IconButton} from './icon-button';
-import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
+import {isStreamingVoice,voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import type {VoiceState} from './voice-input';
 
 export type Voice={state:VoiceState;start:()=>void;stop:()=>void;cancel:()=>void};
@@ -16,7 +16,7 @@ export function VoiceButton({voice,mode,connected,disabled,starting}:{voice:Voic
 /** What the microphone is doing, with a way to stop listening; nothing while idle. Text already in the draft stays. */
 export function VoiceStatus({voice,mode}:{voice:Voice;mode:VoiceProvider}){
   if(voice.state==='idle')return null;
-  const streaming=mode==='claude';
+  const streaming=isStreamingVoice(mode);
   const text=voice.state==='starting'?'正在请求麦克风…'
     :voice.state==='recording'?(streaming?'正在听 · 边说边出字，说完点 ✓':'录音中 · 最长 2 分钟，说完点 ✓')
     :streaming?'正在校对最后的文字…':'正在识别…';

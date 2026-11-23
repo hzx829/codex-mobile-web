@@ -19,10 +19,11 @@ import {AddOptions,Composer,useAttachmentPickers} from './composer';
 import {ModelMenu} from './model-picker';
 import {listedModel,modelDisplayName,reasoningLabel,resolveModelSelection,type ModelSelection} from '../src/shared/models';
 import {PermissionMenu,type PermissionOption} from './permission-picker';
+import {ApprovalCard} from './approval-card';
 import {SheetPanel} from './sheet';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
-import type {Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
+import type {ApprovalRequest,Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
 import {SenderScope} from './senders';
 import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
 
@@ -40,7 +41,6 @@ type Props={
   /** Opens the voice input settings, shared with the other apps. */
   chooseVoice:()=>void;
 };
-type Request={id:string;kind:'permission'|'question'|'plan';tool:string;title:string;detail:string;canRemember:boolean;rememberScope?:'session'|'project'|'user';implementModes?:string[];questions?:{question:string;header:string;multiSelect:boolean;options:{label:string;description:string}[]}[]};
 const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
 const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:TurnView)=>turn.items.filter(item=>item.role==='user').map(item=>item.id)):[];
 function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
@@ -56,8 +56,6 @@ const MODES:PermissionOption[]=[
 ];
 /** A session without a mode of its own runs in the connector's default mode (older connectors: Claude Code's default). */
 const modeLabel=(mode:string)=>MODES.find(m=>m.id===mode)?.label||mode;
-/** Where "remember" saves the rule, as the connector reports it; older connectors do not say. */
-const REMEMBER={session:'本会话允许',project:'本项目始终允许',user:'始终允许'} as const;
 /** The level Claude Code marks as recommended; shown until one is chosen here. */
 const RECOMMENDED_EFFORT='medium';
 /** Turns one "load earlier" adds above the ones shown. */
@@ -304,7 +302,7 @@ export function ClaudeCodePanel(props:Props){
   });
   const followup=useStableEvent((text:string)=>{edit(draft.trim()?`${draft.trimEnd()}\n\n${text}`:text);composer.current?.focus();});
   const turns:TurnView[]=view?.turns||[];
-  const requests:Request[]=view?.requests||[];
+  const requests:ApprovalRequest[]=view?.requests||[];
   const status=!connected?connectionLost:watchError||(pending&&busy?'正在等待电脑确认…':'');
   const canWrite=connected&&!busy&&!pending&&(creating?(!guest||Boolean(startPath)):Boolean(view));
   // Photos are compressed into the message; other files are uploaded to the project when it is sent.
@@ -380,7 +378,7 @@ export function ClaudeCodePanel(props:Props){
       {status&&<ConversationStatus>{status}</ConversationStatus>}
     </div></div>
     <footer className="composer-area">
-      <div className="request-stack">{requests.map(item=><ClaudeRequestCard key={`${conversationId}:${item.id}`} request={item} disabled={!connected||busy||Boolean(pending)}
+      <div className="request-stack">{requests.map(item=><ApprovalCard key={`${conversationId}:${item.id}`} request={item} disabled={!connected||busy||Boolean(pending)} modeLabel={modeLabel}
         respond={(decision,answers,mode)=>void mutate('claude.respond',{conversationId,requestId:item.id,decision,...(answers?{answers}:{}),...(mode?{mode}:{})})}/>)}</div>
       {(error||previewError)&&<div className="feedback error" role="alert"><span>{error||previewError}</span><IconButton icon="close" label="关闭提示" onClick={()=>{setError('');clearPreviewError();}}/></div>}
       {notice&&<div className="feedback" role="status">{notice}</div>}
@@ -417,33 +415,4 @@ export function ClaudeCodePanel(props:Props){
     {statusPoint&&view&&<ThreadStatusPanel point={statusPoint} view={{...view,source:'connector'} as unknown as SessionView} threadId={conversationId} cwd={view.cwd} connected={connected} close={()=>setStatusPoint(null)}
       copy={()=>copyText(conversationId)} read={async()=>({threadId:conversationId,limits:[],limitsNotice:'Claude Code 不提供额度信息，可在电脑上运行 /usage 查看'})}/>}
   </main>;
-}
-
-/** How an approved plan is carried out, as Claude Code's own plan prompt words it. */
-const IMPLEMENT:Record<string,string>={acceptEdits:'开始执行，接受编辑',default:'开始执行，手动审批'};
-function ClaudeRequestCard({request,disabled,respond}:{request:Request;disabled:boolean;respond:(decision:'allow'|'allowSession'|'deny',answers?:Record<string,string>,mode?:string)=>void}){
-  const [answers,setAnswers]=useState<Record<string,string[]>>({});
-  const [other,setOther]=useState<Record<string,string>>({});
-  if(request.kind==='question'){
-    const value=(question:string)=>[...(answers[question]||[]),...(other[question]?.trim()?[other[question].trim()]:[])].join(', ');
-    const complete=request.questions?.every(q=>value(q.question));
-    return <div className="request"><strong>{request.title}</strong>
-      {request.questions?.map(q=><div className="claude-question" key={q.question}><p>{q.header&&<small>{q.header} · </small>}{q.question}</p>
-        <div className="choices">{q.options.map(option=>{const chosen=answers[q.question]?.includes(option.label);return <button type="button" key={option.label} title={option.description} className={chosen?'chosen':''} disabled={disabled}
-          onClick={()=>setAnswers(old=>{const current=old[q.question]||[];return {...old,[q.question]:q.multiSelect?chosen?current.filter(x=>x!==option.label):[...current,option.label]:[option.label]};})}>{option.label}</button>;})}</div>
-        <input placeholder="其他回答（可选）" value={other[q.question]||''} disabled={disabled} onChange={e=>setOther(old=>({...old,[q.question]:e.target.value}))}/></div>)}
-      <div className="choices"><button className="primary" disabled={disabled||!complete} onClick={()=>respond('allow',Object.fromEntries((request.questions||[]).map(q=>[q.question,value(q.question)])))}>提交回答</button>
-        <button disabled={disabled} onClick={()=>respond('deny')}>跳过</button></div></div>;
-  }
-  if(request.kind==='plan'&&request.implementModes?.length)return <div className="request"><strong>{request.title}</strong>{request.detail&&<pre>{request.detail}</pre>}
-    <div className="choices">
-      {request.implementModes.map((mode,index)=><button key={mode} className={index===0?'primary':''} disabled={disabled} onClick={()=>respond('allow',undefined,mode)}>{IMPLEMENT[mode]||`开始执行，${modeLabel(mode)}`}</button>)}
-      <button disabled={disabled} onClick={()=>respond('deny')}>继续规划</button>
-    </div></div>;
-  return <div className="request"><strong>{request.title}</strong>{request.detail&&<pre>{request.detail}</pre>}
-    <div className="choices">
-      <button disabled={disabled} onClick={()=>respond('allow')}>{request.kind==='plan'?'开始执行':'允许一次'}</button>
-      {request.canRemember&&<button disabled={disabled} onClick={()=>respond('allowSession')}>{request.rememberScope?REMEMBER[request.rememberScope]:'允许并记住'}</button>}
-      <button disabled={disabled} onClick={()=>respond('deny')}>{request.kind==='plan'?'继续规划':'拒绝'}</button>
-    </div></div>;
 }

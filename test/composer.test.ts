@@ -7,6 +7,8 @@ import {useComposerAttachments} from '../web/composer-attachments.js';
 import {AddOptions,Composer} from '../web/composer.js';
 import {ModelPicker} from '../web/model-picker.js';
 import {PermissionButton,PermissionPicker,type PermissionOption} from '../web/permission-picker.js';
+import {ApprovalCard} from '../web/approval-card.js';
+import {AntigravityModelPicker,type AntigravityCatalog} from '../web/antigravity-model-picker.js';
 import {QueuedMessages} from '../web/queued-messages.js';
 
 const OPTIONS:PermissionOption[]=[{id:'default',label:'按需审批',description:'需要时审批'},{id:'bypass',label:'全部允许',description:'不再审批',elevated:true}];
@@ -129,5 +131,33 @@ test('the shared composer, "+" sheet, pickers and queue show what each runtime s
     assert.equal(thumb().getAttribute('aria-label'),'查看第 1 张图片，共 1 张');
     await click(thumb());
     assert.equal(editor(),null);assert.equal(shown,url);
+
+    // Shared ApprovalCard handles permission, question and desktop-only notice cards for both Claude Code and Antigravity.
+    const responses:any[]=[];
+    await render(h(ApprovalCard,{request:{id:'1',kind:'permission',tool:'run_command',title:'允许运行命令',detail:'npm test',canRemember:true,rememberScope:'project'},disabled:false,respond:(d,a)=>responses.push([d,a])}));
+    assert.deepEqual(Array.from(document.querySelectorAll('.request .choices button')).map(b=>b.textContent),['允许一次','本项目始终允许','拒绝']);
+    await click(document.querySelectorAll('.request .choices button')[1]);
+    assert.deepEqual(responses[0],['allowSession',undefined]);
+    await render(h(ApprovalCard,{request:{id:'2',kind:'question',tool:'ask_question',title:'请选择',detail:'',canRemember:false,questions:[{question:'方向',header:'',multiSelect:false,options:[{label:'A',description:''},{label:'B',description:''}]}]},disabled:false,respond:(d,a)=>responses.push([d,a])}));
+    await click(document.querySelectorAll('.claude-question .choices button')[1]);
+    await click(document.querySelector('.request .choices button.primary')!);
+    assert.deepEqual(responses[1],['allow',{'方向':'B'}]);
+    await render(h(ApprovalCard,{request:{id:'3',kind:'notice',tool:'other',title:'桌面正在等待确认',detail:'请在电脑处理',canRemember:false},disabled:false,respond:noop}));
+    assert.equal(document.querySelectorAll('.request button').length,0);
+
+    // AntigravityModelPicker renders grouped models with a concrete Model · Effort button and unified effort slider.
+    const agCatalog:AntigravityCatalog={
+      models:[{id:'M_LOW',label:'Gemini 4 Neon (Low)'},{id:'M_HIGH',label:'Gemini 4 Neon (High)'}],
+      groups:[{id:'gemini-4-neon',label:'Gemini 4 Neon',efforts:['low','high'],defaultEffort:'high',variants:{low:'M_LOW',high:'M_HIGH'},supportsImages:true}],
+      current:'M_HIGH',
+      supportsImages:true,
+    };
+    let pickedAg='';
+    await render(h(AntigravityModelPicker,{read:async()=>agCatalog,cached:agCatalog,turn:'t1',value:'',available:true,disabled:false,onChange:id=>{pickedAg=id;}}));
+    assert.equal($('.composer-model')?.getAttribute('aria-label'),'模型：Gemini 4 Neon · 高');
+    await click($('.composer-model')!);
+    assert.ok($('.model-picker-slider'),'grouped Antigravity models open the shared effort slider');
+    assert.equal($('.model-picker-speed'),null);assert.equal($('.model-picker-reset'),null);
+    assert.equal(pickedAg,'');
   }finally{await act(async()=>root.unmount());}
 });

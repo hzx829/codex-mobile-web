@@ -5,7 +5,18 @@ import {dirname, isAbsolute, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {readProjectFile, downloadProjectFile} from './project.js';
 import {setTimeout as delay} from 'node:timers/promises';
-import {BridgeError, textRequired, type AntigravityIssue, type AntigravityMessage, type AntigravityModel, type Json} from '../shared/types.js';
+import {
+  ANTIGRAVITY_PERMISSION_MODES,
+  BridgeError,
+  textRequired,
+  type AntigravityIssue,
+  type AntigravityMessage,
+  type AntigravityModel,
+  type AntigravityModelGroup,
+  type AntigravityPermissionMode,
+  type ApprovalRequest,
+  type Json,
+} from '../shared/types.js';
 import type {Ledger} from './ledger.js';
 import {callHub} from './antigravity-hub.js';
 import {validateImages} from '../shared/images.js';
@@ -16,13 +27,39 @@ import {sendersByText} from './message-senders.js';
 const guid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const idle = 'CASCADE_RUN_STATUS_IDLE';
 const active = 'CASCADE_RUN_STATUS_RUNNING';
+const waitingStep = 'CORTEX_STEP_STATUS_WAITING';
 // The full transcript keeps tool output too, so read a larger tail of it.
 const tailSize = 4 * 1024 * 1024;
+const WAITING_STEP_WINDOW = 25;
 type Summary = {id: string; title: string; status: string; notIdle: number | null; modified: string; steps: number; userStep: number | null; userTime: string | null; workspaces: string};
 const columns = 'conversation_id AS id, title, status, not_fully_idle AS notIdle, last_modified_time AS modified, step_count AS steps, last_user_input_step_index AS userStep, last_user_input_time AS userTime, workspace_uris AS workspaces';
 const workspaceEntries = "json_each(CASE WHEN json_valid(workspace_uris) THEN workspace_uris ELSE '[]' END)";
 const turnKey = (summary: Summary) => JSON.stringify([summary.userStep, summary.userTime]);
 const canSend = (summary: Summary) => summary.status === idle && !summary.notIdle;
+
+const PERMISSION_PRESET_SET = new Set<string>(ANTIGRAVITY_PERMISSION_MODES);
+const isPermissionPreset = (value: unknown): value is AntigravityPermissionMode =>
+  typeof value === 'string' && PERMISSION_PRESET_SET.has(value);
+
+const PRESET_TO_AUTO_EXECUTION: Partial<Record<AntigravityPermissionMode, string>> = {
+  AGENT_PERMISSION_PRESET_REQUEST_REVIEW: 'CASCADE_COMMANDS_AUTO_EXECUTION_OFF',
+  AGENT_PERMISSION_PRESET_AUTO: 'CASCADE_COMMANDS_AUTO_EXECUTION_AUTO',
+  AGENT_PERMISSION_PRESET_TURBO: 'CASCADE_COMMANDS_AUTO_EXECUTION_EAGER',
+};
+
+const CONFIRM_INTERACTION_LABELS: Record<string, string> = {
+  mcp: '允许调用 MCP 工具',
+  openBrowserUrl: '允许打开网页',
+  readUrlContent: '允许读取网页内容',
+  runExtensionCode: '允许运行扩展代码',
+  executeBrowserJavascript: '允许在浏览器中执行脚本',
+  captureBrowserScreenshot: '允许截取浏览器画面',
+  clickBrowserPixel: '允许点击浏览器页面',
+  sendCommandInput: '允许向终端发送输入',
+  browserAction: '允许执行浏览器操作',
+  confirmBrowserSetup: '确认浏览器环境设置',
+  openBrowserSetup: '打开浏览器环境设置',
+};
 
 function localWorkspace(value: unknown) {
   if(typeof value!=='string')return '';
@@ -38,6 +75,11 @@ export function antigravityMedia(images: string[]): Json[] {
   return images.map(url => ({mimeType: url.slice(5, url.indexOf(';')), inlineData: url.slice(url.indexOf(',') + 1)}));
 }
 const readImages = (value: unknown) => value === undefined ? [] : validateImages(value);
+const readPermissionMode = (value: unknown): AntigravityPermissionMode | undefined => {
+  if (value === undefined || value === '') return undefined;
+  if (!isPermissionPreset(value)) throw new BridgeError('invalid', '权限模式无效');
+  return value;
+};
 // The ledger keeps what each operation asked for; image hashes and upload IDs are enough to tell two requests apart.
 const attached = (images: string[], files: FileAttachment[]) => ({
   ...(images.length ? {images: images.map(url => createHash('sha256').update(url).digest('hex'))} : {}),
@@ -49,6 +91,350 @@ function checkCount(images: string[], files: FileAttachment[]) {
   if (images.length + files.length > MAX_ATTACHMENTS) throw new BridgeError('invalid', `图片和文件合计最多添加 ${MAX_ATTACHMENTS} 个`);
 }
 const newScope = (path: string) => `antigravity-new:${path}`, conversationScope = (id: string) => `antigravity:${id}`;
+
+/**
+ * Parses `GetCascadeModelConfigData` into a flat backwards-compatible model list plus grouped models
+ * (model family + thinking effort variants), preserving the desktop's recommended sort order.
+ */
+export function parseAntigravityModels(result: Json): {
+  models: AntigravityModel[];
+  groups?: AntigravityModelGroup[];
+  defaultModel?: string;
+} {
+  if (!Array.isArray(result?.clientModelConfigs)) throw new BridgeError('unavailable', '桌面尚未提供模型列表，请稍后重试');
+  const sortLabels: string[] = Array.isArray(result.clientModelSorts)
+    ? result.clientModelSorts.flatMap((sort: Json) => Array.isArray(sort?.groups) ? sort.groups.flatMap((g: Json) => Array.isArray(g?.modelLabels) ? g.modelLabels : []) : [])
+    : [];
+  const sortRank = new Map<string, number>();
+  sortLabels.forEach((label, index) => { if (typeof label === 'string' && !sortRank.has(label)) sortRank.set(label, index); });
+
+  const groupedRaw: Record<string, Json> | null = result.groupedModels && typeof result.groupedModels === 'object' && !Array.isArray(result.groupedModels)
+    ? result.groupedModels : null;
+  const defaultId = typeof result.defaultOverrideModelConfig?.modelOrAlias?.model === 'string'
+    ? result.defaultOverrideModelConfig.modelOrAlias.model : undefined;
+
+  type EnabledConfig = {id: string; label: string; modelId?: string; description?: string; supportsImages?: boolean; order: number};
+  const enabled: EnabledConfig[] = [];
+  result.clientModelConfigs.forEach((config: Json, index: number) => {
+    const id = config?.modelOrAlias?.model;
+    if (config?.disabled || typeof id !== 'string' || !id || typeof config.label !== 'string' || !config.label) return;
+    const rank = sortRank.get(config.label);
+    enabled.push({
+      id,
+      label: config.label,
+      ...(typeof config.modelId === 'string' && config.modelId ? {modelId: config.modelId} : {}),
+      ...(typeof config.tagDescription === 'string' && config.tagDescription ? {description: config.tagDescription} : {}),
+      ...(typeof config.supportsImages === 'boolean' ? {supportsImages: config.supportsImages} : {}),
+      order: rank ?? (sortRank.size + index),
+    });
+  });
+  enabled.sort((a, b) => a.order - b.order);
+
+  // Match each config against `groupedModels` (where config.modelId === `${groupKey}-${thinkingSuffix}`).
+  const groupKeys = groupedRaw ? Object.keys(groupedRaw) : [];
+  const models: AntigravityModel[] = [];
+  const groupMap = new Map<string, {
+    id: string;
+    label: string;
+    description?: string;
+    allowedEfforts: string[];
+    variants: Record<string, string>;
+    supportsImages?: boolean;
+    order: number;
+  }>();
+  const standaloneGroups: (AntigravityModelGroup & {order: number})[] = [];
+
+  for (const item of enabled) {
+    let matchedGroup: string | undefined;
+    let matchedEffort: string | undefined;
+    if (groupedRaw && item.modelId) {
+      for (const key of groupKeys) {
+        if (!item.modelId.startsWith(key + '-')) continue;
+        const suffix = item.modelId.slice(key.length + 1);
+        const levels: Json[] = Array.isArray(groupedRaw[key]?.supportedThinkingLevels) ? groupedRaw[key].supportedThinkingLevels : [];
+        if (levels.some(level => level?.thinkingSuffix === suffix)) {
+          matchedGroup = key;
+          matchedEffort = suffix;
+          break;
+        }
+      }
+    }
+
+    const entry: AntigravityModel = {
+      id: item.id,
+      label: item.label,
+      ...(item.description ? {description: item.description} : {}),
+      ...(item.supportsImages !== undefined ? {supportsImages: item.supportsImages} : {}),
+      ...(matchedGroup ? {group: matchedGroup, groupLabel: String(groupedRaw![matchedGroup]?.displayName || matchedGroup), effort: matchedEffort} : {}),
+    };
+    models.push(entry);
+
+    if (matchedGroup && matchedEffort) {
+      let group = groupMap.get(matchedGroup);
+      if (!group) {
+        const meta = groupedRaw![matchedGroup];
+        const allowedEfforts = (Array.isArray(meta?.supportedThinkingLevels) ? meta.supportedThinkingLevels : [])
+          .map((level: Json) => level?.thinkingSuffix)
+          .filter((suffix: unknown): suffix is string => typeof suffix === 'string' && Boolean(suffix));
+        group = {
+          id: matchedGroup,
+          label: typeof meta?.displayName === 'string' && meta.displayName ? meta.displayName : matchedGroup,
+          ...(item.description ? {description: item.description} : {}),
+          allowedEfforts,
+          variants: {},
+          ...(item.supportsImages !== undefined ? {supportsImages: item.supportsImages} : {}),
+          order: item.order,
+        };
+        groupMap.set(matchedGroup, group);
+      }
+      group.variants[matchedEffort] = item.id;
+      if (item.supportsImages === true) group.supportsImages = true;
+      if (!group.description && item.description) group.description = item.description;
+      group.order = Math.min(group.order, item.order);
+    } else if (groupedRaw) {
+      standaloneGroups.push({
+        id: item.id,
+        label: item.label,
+        ...(item.description ? {description: item.description} : {}),
+        supportsImages: item.supportsImages === true,
+        order: item.order,
+      });
+    }
+  }
+
+  let groups: AntigravityModelGroup[] | undefined;
+  if (groupedRaw) {
+    const built: (AntigravityModelGroup & {order: number})[] = [...standaloneGroups];
+    for (const group of groupMap.values()) {
+      const efforts = group.allowedEfforts.filter(suffix => Boolean(group.variants[suffix]));
+      if (!efforts.length) continue;
+      const defaultFromOverride = defaultId ? efforts.find(suffix => group.variants[suffix] === defaultId) : undefined;
+      const defaultEffort = defaultFromOverride || (efforts.includes('medium') ? 'medium' : efforts[0]);
+      built.push({
+        id: group.id,
+        label: group.label,
+        ...(group.description ? {description: group.description} : {}),
+        efforts,
+        defaultEffort,
+        variants: group.variants,
+        supportsImages: group.supportsImages === true,
+        order: group.order,
+      });
+    }
+    built.sort((a, b) => a.order - b.order);
+    groups = built.map(({order: _order, ...group}) => group);
+  }
+
+  const defaultModel = defaultId && models.some(m => m.id === defaultId) ? defaultId : undefined;
+  return {models, ...(groups?.length ? {groups} : {}), ...(defaultModel ? {defaultModel} : {})};
+}
+
+function rememberScopeOf(filter: unknown): 'session' | 'project' | 'user' {
+  if (filter === 'PERMISSION_SCOPE_WORKSPACE' || filter === 'PERMISSION_SCOPE_PROJECT') return 'project';
+  if (filter === 'PERMISSION_SCOPE_GLOBAL') return 'user';
+  return 'session';
+}
+
+function permissionScopeForRemember(filter: unknown): string {
+  if (filter === 'PERMISSION_SCOPE_WORKSPACE' || filter === 'PERMISSION_SCOPE_PROJECT' || filter === 'PERMISSION_SCOPE_GLOBAL' || filter === 'PERMISSION_SCOPE_CONVERSATION') {
+    return filter;
+  }
+  return 'PERMISSION_SCOPE_CONVERSATION';
+}
+
+function interactionDetail(step: Json, branch: string): string {
+  if (branch === 'runCommand') {
+    const cmd = step.runCommand?.commandLine || step.runCommand?.command || '';
+    const cwd = step.runCommand?.cwd || '';
+    return [cmd, cwd ? `目录：${cwd}` : ''].filter(Boolean).join('\n');
+  }
+  if (branch === 'mcp') {
+    const mcp = step.mcpTool || {};
+    const name = [mcp.serverName, mcp.toolName].filter(Boolean).join(' / ');
+    return [name, typeof mcp.argumentsJson === 'string' ? mcp.argumentsJson : ''].filter(Boolean).join('\n');
+  }
+  if (branch === 'openBrowserUrl' || branch === 'readUrlContent') {
+    return String(step[branch]?.url || step.openBrowserUrl?.url || step.readUrlContent?.url || '');
+  }
+  if (branch === 'sendCommandInput') {
+    return String(step.sendCommandInput?.input || '');
+  }
+  return '';
+}
+
+/** Extracts waiting-for-user steps into the same `ApprovalRequest` shape Claude Code uses. */
+export function extractAntigravityRequests(steps: Json[], stepOffset: number): ApprovalRequest[] {
+  const requests: ApprovalRequest[] = [];
+  for (let index = 0; index < steps.length; index++) {
+    const step = steps[index];
+    if (!step || step.status !== waitingStep) continue;
+    const ri = step.requestedInteraction;
+    if (!ri || typeof ri !== 'object') continue;
+    const stepIndex = Number.isSafeInteger(step.stepIndex) ? step.stepIndex : stepOffset + index;
+    const id = String(stepIndex);
+
+    if (ri.permission && typeof ri.permission === 'object') {
+      const spec = ri.permission;
+      const action = typeof spec.resource?.action === 'string' ? spec.resource.action : '';
+      const target = typeof spec.resource?.target === 'string' ? spec.resource.target : '';
+      const title = typeof spec.actionDescription === 'string' && spec.actionDescription.trim()
+        ? spec.actionDescription.trim()
+        : action ? `允许 ${action}` : '需要权限确认';
+      const detail = [target, typeof spec.reason === 'string' ? spec.reason.trim() : ''].filter(Boolean).join('\n');
+      const canRemember = spec.persistSuggestionType !== 'PERSIST_SUGGESTION_TYPE_BLOCKED';
+      requests.push({
+        id,
+        kind: 'permission',
+        tool: action || 'permission',
+        title,
+        detail,
+        canRemember,
+        ...(canRemember ? {rememberScope: rememberScopeOf(spec.approvalScopeFilter)} : {}),
+      });
+      continue;
+    }
+
+    if (ri.runCommand !== undefined) {
+      requests.push({
+        id,
+        kind: 'permission',
+        tool: 'run_command',
+        title: '允许运行命令',
+        detail: interactionDetail(step, 'runCommand'),
+        canRemember: false,
+      });
+      continue;
+    }
+
+    if (ri.filePermission && typeof ri.filePermission === 'object') {
+      const spec = ri.filePermission;
+      const path = typeof spec.absolutePathUri === 'string' ? localWorkspace(spec.absolutePathUri) || spec.absolutePathUri : '';
+      const reason = spec.blockReason === 'BLOCK_REASON_OUTSIDE_WORKSPACE' ? '位于当前工作区之外'
+        : spec.blockReason === 'BLOCK_REASON_GITIGNORED' ? '位于 .gitignore 忽略范围' : '';
+      requests.push({
+        id,
+        kind: 'permission',
+        tool: 'file_permission',
+        title: spec.isDirectory ? '允许访问目录' : '允许访问文件',
+        detail: [path, reason].filter(Boolean).join('\n'),
+        canRemember: true,
+        rememberScope: 'session',
+      });
+      continue;
+    }
+
+    if (ri.askQuestion && typeof ri.askQuestion === 'object') {
+      const rawQuestions: Json[] = Array.isArray(ri.askQuestion.questions) ? ri.askQuestion.questions : [];
+      requests.push({
+        id,
+        kind: 'question',
+        tool: 'ask_question',
+        title: 'Antigravity 需要你的回答',
+        detail: '',
+        canRemember: false,
+        questions: rawQuestions.map((q: Json) => ({
+          question: String(q?.question || ''),
+          header: '',
+          multiSelect: Boolean(q?.isMultiSelect),
+          options: (Array.isArray(q?.options) ? q.options : []).map((opt: Json) => ({
+            label: String(opt?.text || opt?.id || ''),
+            description: '',
+          })),
+        })),
+      });
+      continue;
+    }
+
+    const confirmBranch = Object.keys(CONFIRM_INTERACTION_LABELS).find(key => ri[key] !== undefined);
+    if (confirmBranch) {
+      requests.push({
+        id,
+        kind: 'permission',
+        tool: confirmBranch,
+        title: CONFIRM_INTERACTION_LABELS[confirmBranch],
+        detail: interactionDetail(step, confirmBranch),
+        canRemember: false,
+      });
+      continue;
+    }
+
+    requests.push({
+      id,
+      kind: 'notice',
+      tool: Object.keys(ri)[0] || 'interaction',
+      title: '桌面正在等待确认',
+      detail: '此交互类型暂不支持在手机处理，请在电脑上的 Antigravity 完成。',
+      canRemember: false,
+    });
+  }
+  return requests;
+}
+
+/** Builds the native `CascadeUserInteraction` response payload for a waiting step. */
+export function buildAntigravityInteraction(
+  trajectoryId: string,
+  stepIndex: number,
+  step: Json,
+  decision: 'allow' | 'allowSession' | 'deny',
+  answers?: Record<string, string>,
+): Json {
+  const ri = step?.requestedInteraction;
+  if (!ri || typeof ri !== 'object') throw new BridgeError('changed', '该确认请求已不存在，请刷新查看');
+  const base = {trajectoryId, stepIndex};
+  const allow = decision !== 'deny';
+
+  if (ri.permission && typeof ri.permission === 'object') {
+    const scope = !allow ? 'PERMISSION_SCOPE_ONCE'
+      : decision === 'allowSession' ? permissionScopeForRemember(ri.permission.approvalScopeFilter)
+      : 'PERMISSION_SCOPE_ONCE';
+    return {...base, permission: {allow, scope}};
+  }
+  if (ri.runCommand !== undefined) {
+    const commandLine = String(step.runCommand?.commandLine || step.runCommand?.command || '');
+    return {...base, runCommand: {confirm: allow, ...(commandLine ? {proposedCommandLine: commandLine, submittedCommandLine: commandLine} : {})}};
+  }
+  if (ri.filePermission && typeof ri.filePermission === 'object') {
+    return {
+      ...base,
+      filePermission: {
+        allow,
+        scope: decision === 'allowSession' ? 'PERMISSION_SCOPE_CONVERSATION' : 'PERMISSION_SCOPE_ONCE',
+        ...(typeof ri.filePermission.absolutePathUri === 'string' ? {absolutePathUri: ri.filePermission.absolutePathUri} : {}),
+      },
+    };
+  }
+  if (ri.askQuestion && typeof ri.askQuestion === 'object') {
+    if (!allow) return {...base, askQuestion: {responses: [], cancelled: true}};
+    const rawQuestions: Json[] = Array.isArray(ri.askQuestion.questions) ? ri.askQuestion.questions : [];
+    const responses = rawQuestions.map((q: Json) => {
+      const text = String(q?.question || '');
+      const rawAnswer = answers?.[text] ?? '';
+      const parts = rawAnswer.split(',').map(part => part.trim()).filter(Boolean);
+      const options: Json[] = Array.isArray(q?.options) ? q.options : [];
+      const selectedOptionIds: string[] = [];
+      const freeText: string[] = [];
+      for (const part of parts) {
+        const match = options.find(opt => String(opt?.text || opt?.id || '') === part || String(opt?.id || '') === part);
+        if (match?.id !== undefined) selectedOptionIds.push(String(match.id));
+        else freeText.push(part);
+      }
+      return {
+        question: text,
+        options,
+        isMultiSelect: Boolean(q?.isMultiSelect),
+        selectedOptionIds,
+        writeInResponse: freeText.join(', '),
+        skipped: !selectedOptionIds.length && !freeText.length,
+      };
+    });
+    return {...base, askQuestion: {responses, cancelled: false}};
+  }
+  const confirmBranch = Object.keys(CONFIRM_INTERACTION_LABELS).find(key => ri[key] !== undefined);
+  if (confirmBranch) {
+    return {...base, [confirmBranch]: {confirm: allow}};
+  }
+  throw new BridgeError('unsupported', '暂不支持在手机回应此交互类型，请在电脑上处理');
+}
 
 function readIssue(step: Json): AntigravityIssue {
   const error = typeof step.error === 'string' ? step.error : '';
@@ -103,6 +489,8 @@ export class AntigravityBridge {
   constructor(private root: string, private ledger: Ledger, private hub = callHub,
     private projectsDir = join(dirname(root), 'config', 'projects')) {}
 
+  private daemonDir() { return join(this.root, 'daemon'); }
+
   /** Desktop projects (`~/.gemini/config/projects`); a new conversation needs its project's ID to show under that project. */
   private async desktopProjects(): Promise<{id: string; name: string; path: string}[]> {
     const names = await readdir(this.projectsDir).catch(() => [] as string[]);
@@ -132,7 +520,7 @@ export class AntigravityBridge {
 
   private async withModel(config: Json | null, model: string | undefined): Promise<Json | null> {
     if (!model) return config;
-    const models = await this.models();
+    const {models} = await this.modelCatalog();
     if (!models.some(option => option.id === model)) throw new BridgeError('invalid', '所选模型已不可用，请重新选择');
     const plannerConfig = {...config?.plannerConfig, planModel: model};
     delete plannerConfig.requestedModel;
@@ -140,24 +528,69 @@ export class AntigravityBridge {
     return {...config, plannerConfig};
   }
 
+  private withPermission(config: Json | null, permissionMode: AntigravityPermissionMode | undefined): Json | null {
+    if (!permissionMode) return config;
+    const plannerConfig = {...config?.plannerConfig};
+    const toolConfig = {...plannerConfig.toolConfig};
+    const runCommand = {...toolConfig.runCommand};
+    const autoCommandConfig = {...runCommand.autoCommandConfig};
+    const policy = PRESET_TO_AUTO_EXECUTION[permissionMode];
+    if (policy) autoCommandConfig.autoExecutionPolicy = policy;
+    else delete autoCommandConfig.autoExecutionPolicy;
+    runCommand.autoCommandConfig = autoCommandConfig;
+    toolConfig.runCommand = runCommand;
+    plannerConfig.toolConfig = toolConfig;
+    return {...config, plannerConfig};
+  }
+
+  private async defaultPermissionMode(): Promise<AntigravityPermissionMode | undefined> {
+    const settings = await this.hub(this.daemonDir(), 'GetPermissionSettings', {}).catch(() => null);
+    return isPermissionPreset(settings?.globalPreset) ? settings.globalPreset : undefined;
+  }
+
+  private async trajectoryMeta(id: string): Promise<{trajectoryId?: string; permissionMode?: AntigravityPermissionMode}> {
+    const all = await this.hub(this.daemonDir(), 'GetAllCascadeTrajectories', {}).catch(() => null);
+    const entry = all?.trajectorySummaries?.[id];
+    if (!entry || typeof entry !== 'object') return {};
+    return {
+      ...(typeof entry.trajectoryId === 'string' && entry.trajectoryId ? {trajectoryId: entry.trajectoryId} : {}),
+      ...(isPermissionPreset(entry.annotations?.permissionPreset) ? {permissionMode: entry.annotations.permissionPreset} : {}),
+    };
+  }
+
+  private async waitingSteps(id: string, stepCount: number): Promise<{offset: number; steps: Json[]}> {
+    const offset = Math.max(0, stepCount - WAITING_STEP_WINDOW);
+    const result = await this.hub(this.daemonDir(), 'GetCascadeTrajectorySteps', {cascadeId: id, stepOffset: offset}).catch(() => null);
+    const steps = Array.isArray(result?.steps) ? result.steps : [];
+    return {offset, steps};
+  }
+
   private async create(p: Json): Promise<Json> {
     const project = textRequired(p.project, '项目', 4096);
     const files = requestFiles(p.files), text = messageText(p.text, files);
     const opId = textRequired(p.opId, '操作标识', 100);
     const model = p.model !== undefined && p.model !== '' ? textRequired(p.model, '模型', 200) : undefined;
+    const permissionMode = readPermissionMode(p.permissionMode);
     const images = readImages(p.images);
     checkCount(images, files);
     const path = localWorkspace(project);
     if (!path) throw new BridgeError('invalid', '请选择这台电脑上的项目');
-    return this.ledger.run(opId, {action: 'antigravity.create', project, text, ...attached(images, files), ...(model ? {model} : {})}, async () => {
+    return this.ledger.run(opId, {
+      action: 'antigravity.create', project, text, ...attached(images, files),
+      ...(model ? {model} : {}), ...(permissionMode ? {permissionMode} : {}),
+    }, async () => {
       const prompt = await withAttachmentLinks(this.ledger, newScope(path), text, files);
       const desktop = (await this.desktopProjects()).find(item => sameFolder(item.path, path));
-      const config = await this.withModel(await this.latestConfig(path), model);
-      const directory = join(this.root, 'daemon');
+      const baseConfig = await this.withModel(await this.latestConfig(path), model);
+      const config = this.withPermission(baseConfig, permissionMode);
+      const directory = this.daemonDir();
       const started = await this.hub(directory, 'StartCascade', {workspaceUris: [project], source: 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
         trajectoryType: 'CORTEX_TRAJECTORY_TYPE_CASCADE', ...(desktop ? {projectEnvConfig: {projectId: desktop.id}} : {})});
       const id = started.cascadeId;
       if (typeof id !== 'string' || !guid.test(id)) throw new BridgeError('uncertain', '桌面未返回新会话，请在电脑核实', true);
+      if (permissionMode) {
+        await this.hub(directory, 'UpdateConversationAnnotations', {cascadeId: id, annotations: {permissionPreset: permissionMode}, mergeAnnotations: true}).catch(() => {});
+      }
       const message: Json = {cascadeId: id, items: [{text: prompt}], ...(images.length ? {media: antigravityMedia(images)} : {}),
         clientMessageId: opId.split(':')[1], ...(config ? {cascadeConfig: config} : {})};
       try {
@@ -171,6 +604,38 @@ export class AntigravityBridge {
       this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
       this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: prompt});
       return {conversationId: id, submitted: true};
+    });
+  }
+
+  private async respond(p: Json): Promise<Json> {
+    const id = textRequired(p.conversationId, '会话', 36);
+    if (!guid.test(id)) throw new BridgeError('invalid', 'Antigravity 会话 ID 无效');
+    const requestId = textRequired(p.requestId, '确认标识', 64);
+    const stepIndex = Number(requestId);
+    if (!Number.isSafeInteger(stepIndex) || stepIndex < 0) throw new BridgeError('invalid', '确认标识无效');
+    const decision = p.decision;
+    if (decision !== 'allow' && decision !== 'allowSession' && decision !== 'deny') throw new BridgeError('invalid', '确认决定无效');
+    const answers = p.answers && typeof p.answers === 'object' && !Array.isArray(p.answers) ? p.answers as Record<string, string> : undefined;
+    const opId = textRequired(p.opId, '操作标识', 100);
+    return this.ledger.run(opId, {action: 'antigravity.respond', id, requestId, decision, ...(answers ? {answers} : {})}, async () => {
+      if (this.writing.has(id)) throw new BridgeError('busy', '此会话正在处理另一次操作');
+      const summary = this.summary(id);
+      this.writing.add(id);
+      try {
+        const [{trajectoryId}, stepRes] = await Promise.all([
+          this.trajectoryMeta(id),
+          this.hub(this.daemonDir(), 'GetCascadeTrajectorySteps', {cascadeId: id, stepOffset: stepIndex}),
+        ]);
+        const steps = Array.isArray(stepRes?.steps) ? stepRes.steps : [];
+        const step = steps.find((item: Json, idx: number) => (Number.isSafeInteger(item?.stepIndex) ? item.stepIndex : stepIndex + idx) === stepIndex);
+        if (!step || step.status !== waitingStep) {
+          throw new BridgeError('changed', '该确认请求已在桌面处理或已过期，请刷新查看');
+        }
+        const interaction = buildAntigravityInteraction(trajectoryId || id, stepIndex, step, decision, answers);
+        await this.hub(this.daemonDir(), 'HandleCascadeUserInteraction', {cascadeId: id, interaction});
+        void summary;
+        return {responded: true};
+      } finally { this.writing.delete(id); }
     });
   }
 
@@ -190,25 +655,20 @@ export class AntigravityBridge {
     return row;
   }
 
-  private async models(): Promise<AntigravityModel[]> {
-    const result = await this.hub(join(this.root, 'daemon'), 'GetCascadeModelConfigData', {});
-    if (!Array.isArray(result.clientModelConfigs)) throw new BridgeError('unavailable', '桌面尚未提供模型列表，请稍后重试');
-    return result.clientModelConfigs.flatMap((config: Json) => {
-      const id = config.modelOrAlias?.model;
-      return !config.disabled && typeof id === 'string' && id && typeof config.label === 'string' && config.label
-        ? [{id, label: config.label}] : [];
-    });
+  private async modelCatalog() {
+    const result = await this.hub(this.daemonDir(), 'GetCascadeModelConfigData', {});
+    return parseAntigravityModels(result);
   }
 
   private async turnConfig(summary: Summary): Promise<Json> {
     if (summary.userStep == null || summary.userStep < 0) return {};
-    const {turns} = await this.hub(join(this.root, 'daemon'), 'GetTrajectoryTurns', {cascadeId: summary.id, stepIndices: [summary.userStep]});
+    const {turns} = await this.hub(this.daemonDir(), 'GetTrajectoryTurns', {cascadeId: summary.id, stepIndices: [summary.userStep]});
     const user = turns?.find((turn: Json) => (turn.startStepIndex ?? 0) === summary.userStep)?.firstStep?.userInput;
     if (!user) throw new BridgeError('changed', '无法读取原会话的模型设置，请刷新后重试');
     return user.userConfig ?? {};
   }
 
-  private async snapshot(id: string) {
+  private async snapshot(id: string, live?: {permissionMode?: AntigravityPermissionMode; defaultPermissionMode?: AntigravityPermissionMode; requests: ApprovalRequest[]}) {
     const summary = this.summary(id);
     // transcript.jsonl cuts long steps short ("<truncated N bytes>"); transcript_full.jsonl keeps them whole.
     const logs = join(this.root, 'brain', id, '.system_generated', 'logs');
@@ -221,10 +681,36 @@ export class AntigravityBridge {
       });
       if (file) break;
     }
-    const cwd=singleWorkspace(summary.workspaces);
-    const revision = JSON.stringify([summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, cwd, String(file?.mtimeNs), String(file?.size)]);
-    return {path, revision, turn: turnKey(summary), title: summary.title || '未命名对话', cwd, running: summary.status === active,
-      canSend: canSend(summary), supportsModelSelection: true, supportsImages: true};
+    const cwd = singleWorkspace(summary.workspaces);
+    const activeOrWaiting = summary.status === active || Boolean(summary.notIdle);
+    let resolved = live;
+    if (!resolved) {
+      const [meta, globalPreset, waiting] = await Promise.all([
+        this.trajectoryMeta(id),
+        this.defaultPermissionMode(),
+        activeOrWaiting ? this.waitingSteps(id, summary.steps) : Promise.resolve(null),
+      ]);
+      resolved = {
+        permissionMode: meta.permissionMode,
+        defaultPermissionMode: globalPreset,
+        requests: waiting ? extractAntigravityRequests(waiting.steps, waiting.offset) : [],
+      };
+    }
+    const {permissionMode, defaultPermissionMode, requests} = resolved;
+    const requestFingerprint = requests.map(req => `${req.id}:${req.kind}:${req.title}`).join('|');
+    const baseRevision = JSON.stringify([
+      summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, cwd,
+      String(file?.mtimeNs), String(file?.size),
+    ]);
+    const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint]);
+    return {
+      path, revision, baseRevision, live: resolved, turn: turnKey(summary), title: summary.title || '未命名对话', cwd,
+      running: summary.status === active, canSend: canSend(summary),
+      supportsModelSelection: true, supportsImages: true,
+      ...(permissionMode ? {permissionMode} : {}),
+      ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
+      ...(requests.length ? {requests} : {}),
+    };
   }
 
   private async read(id: string, known?: string) {
@@ -235,14 +721,22 @@ export class AntigravityBridge {
       this.watchers++;
       try {
         const deadline = Date.now() + 15_000;
+        let ticks = 0;
         while (known === current.revision && Date.now() < deadline) {
           await delay(650);
-          current = await this.snapshot(id);
+          ticks++;
+          const nextLocal = await this.snapshot(id, current.live);
+          const activeOrWaiting = nextLocal.running || !nextLocal.canSend;
+          if (nextLocal.baseRevision !== current.baseRevision || activeOrWaiting && ticks % 2 === 0) {
+            current = await this.snapshot(id);
+          } else {
+            current = nextLocal;
+          }
         }
       } finally { this.watchers--; }
       if (known === current.revision) return {unchanged: true};
     }
-    const {path, ...view} = current;
+    const {path, baseRevision: _base, live: _live, ...view} = current;
     const {messages: items, issue} = await transcript(path);
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
     const records = this.ledger.senders('antigravity', id);
@@ -266,13 +760,23 @@ export class AntigravityBridge {
 
   async handle(action: string, p: Json): Promise<Json> {
     if (action === 'antigravity.create') return this.create(p);
+    if (action === 'antigravity.respond') return this.respond(p);
     if (action === 'antigravity.models' && !p.conversationId) {
       const project = p.project ? localWorkspace(textRequired(p.project, '项目', 4096)) : '';
-      const [models, config] = await Promise.all([this.models(), this.latestConfig(project).catch(() => null)]);
-      return {models, current: config?.plannerConfig?.planModel ?? null, supportsImages: true};
+      const [catalog, config, defaultPermissionMode] = await Promise.all([
+        this.modelCatalog(),
+        this.latestConfig(project).catch(() => null),
+        this.defaultPermissionMode(),
+      ]);
+      return {
+        ...catalog,
+        current: config?.plannerConfig?.planModel ?? null,
+        supportsImages: true,
+        ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
+      };
     }
     if (action === 'antigravity.list') {
-      const named = await this.desktopProjects();
+      const [named, defaultPermissionMode] = await Promise.all([this.desktopProjects(), this.defaultPermissionMode()]);
       const offset = Number.isSafeInteger(p.offset) && p.offset >= 0 ? p.offset : 0;
       const project=p.project?textRequired(p.project,'项目',4096):null;
       const search=p.search?textRequired(p.search,'搜索内容',200):null;
@@ -284,8 +788,13 @@ export class AntigravityBridge {
         const projects=!offset&&!search?db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text' ORDER BY uri`).all().flatMap(({uri})=>{
           const path=localWorkspace(uri),name=named.find(item=>sameFolder(item.path,path))?.name;return path?[{id:uri,path,...(name?{name}:{})}]:[];
         }):undefined;
-        return {data:rows.slice(0,50).map(row=>({id:row.id,title:row.title||'未命名对话',
-          running:row.status===active,updatedAt:Date.parse(String(row.modified))||0})),hasMore:rows.length>50,projects};
+        return {
+          data:rows.slice(0,50).map(row=>({id:row.id,title:row.title||'未命名对话',
+            running:row.status===active,updatedAt:Date.parse(String(row.modified))||0})),
+          hasMore:rows.length>50,
+          projects,
+          ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
+        };
       });
     }
     if (action === 'antigravity.operation') return this.ledger.read(textRequired(p.opId, '操作标识', 100));
@@ -318,8 +827,17 @@ export class AntigravityBridge {
     }
     if (action === 'antigravity.models') {
       const summary = this.summary(id);
-      const [models, config] = await Promise.all([this.models(), this.turnConfig(summary).catch(() => null)]);
-      return {models, current: config?.plannerConfig?.planModel ?? null, supportsImages: true};
+      const [catalog, config, defaultPermissionMode] = await Promise.all([
+        this.modelCatalog(),
+        this.turnConfig(summary).catch(() => null),
+        this.defaultPermissionMode(),
+      ]);
+      return {
+        ...catalog,
+        current: config?.plannerConfig?.planModel ?? null,
+        supportsImages: true,
+        ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
+      };
     }
     if (action === 'antigravity.read') return this.read(id);
     if (action === 'antigravity.watch') return this.read(id, textRequired(p.revision, '会话版本', 4096));
@@ -329,22 +847,31 @@ export class AntigravityBridge {
     const opId = textRequired(p.opId, '操作标识', 100);
     const turn = textRequired(p.turn, '对话轮次', 200);
     const model = sending && p.model !== undefined ? textRequired(p.model, '模型', 200) : undefined;
+    const permissionMode = sending ? readPermissionMode(p.permissionMode) : undefined;
     const images = sending ? readImages(p.images) : [];
     checkCount(images, files);
-    return this.ledger.run(opId, {action, id, text, turn, ...attached(images, files), ...(model ? {model} : {})}, async () => {
+    return this.ledger.run(opId, {
+      action, id, text, turn, ...attached(images, files),
+      ...(model ? {model} : {}), ...(permissionMode ? {permissionMode} : {}),
+    }, async () => {
       if (this.writing.has(id)) throw new BridgeError('busy', '此会话正在处理另一次操作');
       const summary = this.summary(id);
       if (turnKey(summary) !== turn || !(sending ? canSend(summary) : summary.status === active)) throw new BridgeError('changed', '会话状态已变化，请刷新后再操作');
       this.writing.add(id);
       try {
-        const directory = join(this.root, 'daemon');
+        const directory = this.daemonDir();
         if (sending) {
           const prompt = await withAttachmentLinks(this.ledger, conversationScope(id), text!, files);
           const message: Json = {cascadeId: id, items: [{text: prompt}], ...(images.length ? {media: antigravityMedia(images)} : {}), clientMessageId: opId.split(':')[1]};
-          if (model) {
-            message.cascadeConfig = await this.withModel(await this.turnConfig(summary), model);
+          if (model || permissionMode) {
+            const base = await this.turnConfig(summary);
+            const withModel = await this.withModel(base, model);
+            message.cascadeConfig = this.withPermission(withModel, permissionMode);
             const latest = this.summary(id);
             if (turnKey(latest) !== turn || !canSend(latest)) throw new BridgeError('changed', '会话状态已变化，请刷新后再发送');
+          }
+          if (permissionMode) {
+            await this.hub(directory, 'UpdateConversationAnnotations', {cascadeId: id, annotations: {permissionPreset: permissionMode}, mergeAnnotations: true}).catch(() => {});
           }
           await this.hub(directory, 'SendUserCascadeMessage', message);
           // Antigravity reports no tokens; the turn still counts for whoever sent it.
