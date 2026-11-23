@@ -114,7 +114,17 @@
 .artifact-screen img { display: block; width: 100%; border: 1px solid var(--line-strong); border-radius: 12px; cursor: pointer; touch-action: manipulation; background: var(--panel); }
 .artifact-login-row { display: flex; gap: 6px; }
 .artifact-login-row input { padding: 9px 12px; }
-.artifact-login-row button { flex-shrink: 0; background: var(--panel); }
+.artifact-login-row button { flex-shrink: 0; }
+.artifact-login-row button:not(.primary) { background: var(--panel); }
+.artifact-login-row .primary { padding: 9px 16px; }
+.artifact-login-intro small { color: var(--muted); }
+.artifact-login-stuck { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 12px; background: var(--panel); }
+.artifact-login-stuck p { margin: 0; font-size: 13px; }
+.artifact-login-stuck button { flex-shrink: 0; padding: 7px 11px; font-size: 13px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line-strong); }
+.artifact-login-more { margin-top: 8px; }
+.artifact-login-more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.artifact-login-more > :not(summary) { margin-top: 8px; }
+.artifact-login-more small { display: block; line-height: 1.5; }
 .artifact-login-keys { display: flex; flex-wrap: wrap; gap: 6px; }
 .artifact-login-keys button { padding: 7px 11px; font-size: 13px; background: var(--panel); border-radius: 10px; }
 .artifact-login-done { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 12px; background: #1a7f3712; color: var(--success); }
