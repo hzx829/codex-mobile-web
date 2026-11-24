@@ -29,6 +29,8 @@ import {useTurnNotice,watchWhileHidden} from './turn-notify';
 import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
 import {cachedView,rememberView,threadKey} from './session-cache';
 import {traceOpen} from './trace';
+import {seedOf,useThreadSync,viewOf} from './use-thread-sync';
+import type {SyncLink} from './sync/engine';
 
 type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;guest?:boolean;
@@ -37,6 +39,8 @@ type Props={
   /** Opens a session copied from this one. */
   forked:(id:string)=>void;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;
+  /** Set when the computer's connector pushes this app's sessions (`sync.claude`): the session is followed with it. */
+  sync?:SyncLink;
   openFile:(path:string)=>void;openPreview:(url:string)=>void;showPage:(page:PaneAction)=>void;showFiles:()=>void;showImage:(url:string,title:string)=>void;
   copyText:(text:string)=>Promise<void>;clearPreviewError:()=>void;
   /** Codex-style extras: a turn's file changes, voice input and the session menu (rename, copy, archive). */
@@ -96,15 +100,31 @@ export function ClaudeCodePanel(props:Props){
   function edit(text:string){setDraft(text);store(`${scope}:draft`,text);}
   function remember(op:string){setPending(op);store(`${scope}:pending`,op);}
   function failed(e:any){if(alive.current)setError(e?.code==='unsupported'?'请更新这台电脑上的连接器以使用 Claude Code。':e?.message||'Claude Code 操作失败');}
+  // With a connector that pushes sessions, the session follows its frames; reads and watches below are for older ones.
+  const synced=useThreadSync(creating?undefined:props.sync,'claude',conversationId,()=>seedOf(cachedView<Json>(cacheKey),'turns'));
+  // Known from the first render, so the old read below never starts for a synced session.
+  const syncing=Boolean(props.sync&&!creating);
+  // A failed open shows until one succeeds; other messages stay.
+  const syncError=useRef<unknown>(null),syncMessage=useRef('');
+  useEffect(()=>{
+    const value=synced.view;if(!value)return;
+    const next=viewOf(value,'turns');if(next)setView(next);
+    if(value.error===syncError.current)return;
+    syncError.current=value.error;
+    const shown=syncMessage.current;
+    syncMessage.current=value.error?value.error.code==='unsupported'?'请更新这台电脑上的连接器以使用 Claude Code。':value.error.message||'与电脑的会话同步中断，正在重连…':'';
+    setError(old=>syncMessage.current||(old===shown?'':old));
+  },[synced.view]);
   const refresh=useStableEvent(async(clearError=true)=>{
     if(!connected||creating)return;
+    if(synced.engine.current){if(clearError)setError('');await synced.engine.current.open();return;}
     setBusy(true);
     try{const sent=from.current,next=await request.current('claude.read',{conversationId,...windowFor()});if(alive.current&&sent===from.current){setView(next);if(clearError)setError('');setWatchError('');}}
     catch(e){failed(e);}
     finally{if(alive.current)setBusy(false);}
   });
   useEffect(()=>{if(!creating)traceOpen('claude',cacheKey,'start');},[]);
-  useEffect(()=>{void refresh();},[connected,conversationId,refresh]);
+  useEffect(()=>{if(!syncing)void refresh();},[connected,conversationId,refresh]);
   useEffect(()=>{
     if(!view||creating)return;
     traceOpen('claude',cacheKey,view.cached?'cached':'fresh');
@@ -116,7 +136,7 @@ export function ClaudeCodePanel(props:Props){
     request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setDefaultMode(page.defaultPermissionMode||'');setTarget(old=>old||list[0]?.id||(guest?'':OTHER));}).catch(failed);
   },[creating,connected,guest]);
   useEffect(()=>{
-    if(!connected||!view?.revision)return;
+    if(!connected||!view?.revision||syncing)return;
     let active=true,inflight=false,timer:ReturnType<typeof setTimeout>;
     async function watch(){
       // Hidden, it keeps watching only for a turn's end to notify.
@@ -135,7 +155,7 @@ export function ClaudeCodePanel(props:Props){
     void watch();
     document.addEventListener('visibilitychange',watch);
     return()=>{active=false;clearTimeout(timer);document.removeEventListener('visibilitychange',watch);};
-  },[connected,conversationId,view?.revision]);
+  },[connected,conversationId,view?.revision,syncing]);
   useLayoutEffect(()=>{
     const el=scroll.current,anchor=scrollAnchor.current;scrollAnchor.current=null;if(!el)return;
     // Turns added above keep what was on screen in place.
@@ -146,6 +166,12 @@ export function ClaudeCodePanel(props:Props){
     const first=view?.turns?.[0]?.id;if(!connected||creating||!view?.truncated||!first||earlierRequest.current)return;
     const mine={};earlierRequest.current=mine;setLoadingEarlier(true);setEarlierError('');stick.current=false;
     try{
+      const engine=synced.engine.current;
+      if(engine){
+        const element=scroll.current?.querySelector<HTMLElement>('.turn');
+        if(element)scrollAnchor.current={element,top:element.getBoundingClientRect().top};
+        await engine.page(EARLIER_PAGE);return;
+      }
       const next=await request.current('claude.read',{conversationId,from:first,earlier:EARLIER_PAGE});
       if(!alive.current||earlierRequest.current!==mine)return;
       const element=scroll.current?.querySelector<HTMLElement>('.turn');
@@ -385,7 +411,7 @@ export function ClaudeCodePanel(props:Props){
         </details>:target===OTHER&&<label className="claude-project"><input autoFocus aria-label="文件夹路径" placeholder="电脑上的完整路径" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>}
         {startPath&&<p className="muted">{startPath}</p>}</div>:<>
         {view?.truncated&&<button type="button" className="more-link earlier" disabled={!connected||loadingEarlier} onClick={()=>void loadEarlier()}>{loadingEarlier?'正在加载…':earlierError?`${earlierError} · 重试`:'加载更早内容'}</button>}
-        {!view&&busy&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
+        {!view&&(busy||synced.view?.phase==='syncing'&&!synced.view.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         <SenderScope senders={turns.flatMap(turn=>turn.items.map(item=>item.sender))}>{turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source="connector"  latestUser={false} disabled={!canWrite}
           openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy} onEdit={editTurn} onFork={fork} onDiff={diff} onBlocked={setNotice} editBlocked={!view?.truncated&&turn.id===turns[0]?.id?FIRST_MESSAGE:undefined}/>)}</SenderScope>
         {outgoing&&<PendingMessage message={outgoing} openFile={openFile} openPreview={openPreview} onFollowup={followup}/>}

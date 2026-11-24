@@ -64,7 +64,13 @@ export function stored(key:string,view:Json):Json {
   const kind=parse(key).kind;
   if(kind==='codex')return storedCodex(view as SessionView);
   const base=offline[kind](view);
-  if(kind==='claude'){const turns:TurnView[]=base.turns||[];return {...base,turns:turns.slice(-STORED_TURNS).map(withoutImages),truncated:Boolean(base.truncated)||turns.length>STORED_TURNS};}
+  if(kind==='claude'){
+    const turns:TurnView[]=base.turns||[],kept=turns.slice(-STORED_TURNS).map(withoutImages);
+    // A turn stored without its images must not claim its rev, or the connector would not send it again (web/sync/engine.ts).
+    const revs:Record<string,string>=base.revs&&typeof base.revs==='object'?base.revs:{};
+    const keptRevs=Object.fromEntries(kept.flatMap((turn,index)=>turn===turns.at(index-kept.length)&&revs[turn.id]?[[turn.id,revs[turn.id]]]:[]));
+    return {...base,turns:kept,truncated:Boolean(base.truncated)||turns.length>STORED_TURNS,revs:keptRevs};
+  }
   return {...base,messages:(base.messages||[]).slice(-STORED_MESSAGES)};
 }
 function storedCodex(view:SessionView):SessionView {

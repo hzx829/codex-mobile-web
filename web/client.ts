@@ -19,16 +19,20 @@ export class Client {
   private timer:ReturnType<typeof setTimeout>|undefined;
   private pending=new Map<string,{resolve:(v:any)=>void;reject:(e:any)=>void;timer:ReturnType<typeof setTimeout>;receiptTimeout:number;trace?:{action:string;sentAt:number;sentWall:number}}>();
   private previewListeners=new Set<(message:Json)=>void>();
-  private watching:{machineId:string;threadId:string}|null=null;
+  private syncListeners=new Set<(frame:Json)=>void>();
+  private statusListeners=new Set<(online:boolean)=>void>();
+  /** `service`: the app of a thread followed with sync.open (src/shared/sync.ts); Codex when absent. */
+  private watching:{machineId:string;threadId:string;service?:string}|null=null;
   /** `credential`: called when an invite became this device's token, which replaces it from then on. */
   constructor(private token:string,private receive:(m:Json)=>void,private status:(s:string)=>void,private credential:(token:string)=>void=()=>{}){this.connect();}
+  private setStatus(value:string){this.status(value);for(const listener of this.statusListeners)listener(value==='online');}
   private connect() {
-    this.status('connecting');
+    this.setStatus('connecting');
     const ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`);this.ws=ws;
     ws.onopen=()=>{const invite=inviteCode(this.token);ws.send(JSON.stringify(invite?{type:'hello',role:'phone',invite,deviceName:deviceName()}:{type:'hello',role:'phone',token:this.token}));};
     ws.onmessage=e=>{
       let m:Json;try{m=JSON.parse(e.data);}catch{return;}
-      if(m.type==='ready'){if(typeof m.deviceToken==='string'){this.token=m.deviceToken;this.credential(m.deviceToken);}this.ready=true;this.retry=0;this.sendWatch();this.status('online');}
+      if(m.type==='ready'){if(typeof m.deviceToken==='string'){this.token=m.deviceToken;this.credential(m.deviceToken);}this.ready=true;this.retry=0;this.sendWatch();this.setStatus('online');}
       if(m.type==='received'){
         const p=this.pending.get(m.id);if(!p)return;
         clearTimeout(p.timer);
@@ -42,6 +46,8 @@ export class Client {
       }
       if(m.type==='preview.ended'){for(const listener of this.previewListeners)listener(m);return;}
       if(m.type==='live')recordLive(m,typeof e.data==='string'?e.data.length:0,typeof m.service==='string'?m.service:'codex');
+      // Frames of synced threads go to their followers (web/sync/engine.ts), not to the Codex view.
+      if(m.type==='live'&&typeof m.service==='string'){for(const listener of this.syncListeners)listener(m);return;}
       this.receive(m);
     };
     ws.onclose=e=>{
@@ -49,8 +55,8 @@ export class Client {
       for(const listener of this.previewListeners)listener({type:'preview.disconnected'});
       for(const p of this.pending.values()){clearTimeout(p.timer);p.reject({code:'offline',message:'连接断开，正在核实操作结果',uncertain:true});}this.pending.clear();
       if(this.stopped)return;
-      if(e.code===4401){this.status('auth_error');return;}
-      this.status('offline');this.timer=setTimeout(()=>this.connect(),Math.min(15_000,1000*2**this.retry++)+Math.random()*500);
+      if(e.code===4401){this.setStatus('auth_error');return;}
+      this.setStatus('offline');this.timer=setTimeout(()=>this.connect(),Math.min(15_000,1000*2**this.retry++)+Math.random()*500);
     };
   }
   /** A team request the relay answers itself: members, devices, computers and the activity log. */
@@ -78,11 +84,15 @@ export class Client {
     });
   }
   /** Tells the relay which thread is open, so its live frames reach this phone. */
-  watch(target:{machineId:string;threadId:string}|null){
-    if(this.watching?.machineId===target?.machineId&&this.watching?.threadId===target?.threadId)return;
+  watch(target:{machineId:string;threadId:string;service?:string}|null){
+    if(this.watching?.machineId===target?.machineId&&this.watching?.threadId===target?.threadId&&this.watching?.service===target?.service)return;
     this.watching=target;if(this.ready)this.sendWatch();
   }
-  private sendWatch(){try{this.ws?.send(JSON.stringify({type:'watch',machineId:this.watching?.machineId??null,threadId:this.watching?.threadId??null}));}catch{}}
+  /** The thread this page follows, as last set with {@link watch}. */
+  get watched(){return this.watching;}
+  private sendWatch(){try{this.ws?.send(JSON.stringify({type:'watch',machineId:this.watching?.machineId??null,threadId:this.watching?.threadId??null,...this.watching?.service?{service:this.watching.service}:{}}));}catch{}}
+  onSync(listener:(frame:Json)=>void){this.syncListeners.add(listener);return()=>{this.syncListeners.delete(listener);};}
+  onStatus(listener:(online:boolean)=>void){this.statusListeners.add(listener);return()=>{this.statusListeners.delete(listener);};}
   onPreview(listener:(message:Json)=>void){this.previewListeners.add(listener);return()=>{this.previewListeners.delete(listener);};}
   close(){this.stopped=true;clearTimeout(this.timer);this.ws?.close();}
 }

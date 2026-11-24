@@ -9,14 +9,22 @@ export const serviceOf = (action: string): Service => action.startsWith('claude.
 export const CREATE_ACTIONS = new Set(['session.create', 'session.fork', 'claude.create', 'claude.fork', 'antigravity.create']);
 /** Session lists and reads, which the relay marks with each session's owner. */
 export const LIST_ACTIONS = new Set(['sessions.list', 'claude.list', 'antigravity.list']);
-export const READ_ACTIONS = new Set(['session.read', 'claude.read', 'antigravity.read']);
+export const READ_ACTIONS = new Set(['session.read', 'claude.read', 'antigravity.read', 'sync.open']);
 /** Replies whose messages may name their sender; the relay shows each member's current name. */
-export const SENDER_ACTIONS = new Set([...READ_ACTIONS, 'claude.watch', 'antigravity.watch']);
+export const SENDER_ACTIONS = new Set([...READ_ACTIONS, 'claude.watch', 'antigravity.watch', 'sync.page']);
 
-/** Replaces the name the computer recorded with the member's current one, so a renamed member reads the same everywhere. */
+const list = (value: unknown): Json[] => Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
+/** A turn's items, or a message itself. */
+const messagesOf = (entry: Json): Json[] => Array.isArray(entry.items) ? list(entry.items) : [entry];
+/**
+ * Replaces the name the computer recorded with the member's current one, so a renamed member reads the same everywhere.
+ * Reads, watches, synced snapshots and pages (`entries`) and live frames (`entries`, `patches`) all carry messages.
+ */
 export function refreshSenderNames(store: TeamStore, result: Json) {
   const names = new Map<string, string>();
-  const messages: Json[] = [...(Array.isArray(result.messages) ? result.messages : []), ...(Array.isArray(result.turns) ? result.turns.flatMap((turn: Json) => Array.isArray(turn?.items) ? turn.items : []) : [])];
+  const messages: Json[] = [...list(result.messages), ...list(result.turns).flatMap(messagesOf),
+    ...list(result.entries).flatMap(entry => entry.body && typeof entry.body === 'object' ? messagesOf(entry.body) : []),
+    ...list(result.patches).flatMap(patch => list(patch.ops).flatMap(op => op.item && typeof op.item === 'object' ? [op.item] : []))];
   for (const message of messages) {
     const id = message?.sender?.id;
     if (typeof id !== 'string') continue;

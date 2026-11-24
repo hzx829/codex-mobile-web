@@ -22,6 +22,7 @@ import { setWorkspace } from './project.js';
 import { recordClaudeTurn } from './usage-meter.js';
 import { ClaudeVoiceAuth, ClaudeVoiceStreams } from './claude-voice.js';
 import { traced } from './trace.js';
+import { ThreadHub } from './thread-hub.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -58,6 +59,8 @@ control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import
 // A guest's connector runs on a borrowed computer: its private network is the host's, so only localhost is relayed.
 const browserPreview=new BrowserPreview({lan:!guest});
 const bridges:ServiceBridge[]=[];
+// Subscriptions (docs/sync/DESIGN.md): a phone opens a thread with sync.open and gets its changes as numbered live frames.
+const hub=new ThreadHub(frame=>send(frame),()=>Date.now()<traceUntil);
 // Dictation streams through Claude Code's login or the local Antigravity Hub, routed by each stream's provider.
 let renewClaudeLogin=async()=>{};
 const claudeVoiceStreams=new ClaudeVoiceStreams(new ClaudeVoiceAuth(()=>renewClaudeLogin()));
@@ -94,6 +97,7 @@ if(available.includes('claude')){
   renewClaudeLogin=()=>claudeRuntime.renewLogin(guest?.workspace);
   claudeRuntime.on('turn',(session,result,opId)=>recordClaudeTurn(ledger,session.id,session.usageBaseline,result,opId));
   const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,claudeRuntime);
+  hub.register('claude',claudeCode.syncSource);
   // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
   // A guest's profile lives in the guest folder, so clearing the guest data removes that sign-in too.
   claudeCode.artifacts=new ArtifactViewer(guest?guest.root:config.dataDir);
@@ -166,6 +170,8 @@ function connect() {
       // Operations started by this request record the team member the relay names as its sender.
       const {value:result,trace}=await traced(traceOn,()=>requestActor.run(actorOf(m.actor),async()=>m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):await browserPreview.startAddress(m.payload?.url,m.payload?.threadId))
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
+        :m.action==='sync.open'?await hub.open(m.payload&&typeof m.payload==='object'?m.payload:{})
+        :m.action==='sync.page'?await hub.page(m.payload&&typeof m.payload==='object'?m.payload:{})
         :await services.handle({id:String(m.id),action:String(m.action) as BridgeRequest['action'],payload:m.payload&&typeof m.payload==='object'?m.payload:{}})));
       if(socket===ws)send({type:'response',id:m.id,result,...trace?{trace}:{}});
     }
@@ -222,4 +228,4 @@ if(guest&&process.env.BRIDGE_GUEST_CHECK!=='0'){
     void checkClaude(sdkQuery as unknown as ClaudeLoader,guest.workspace).then(result=>report('Claude Code',result));
   }
 }
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();closeVoiceStreams();services.close();socket?.close();control.close();process.exit(0);});
+for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();closeVoiceStreams();hub.close();services.close();socket?.close();control.close();process.exit(0);});

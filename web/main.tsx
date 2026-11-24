@@ -7,7 +7,7 @@ import {ClaudeCodePanel} from './claude-code';
 import {ClaudeProjectEditor,GuestProjectForm} from './claude-projects';
 import {ChatSearch,HomeHeader,ThreadHeader,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
-import {versionGap,versionGapNotice} from './features';
+import {connectorHas,versionGap,versionGapNotice} from './features';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,supportedRoute,withConversation,type Service} from './services';
 import {Icon} from './icons';
 import {IconButton} from './icon-button';
@@ -57,6 +57,7 @@ import './preview.css';
 import './model-picker.css';
 import {SenderRoot,SenderScope} from './senders';
 import {traceOpen} from './trace';
+import type {SyncLink} from './sync/engine';
 
 const FilePreviewPanel=lazy(()=>import('./file-preview').then(module=>({default:module.FilePreviewPanel})));
 const DiffViewer=lazy(()=>import('./diff-viewer').then(module=>({default:module.DiffViewer})));
@@ -264,7 +265,9 @@ function App(){
       if(m.type==='changed'&&m.machineId===current.current.machine&&(!m.threadId||m.threadId===current.current.selected))scheduleRefresh();
       if(m.type==='live'&&current.current.service==='codex'&&m.machineId===current.current.machine&&m.threadId===current.current.selected)receiveLive(m as LiveFrame);
     },setStatus,next=>save('connection',next));client.current=c;
-    return()=>{c.close();clearTimeout(refreshTimer.current);cancelAnimationFrame(liveFrame.current);liveFrame.current=0;liveFrames.current=[];};
+    const stopSync=c.onSync(frame=>{for(const listener of syncBus.current.frames)listener(frame);});
+    const stopStatus=c.onStatus(online=>{for(const listener of syncBus.current.status)listener(online);});
+    return()=>{stopSync();stopStatus();c.close();clearTimeout(refreshTimer.current);cancelAnimationFrame(liveFrame.current);liveFrame.current=0;liveFrames.current=[];};
   },[token]);
   useEffect(()=>client.current?.onPreview(message=>{
     if(message.type==='preview.disconnected'||message.type==='preview.ended'&&message.sessionId===browserState?.sessionId){setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});}
@@ -274,7 +277,27 @@ function App(){
     const next=supportedRoute(route,available);
     if(next!==route)navigate(next,true);
   },[machines,machine,route,available]);
-  useEffect(()=>{client.current?.watch(codexActive&&machine&&selected?{machineId:machine,threadId:selected}:null);},[token,machine,selected,codexActive]);
+  // Other apps' threads set their own watch when they open (web/sync/engine.ts); leaving Codex does not clear it here,
+  // because their effects run before this one.
+  useEffect(()=>{if(codexActive)client.current?.watch(machine&&selected?{machineId:machine,threadId:selected}:null);},[token,machine,selected,codexActive]);
+  // Synced threads (web/sync/engine.ts) reach the client through this bus, which outlives clients, so a panel can start
+  // following before the client below exists.
+  const syncBus=useRef({frames:new Set<(frame:Json)=>void>(),status:new Set<(online:boolean)=>void>()});
+  const syncLink=useMemo<SyncLink|undefined>(()=>machine?{
+    online:()=>Boolean(client.current?.ready),
+    request:(action,payload)=>client.current?client.current.request(action,payload,machine):Promise.reject({code:'offline',message:'尚未连接中继'}),
+    onFrame:listener=>{
+      const forward=(frame:Json)=>{if(frame.machineId===machine)listener(frame);};
+      syncBus.current.frames.add(forward);return()=>{syncBus.current.frames.delete(forward);};
+    },
+    onStatus:listener=>{syncBus.current.status.add(listener);return()=>{syncBus.current.status.delete(listener);};},
+    watch:(target,owner)=>{
+      const link=client.current;if(!link)return;
+      const now=link.watched;
+      if(owner&&(now?.machineId!==machine||now?.threadId!==owner.threadId||now?.service!==owner.service))return;
+      link.watch(target?{machineId:machine,...target}:null);
+    },
+  }:undefined,[machine]);
   useEffect(()=>{setPreferences({machine,values:load(`thread-preferences:${machine}`,{})});setThreadMenu(null);},[machine]);
   useEffect(()=>{
     draftSave.current.flush();
@@ -662,7 +685,7 @@ function App(){
         machine={machine} guest={guest} newCwd={id?null:claudeNewCwd} created={created} forked={forked}
         showDiff={turn=>{if(turn.diff)showPreview({kind:'diff',threadId:`claude:${id}`,turnId:turn.id,text:turn.diff});}} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')} actions={claudeActions}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
-        machineName={machineName} connected={connected} conversationId={id} call={call} go={open}
+        machineName={machineName} connected={connected} conversationId={id} call={call} go={open} sync={connectorHas(activeMachine,'sync.claude')?syncLink:undefined}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         id||creatingAntigravity?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open} newProject={id?null:claudeNewCwd} created={created} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')}

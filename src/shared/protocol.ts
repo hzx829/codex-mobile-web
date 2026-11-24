@@ -26,6 +26,8 @@ export const CONNECTOR_FEATURES = [
   'antigravity.composer',
   /** Antigravity supports queuing messages behind a running turn, steering and sending immediately. */
   'antigravity.queue',
+  /** Claude Code sessions are followed with sync.open and sync.page and pushed as numbered frames (src/shared/sync.ts). */
+  'sync.claude',
 ] as const;
 export type ConnectorFeature = typeof CONNECTOR_FEATURES[number];
 

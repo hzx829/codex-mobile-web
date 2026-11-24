@@ -533,3 +533,42 @@ test('what a released session’s own process saves as it exits does not look li
     await removeTestTemp(root);
   }
 });
+
+test('a Claude Code session is followed through the subscription hub, built once per revision', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-sync-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, transcript(cwd));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const bridge = new ClaudeCodeBridge(undefined, join(root, 'config'));
+    const {ThreadHub} = await import('../src/connector/thread-hub.js');
+    const frames: any[] = [];
+    const hub = new ThreadHub(frame => {frames.push(frame);});
+    hub.register('claude', bridge.syncSource);
+    try {
+      const first = await bridge.syncSource.state(sid), second = await bridge.syncSource.state(sid);
+      assert.equal(first.entries[0], second.entries[0], 'The same revision gives the same turn objects.');
+      assert.equal('revision' in first.head, false, 'The head leaves out the revision, which changes with every write.');
+      const snapshot = await hub.open({service: 'claude', threadId: sid});
+      assert.equal(snapshot.order.length, 3);
+      assert.equal(snapshot.head.title, '修复登录 bug');
+      const read = await bridge.handle('claude.read', {conversationId: sid});
+      assert.deepEqual(read.turns.map((turn: any) => turn.id), snapshot.order, 'The old read and the subscription agree.');
+      // A new turn written to the transcript reaches followers as one entry.
+      const more = transcript(cwd).split('\n').filter(Boolean).slice(0, 1).map(line => {const entry = JSON.parse(line);return JSON.stringify({...entry, uuid: '00000000-0000-4000-8000-000000000099', parentUuid: '00000000-0000-4000-8000-000000000013', message: {role: 'user', content: '再来一次'}});});
+      await writeFile(file, transcript(cwd) + more.join('\n') + '\n');
+      await utimes(file, old, new Date(Date.now() - 50_000));
+      await new Promise(resolve => setTimeout(resolve, 600));
+      assert.equal(frames.length, 1);
+      assert.equal(frames[0].seq, snapshot.seq + 1);
+      assert.deepEqual(frames[0].entries?.map((entry: any) => entry.body.items[0].text), ['再来一次']);
+    } finally {hub.close();bridge.close();}
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});

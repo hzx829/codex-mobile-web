@@ -9,12 +9,14 @@ import { MAX_FRAME, bridgeServices, textRequired, type Json, type Machine } from
 import { machineIdPattern, type ConnectorToken } from '../shared/config.js';
 import { PreviewTunnel } from './preview-tunnel.js';
 import { connectorReport } from '../shared/protocol.js';
+import { isSyncService } from '../shared/sync.js';
 import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 import { TeamError, type TeamStore } from './team/store.js';
 import { CREATE_ACTIONS, LIST_ACTIONS, MUTATION_ACTIONS, READ_ACTIONS, SENDER_ACTIONS, SEND_ACTIONS, createdThread, handleTeam, publicUser, refreshSenderNames, serviceOf, threadOf, type Member } from './team/actions.js';
 
 /** `member`: the signed-in person on a phone once the relay has a team; absent with the shared Token. */
-type Peer={role:'phone'|'connector';machine?:Machine;alive:boolean;watch?:{machineId:string;threadId:string};member?:Member};
+/** `watch.service`: the app of the open thread; Codex when absent (pages before sync.open). */
+type Peer={role:'phone'|'connector';machine?:Machine;alive:boolean;watch?:{machineId:string;threadId:string;service?:string};member?:Member};
 /** `tracedAt`: when a request the phone asked to time (web/trace.ts) went to the computer. */
 type Route={phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;threadId?:string;timer:NodeJS.Timeout;machineId:string;payload:Json;member?:Member;tracedAt?:number};
 // Text frames compress well; file bytes and preview traffic are already dense or large.
@@ -88,7 +90,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
   /** Records who did what, who started a session, and marks lists and reads with owners. Message text is not kept. */
   function teamRecord(r:Route,message:Json){
     const member=r.member;if(!team||!member)return;
-    const service=serviceOf(r.action),result=message.error?undefined:message.result;
+    const service=r.action.startsWith('sync.')&&isSyncService(r.payload.service)?r.payload.service:serviceOf(r.action),result=message.error?undefined:message.result;
     try{
       if(MUTATION_ACTIONS.has(r.action)){
         const state=message.error?(message.error.uncertain?'uncertain':'failed'):typeof result?.state==='string'?result.state:'accepted';
@@ -173,7 +175,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         const peer:Peer={role:m.role,machine,alive:true,member};
         peers.set(ws,peer);clearTimeout(authTimer);
         // `features` lets connectors push live frames only through a relay that forwards them.
-        send(ws,{type:'ready',machines:machines(m.role==='phone'?peer:undefined),features:team?['live','team']:['live'],
+        send(ws,{type:'ready',machines:machines(m.role==='phone'?peer:undefined),features:team?['live','sync','team']:['live','sync'],
           ...member?{user:publicUser(member.user),device:{id:member.device.id,name:member.device.name}}:{},...deviceToken?{deviceToken}:{}});
         publish();return;
       }
@@ -195,13 +197,15 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       }
       if(p.role==='phone'&&m.type==='watch') {
         // The phone's open thread; live frames for other threads are not sent to it.
-        p.watch=typeof m.machineId==='string'&&typeof m.threadId==='string'&&m.threadId&&allowed(p,m.machineId)?{machineId:m.machineId,threadId:m.threadId}:undefined;
+        p.watch=typeof m.machineId==='string'&&typeof m.threadId==='string'&&m.threadId&&allowed(p,m.machineId)?{machineId:m.machineId,threadId:m.threadId,...isSyncService(m.service)?{service:m.service}:{}}:undefined;
         return;
       }
       if(p.role==='phone'&&m.type==='request') {
         if(typeof m.id!=='string'||m.id.length>100||typeof m.action!=='string'||!m.payload||typeof m.payload!=='object'){ws.close(4400);return;}
         if(!allowed(p,m.machineId)){send(ws,{type:'response',id:m.id,error:{code:'forbidden',message:'你没有使用这台电脑的权限'}});return;}
         if(m.action==='session.read'&&m.payload.watch===true&&!m.payload.cursor&&typeof m.payload.threadId==='string'&&typeof m.machineId==='string')p.watch={machineId:m.machineId,threadId:m.payload.threadId};
+        // Opening a thread follows it at once, so frames sent while the computer answers already reach this phone.
+        if(m.action==='sync.open'&&typeof m.payload.threadId==='string'&&isSyncService(m.payload.service)&&typeof m.machineId==='string')p.watch={machineId:m.machineId,threadId:m.payload.threadId,service:m.payload.service};
         if(m.action==='voice.transcribe'||m.action.endsWith('file.uploadChunk')||(m.action==='turn.send'||m.action==='claude.send'||m.action==='claude.create'||m.action==='antigravity.send'||m.action==='antigravity.create')&&(m.payload.images?.length||m.payload.files?.length))send(ws,{type:'received',id:m.id});
         if(m.action==='preview.start'||m.action==='preview.stop')try{
           m.payload.threadId=textRequired(m.payload.threadId,'会话');
@@ -225,7 +229,9 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       } else if(p.role==='connector'&&typeof m.type==='string'&&m.type.startsWith('proxy.')) {
         preview.handle(ws,m);
       } else if(p.role==='connector'&&m.type==='live'&&typeof m.threadId==='string') {
-        for(const [phone,q]of peers)if(q.role==='phone'&&q.watch?.machineId===p.machine?.id&&q.watch?.threadId===m.threadId&&allowed(q,p.machine?.id))send(phone,{...m,machineId:p.machine?.id});
+        const service=isSyncService(m.service)?m.service:undefined;
+        if(team&&service)try{refreshSenderNames(team,m);}catch{}
+        for(const [phone,q]of peers)if(q.role==='phone'&&q.watch?.machineId===p.machine?.id&&q.watch?.threadId===m.threadId&&q.watch?.service===service&&allowed(q,p.machine?.id))send(phone,{...m,machineId:p.machine?.id});
       } else if(p.role==='connector'&&m.type==='usage'&&Array.isArray(m.events)&&p.machine) {
         // Finished turns from the computer; the relay confirms each one it stored so the computer can forget it.
         if(!team)return;

@@ -265,7 +265,7 @@ test('a disconnected pending preview only cleans up its own session, leaving the
 test('live frames reach only the phone watching that thread, and phone frames are compressed',async()=>{
   const token='test-token-not-a-real-secret-123456789';const relay=createRelay(token);relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');
   const url=`ws://127.0.0.1:${(relay.server.address() as any).port}/ws`;
-  async function peer(role:string){const ws=new WebSocket(url);await once(ws,'open');const ready=waitFrame(ws,m=>m.type==='ready');ws.send(JSON.stringify({type:'hello',role,token,machineId:'pc',name:'PC'}));assert.deepEqual((await ready).features,['live']);return ws;}
+  async function peer(role:string){const ws=new WebSocket(url);await once(ws,'open');const ready=waitFrame(ws,m=>m.type==='ready');ws.send(JSON.stringify({type:'hello',role,token,machineId:'pc',name:'PC'}));assert.deepEqual((await ready).features,['live','sync']);return ws;}
   try{
     const connector=await peer('connector');
     connector.on('message',raw=>{const m=JSON.parse(raw.toString());if(m.type==='request')connector.send(JSON.stringify({type:'response',id:m.id,result:{id:m.payload.threadId,text:'x'.repeat(50_000)}}));});
@@ -308,4 +308,30 @@ test('a traced request carries the relay round trip and the computer timing; oth
     assert.equal(plain.result.traced,false);
     assert.equal(plain.trace,undefined);
   }finally{phone.close();connector.close();await relay.close();}
+});
+
+test('synced frames reach only phones following that app’s thread; Codex frames keep their own watchers', async () => {
+  const token='sync-fixture-token-for-relay-tests';
+  const relay=createRelay(token,undefined,0);
+  relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');
+  const url=`ws://127.0.0.1:${(relay.server.address() as any).port}/ws`;
+  const join=async(fields:object)=>{const socket=new WebSocket(url);await once(socket,'open');const ready=waitFrame(socket,frame=>frame.type==='ready');socket.send(JSON.stringify({type:'hello',token,...fields}));const value=await ready;return {socket,ready:value};};
+  const {socket:connector}=await join({role:'connector',machineId:'pc',name:'pc'});
+  const {socket:claudePhone,ready}=await join({role:'phone'}),{socket:codexPhone}=await join({role:'phone'});
+  assert.ok(ready.features.includes('sync'));
+  connector.on('message',raw=>{const m=JSON.parse(raw.toString());if(m.type==='request')connector.send(JSON.stringify({type:'response',id:m.id,result:{epoch:'e',seq:0,head:{},order:[],entries:[],hasMore:false}}));});
+  const received=(socket:WebSocket)=>{const list:any[]=[];socket.on('message',raw=>{const m=JSON.parse(raw.toString());if(m.type==='live')list.push(m);});return list;};
+  const claudeFrames=received(claudePhone),codexFrames=received(codexPhone);
+  try{
+    const opened=waitFrame(claudePhone,frame=>frame.type==='response'&&frame.id==='o');
+    claudePhone.send(JSON.stringify({type:'request',id:'o',machineId:'pc',action:'sync.open',payload:{service:'claude',threadId:'same'}}));
+    await opened;
+    codexPhone.send(JSON.stringify({type:'watch',machineId:'pc',threadId:'same'}));
+    await new Promise(resolve=>setTimeout(resolve,50));
+    connector.send(JSON.stringify({type:'live',service:'claude',threadId:'same',epoch:'e',seq:1}));
+    connector.send(JSON.stringify({type:'live',threadId:'same',generation:'g',turnId:'t'}));
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.deepEqual(claudeFrames.map(frame=>[frame.service,frame.seq,frame.machineId]),[['claude',1,'pc']]);
+    assert.deepEqual(codexFrames.map(frame=>[frame.service,frame.turnId]),[[undefined,'t']]);
+  }finally{claudePhone.close();codexPhone.close();connector.close();await relay.close();}
 });

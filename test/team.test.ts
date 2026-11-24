@@ -102,7 +102,7 @@ test('without members the shared Token still signs in phones',async()=>{
   try{
     const phone=await relay.hello({role:'phone',token:MAIN});
     assert.ok(phone.ready);assert.equal(phone.ready.user,undefined);
-    assert.deepEqual(phone.ready.features,['live','team']);
+    assert.deepEqual(phone.ready.features,['live','sync','team']);
   }finally{await relay.close();store.close();await removeTestTemp(dir);}
 });
 
@@ -190,4 +190,18 @@ test('invite links and codes are recognised wherever they are pasted',()=>{
   assert.equal(inviteCode('dev_token'),null);
   assert.equal(deviceName('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1'),'iPhone Safari');
   assert.equal(deviceName('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36 Edg/120.0'),'Windows Edge');
+});
+
+test('senders in synced snapshots, pages and frames carry the member’s current name', async () => {
+  const {refreshSenderNames}=await import('../src/server/team/actions.js');
+  const store={user:(id:string)=>id==='u'?{name:'Current'}:undefined} as any;
+  const sender={id:'u',name:'Old'};
+  const value={
+    entries:[{id:'t',rev:'r',body:{id:'t',items:[{id:'1',text:'hi',sender:{...sender}}]}},{id:'m',rev:'r',body:{id:'m',text:'hi',sender:{...sender}}}],
+    patches:[{id:'t',rev:'r',ops:[{i:'2',item:{id:'2',text:'yo',sender:{...sender}}},{i:'1',o:0,t:'x'}],fields:{}}],
+  };
+  refreshSenderNames(store,value);
+  assert.equal(value.entries[0].body.items![0].sender.name,'Current');
+  assert.equal(value.entries[1].body.sender!.name,'Current');
+  assert.equal((value.patches[0].ops[0] as any).item.sender.name,'Current');
 });

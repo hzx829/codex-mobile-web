@@ -1,5 +1,6 @@
 import {readdir, readFile, stat} from 'node:fs/promises';
 import {step, stepSync} from './trace.js';
+import type {ThreadSource} from './thread-hub.js';
 import {createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
@@ -32,6 +33,7 @@ const MAX_TURNS = 60;
 const MAX_EARLIER = 100;
 /** Which turns a read returns: the latest ones, back to the turn `from` when the phone already shows it, plus `earlier` before that. */
 type ReadWindow = {from?: string; earlier?: number};
+type Revision = Awaited<ReturnType<ClaudeCodeBridge['revision']>>;
 function readWindow(p: Json): ReadWindow {
   const from = p.from === undefined || p.from === null || p.from === '' ? undefined : textRequired(p.from, '起始轮次', 100);
   const earlier = p.earlier === undefined || p.earlier === null ? 0 : Number(p.earlier);
@@ -115,6 +117,8 @@ export class ClaudeCodeBridge {
   private sending = new Set<string>();
   /** Bumped when a session's queue changes, so watching phones see it without a transcript write. */
   private queueVersions = new Map<string, number>();
+  private queueListeners: ((id: string) => void)[] = [];
+  private states = new Map<string, {revision: string; value: Promise<{head: Json; turns: TurnView[]}>}>();
   private queueTimer: NodeJS.Timeout;
   private closed = false;
   /**
@@ -148,7 +152,7 @@ export class ClaudeCodeBridge {
   close() {this.closed = true;clearInterval(this.queueTimer);this.runtime.close();this.artifacts?.close();}
 
   private drainSoon(id: string) {if (!this.closed) this.drain(id).catch(() => {});}
-  private queueChanged(id: string) {this.queueVersions.set(id, (this.queueVersions.get(id) || 0) + 1);}
+  private queueChanged(id: string) {this.queueVersions.set(id, (this.queueVersions.get(id) || 0) + 1);for (const listener of this.queueListeners) listener(id);}
 
   /**
    * Sends the first queued message once the session's turn has ended, one per turn, as Codex does. A message that
@@ -340,6 +344,35 @@ export class ClaudeCodeBridge {
       } finally {this.watchers--;}
       if (known === current.revision) return {unchanged: true};
     }
+    const {head, turns} = await this.state(id, current);
+    const recent = [];
+    let budget = MAX_FRAME - 1024 * 1024;
+    const anchor = window.from ? turns.findIndex(turn => turn.id === window.from) : -1;
+    const start = Math.max(0, Math.min(turns.length - MAX_TURNS, anchor < 0 ? Infinity : anchor) - (window.earlier || 0));
+    for (const turn of turns.slice(start).reverse()) {
+      budget -= Buffer.byteLength(JSON.stringify(turn)) + 1;
+      if (budget < 0) break;
+      recent.push(turn);
+    }
+    if (turns.length && !recent.length) throw new BridgeError('too_large', 'Claude Code 最新一轮过长，请在电脑上查看');
+    return {...head, revision: current.revision, turns: recent.reverse(), truncated: recent.length < turns.length};
+  }
+
+  /**
+   * Everything the phone sees of a session, with all its turns. Built again only when the session's revision moved, so
+   * reads and subscriptions at the same revision share it, and its turns are the same objects (src/connector/thread-hub.ts).
+   */
+  private state(id: string, current: Revision): Promise<{head: Json; turns: TurnView[]}> {
+    const cached = this.states.get(id);
+    if (cached?.revision === current.revision) return cached.value;
+    const value = this.build(id, current);
+    this.states.delete(id);this.states.set(id, {revision: current.revision, value});
+    if (this.states.size > 8) this.states.delete(this.states.keys().next().value!);
+    value.catch(() => {if (this.states.get(id)?.value === value) this.states.delete(id);});
+    return value;
+  }
+
+  private async build(id: string, current: Revision): Promise<{head: Json; turns: TurnView[]}> {
     const live = this.runtime.get(id);
     const sessions = await this.sessions();
     // Right after a session starts its transcript can exist before the SDK can describe it; a live session just shows no messages yet.
@@ -376,18 +409,8 @@ export class ClaudeCodeBridge {
     const usedTokens = usage ? ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens'].reduce((sum, key) => sum + (Number(usage[key]) || 0), 0) : 0;
     const contextUsage = usedTokens ? {usedTokens, windowTokens: live ? await this.runtime.contextWindow(live) : null} : null;
     const settings = sessionSettings(live, raw);
-    const recent = [];
-    let budget = MAX_FRAME - 1024 * 1024;
-    const anchor = window.from ? turns.findIndex(turn => turn.id === window.from) : -1;
-    const start = Math.max(0, Math.min(turns.length - MAX_TURNS, anchor < 0 ? Infinity : anchor) - (window.earlier || 0));
-    for (const turn of turns.slice(start).reverse()) {
-      budget -= Buffer.byteLength(JSON.stringify(turn)) + 1;
-      if (budget < 0) break;
-      recent.push(turn);
-    }
-    if (turns.length && !recent.length) throw new BridgeError('too_large', 'Claude Code 最新一轮过长，请在电脑上查看');
-    return {
-      id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: settings.model, effort: settings.effort, revision: current.revision, running,
+    const head = {
+      id, title: info ? title(info) : '新会话', cwd: info?.cwd || live?.cwd || '', model: settings.model, effort: settings.effort, running,
       controlled: Boolean(live), external, permissionMode: settings.permissionMode,
       // 'busy' or 'waiting' as the process holding it reports; 'recent' when only recent transcript writes suggest it.
       externalStatus: external ? current.peer?.status || 'recent' : '', ...(current.peer?.waitingFor ? {waitingFor: current.peer.waitingFor} : {}),
@@ -397,13 +420,24 @@ export class ClaudeCodeBridge {
       queuedMessages: (this.queue?.queued(id) || []).map(message => ({id: message.id, text: message.payload.text || '',
         imageCount: message.payload.images?.length || 0, imageBytes: (message.payload.images || []).reduce((sum: number, url: string) => sum + imageBytes(url), 0),
         state: message.state, error: message.error})),
-      turns: recent.reverse(), truncated: recent.length < turns.length, contextUsage, suggestion,
+      contextUsage, suggestion,
       notice: !external ? current.holder ? heldNotice(holderName(current.holder.entrypoint)) : ''
         : current.peer?.status === 'waiting' ? `电脑上的 Claude Code 正在等待电脑上的操作${current.peer.waitingFor ? `（${current.peer.waitingFor}）` : ''}。`
         : current.peer && this.queue ? `${holderName(current.peer.entrypoint)}正在运行这条会话。手机发送的消息会排队，等那边这一轮结束后发送；${holderName(current.peer.entrypoint)}不会显示这些消息。`
         : '电脑上的 Claude Code 可能正在运行这条会话。确认那边已结束后，才能在手机上继续。',
     };
+    return {head, turns};
   }
+
+  /** What the subscription hub (src/connector/thread-hub.ts) follows: a session's turns, pushed as they change. */
+  readonly syncSource: ThreadSource = {
+    version: async id => (await this.revision(id)).revision,
+    state: async id => {const {head, turns} = await this.state(id, await this.revision(id));return {head, entries: turns};},
+    watch: poke => {
+      this.runtime.on('change', (id: string) => {if (id) poke(id);});
+      this.queueListeners.push(poke);
+    },
+  };
 
   /** Pages the transcript leaves unnamed take the name of a snapshot already saved on this computer. */
   private async nameSavedPages(turns: TurnView[]) {
