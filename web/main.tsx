@@ -59,6 +59,7 @@ import {SenderRoot,SenderScope} from './senders';
 import {traceOpen} from './trace';
 import type {SyncLink} from './sync/engine';
 import {blobSession,blobUrl,setBlobUploadTarget} from './blob';
+import {BlobImage,withUploadedImages} from './blob-image';
 import type {FileStreamSource} from './file-preview';
 
 const FilePreviewPanel=lazy(()=>import('./file-preview').then(module=>({default:module.FilePreviewPanel})));
@@ -151,7 +152,8 @@ function App(){
   current.current={machine,selected,project,newChat,searchQuery,archived,service,connected};
   const machineName=activeMachine?computerName(activeMachine):'电脑';
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
-  const call=(action:RequestAction,payload:Json={},target=machine)=>client.current!.request(action,payload,target);
+  // Images to send go up through the data channel first when the computer takes them (web/blob-image.tsx).
+  const call=async(action:RequestAction,payload:Json={},target=machine)=>client.current!.request(action,await withUploadedImages(action,payload,target),target);
   const stillHere=()=>current.current.service==='codex'&&current.current.machine===machine&&current.current.selected===selected;
   // The claude.ai page a Claude Code conversation has open is remembered with it, as is closing the pane.
   const notePage=(url:string)=>{if(service==='claude'&&remoteConversation)rememberPage(machine,remoteConversation,url);};
@@ -500,7 +502,8 @@ function App(){
   // Uploads to the open computer go through the data channel when the relay and its connector both take them.
   useEffect(()=>{
     const link=client.current;
-    setBlobUploadTarget(link&&status==='online'&&link.relayFeatures.includes('blob')&&connectorHas(activeMachine,'blob.upload')?{machine,token:link.signInToken}:null);
+    setBlobUploadTarget(link&&status==='online'&&link.relayFeatures.includes('blob')&&connectorHas(activeMachine,'blob.upload')
+      ?{machine,token:link.signInToken,images:link.relayFeatures.includes('blob.image')&&connectorHas(activeMachine,'blob.image')}:null);
   },[status,machine,activeMachine]);
   /** A file through the relay's data channel, when both the relay and that computer's connector have it (web/blob.ts). */
   function fileStream(ownerMachine:string,threadId:string,file:FilePreview):FileStreamSource|undefined{
@@ -647,7 +650,7 @@ function App(){
          {target.kind==='site'&&<PageViewer src={target.url} address={target.url} widthKey={previewWidthKey(target.machineId,target.threadId)} onEnd={()=>closePreviewTab(id)} endLabel="关闭"/>}
          {target.kind==='artifact'&&<ArtifactPanel url={target.url} fresh={target.fresh} active={id===previewState.activeId} connected={connected&&target.machineId===machine} call={(action,payload)=>call(action,payload,target.machineId)}
            onTitle={title=>setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.id===id&&tab.target.kind==='artifact'?{...tab,target:{...tab.target,title}}:tab)}))}/>}
-         {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
+         {target.kind==='image'&&<div className="image-viewer"><BlobImage className="preview-image" src={target.url} alt={target.title}/></div>}
        </div>)}
      </PreviewPane>;
   const computerOptions=<><div className="connection-status"><i className={connected?'dot online':'dot'}/>{connected?'已连接':status==='online'?'等待电脑上线':'正在连接中继…'}</div>{machines.map(m=>{const gap=versionGap(m);return <MenuItem icon="computer" key={m.id} disabled={busy} onClick={()=>changeMachine(m.id)}>{computerName(m)}{gap&&<span className="menu-detail">{gap==='page'?'请刷新网页':'需更新'}</span>}{m.id===machine&&<Icon name="check" size={18}/>}</MenuItem>;})}{!machines.length&&<p className="muted">请在电脑启动连接器。</p>}{activeMachine&&versionGap(activeMachine)&&<p className="muted">{versionGapNotice[versionGap(activeMachine)!]}</p>}<p className="muted">{location.origin}</p></>;

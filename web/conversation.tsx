@@ -8,6 +8,7 @@ import type {OptimisticMessage} from './optimistic';
 import {diffSummary} from './diff-summary';
 import {SenderLabel} from './senders';
 import {usePacedText} from './text-reveal';
+import {BlobImage} from './blob-image';
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 /** How a turn ended, when not by completing. A turn under way is not labelled: its activity summary and running step say so. */
 const endLabel:Record<string,string>={interrupted:'已停止',failed:'失败'};
@@ -16,7 +17,7 @@ const activityLabel:Record<string,string>={commandExecution:'运行命令',fileC
 /** A sent message, shown until the conversation contains it. */
 export function PendingMessage({message,openFile,openPreview,onFollowup}:{message:OptimisticMessage;openFile:(path:string)=>void;openPreview:(url:string)=>void;onFollowup:(text:string)=>void}){
   return <section className="turn pending-turn"><div className="user-entry">
-    <article className="message user">{message.text&&<SafeMarkdown text={message.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>}{message.images.map((url,i)=><img className="attachment" key={i} src={url} alt="附图" decoding="async"/>)}{message.fileNames.length>0&&<p className="pending-files"><Icon name="file" size={14}/>{message.fileNames.join('、')}</p>}</article>
+    <article className="message user">{message.text&&<SafeMarkdown text={message.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>}{message.images.map((url,i)=><BlobImage className="attachment" key={i} src={url} alt="附图" decoding="async"/>)}{message.fileNames.length>0&&<p className="pending-files"><Icon name="file" size={14}/>{message.fileNames.join('、')}</p>}</article>
     <div className="pending-status" role="status">{message.state==='uncertain'?'结果待核实':'正在发送…'}</div>
   </div></section>;
 }
@@ -44,7 +45,7 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
       const text=item.role==='assistant'&&item===lastReply&&turn.status==='inProgress'
         ?<PacedMarkdown text={item.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>
         :<SafeMarkdown text={item.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>;
-      const body=<>{text}{item.images?.map((url,i)=><img className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}</>;
+      const body=<>{text}{item.images?.map((url,i)=><BlobImage className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}</>;
       return item.role==='user'?<UserMessage key={item.id} sender={item.sender} text={item.text} editReason={editReason} disabled={disabled} blocked={onBlocked} copy={()=>onCopy(item.text)} resend={text=>onEdit(turn.id,item.id,text)}>{body}</UserMessage>:<article className={`message ${item.role}`} key={item.id}>{body}</article>;
     }))}
     {turn.plan&&<PlanCard steps={turn.plan} running={turn.status==='inProgress'}/>}

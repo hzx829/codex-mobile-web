@@ -195,7 +195,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         const peer:Peer={role:m.role,machine,alive:true,member};
         peers.set(ws,peer);clearTimeout(authTimer);
         // `features` lets connectors push live frames only through a relay that forwards them.
-        send(ws,{type:'ready',machines:machines(m.role==='phone'?peer:undefined),features:team?['live','sync','blob','team']:['live','sync','blob'],
+        send(ws,{type:'ready',machines:machines(m.role==='phone'?peer:undefined),features:team?['live','sync','blob','blob.image','team']:['live','sync','blob','blob.image'],
           ...member?{user:publicUser(member.user),device:{id:member.device.id,name:member.device.name}}:{},...deviceToken?{deviceToken}:{}});
         publish();return;
       }

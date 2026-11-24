@@ -1,5 +1,6 @@
 import {createHash, randomUUID} from 'node:crypto';
 import {BridgeError, MAX_FRAME, textRequired, type Json} from '../shared/types.js';
+import {withImageRefs, type BlobStore} from './blob-store.js';
 import {isSyncService, type SyncEntry, type SyncFrame, type SyncPage, type SyncPatch, type SyncService, type SyncSnapshot} from '../shared/sync.js';
 
 /**
@@ -66,6 +67,25 @@ export class ThreadHub {
   /** `send` pushes a frame to the relay and throws when it cannot; `timed` adds when the change arrived (web/trace.ts). */
   constructor(private send: (frame: SyncFrame) => void, private timed: () => boolean = () => false, private now = Date.now) {}
 
+  /**
+   * Where images go when the relay can serve them (src/connector/blob-store.ts): entries then carry references instead of
+   * data URLs. Each entry object is changed once, so an unchanged entry keeps its rev.
+   */
+  images: BlobStore | null = null;
+  private withRefs = new WeakMap<object, Json>();
+  private shaped(state: ThreadState): ThreadState {
+    const store = this.images;
+    if (!store) return state;
+    let changed = false;
+    const entries = state.entries.map(entry => {
+      let next = this.withRefs.get(entry);
+      if (!next) {next = withImageRefs(store, entry);this.withRefs.set(entry, next);}
+      if (next !== entry) changed = true;
+      return next;
+    });
+    return changed ? {...state, entries} : state;
+  }
+
   register(service: SyncService, source: ThreadSource) {this.sources.set(service, source);source.watch?.(id => this.poke(service, id));}
   get services() {return [...this.sources.keys()];}
 
@@ -91,7 +111,7 @@ export class ThreadHub {
     if (!isSyncService(service) || !this.sources.has(service)) throw new BridgeError('unsupported', '这个应用暂不支持同步');
     const id = textRequired(payload.threadId, '会话', 200), before = textRequired(payload.before, '历史位置', 200);
     const limit = Math.min(100, Math.max(1, Math.floor(Number(payload.limit) || PAGE)));
-    const all = (await this.sources.get(service)!.state(id)).entries, end = all.findIndex(entry => entry.id === before);
+    const all = this.shaped(await this.sources.get(service)!.state(id)).entries, end = all.findIndex(entry => entry.id === before);
     if (end < 0) throw new BridgeError('changed', '历史位置已变化，请重新打开会话');
     const start = Math.max(0, end - limit), {order, entries} = this.fill(all.slice(start, end), {}, 0);
     return {order, entries, hasMore: end > order.length};
@@ -169,7 +189,7 @@ export class ThreadHub {
           thread.again = false;thread.lastRun = this.now();
           const source = this.source(thread.service), version = await source.version(thread.id);
           if (version === thread.version && thread.state) continue;
-          const state = await source.state(thread.id);
+          const state = this.shaped(await source.state(thread.id));
           thread.version = version;
           this.push(thread, state);
         } while (thread.again);

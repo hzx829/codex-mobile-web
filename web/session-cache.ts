@@ -57,8 +57,10 @@ export function rememberList(key:string,list:Json[]){touch(lists,key,list,STORED
 export function cachedProjects(machine:string){return projects.get(machine)||[];}
 export function rememberProjects(machine:string,list:string[]){if(!machine)return;touch(projects,machine,list,STORED_LISTS);schedule();}
 
-/** A Claude Code turn without its images, which are data URLs and can be megabytes each; a refresh brings them back. */
-const withoutImages=(turn:TurnView)=>turn.items.some(item=>item.images?.length)?{...turn,items:turn.items.map(item=>item.images?.length?{...item,images:[]}:item)}:turn;
+/** Images given as data URLs can be megabytes each and are not stored; a refresh brings them back. References stay. */
+const inline=(url:string)=>url.startsWith('data:');
+const hasInline=(turn:TurnView)=>turn.items.some(item=>item.images?.some(inline));
+const withoutImages=(turn:TurnView)=>hasInline(turn)?{...turn,items:turn.items.map(item=>item.images?.some(inline)?{...item,images:item.images.filter(url=>!inline(url))}:item)}:turn;
 /** What goes to IndexedDB: the latest turns or messages, without live state. */
 export function stored(key:string,view:Json):Json {
   const kind=parse(key).kind;
@@ -79,8 +81,8 @@ function storedCodex(view:SessionView):SessionView {
   return {...view,requests:[],queuedMessages:[],running:false,retry:undefined,
     // A turn without its images must not claim its revision, or the connector would not resend it.
     turns:view.turns.slice(-STORED_TURNS).map(turn=>{
-      if(!turn.items.some(item=>item.images?.length))return turn;
-      const {revision:_,...rest}=turn;return {...rest,items:turn.items.map(item=>item.images?.length?{...item,images:[]}:item)};
+      if(!hasInline(turn))return turn;
+      const {revision:_,...rest}=withoutImages(turn);return rest;
     }),
     hasMore:view.hasMore||view.turns.length>STORED_TURNS,nextCursor:view.turns.length>STORED_TURNS?{before:view.turns.at(-STORED_TURNS)!.id}:view.nextCursor};
 }

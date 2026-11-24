@@ -38,7 +38,7 @@ export type BlobHost = {
   pull(machineId: string, message: Json): boolean;
 };
 
-type Waiting = {response: ServerResponse; session: string; timer: NodeJS.Timeout; download: boolean};
+type Waiting = {response: ServerResponse; session: string; timer: NodeJS.Timeout; download: boolean; immutable: boolean};
 type Upload = {request: IncomingMessage; response: ServerResponse; machineId: string; length: number; timer: NodeJS.Timeout; started: boolean};
 
 export class BlobChannel {
@@ -56,6 +56,14 @@ export class BlobChannel {
     if (file && req.method === 'GET') {this.request(req, res, decodeURIComponent(file[1]), url);return true;}
     const feed = /^\/blob-feed\/([a-f0-9]{64})$/.exec(url.pathname);
     if (feed && req.method === 'POST') {void this.feed(req, res, feed[1]);return true;}
+    // Images by content: the address names the bytes, so a browser keeps them for good.
+    const image = /^\/blob\/([\w-]{1,80})\/image(?:\/([a-f0-9]{64}))?$/.exec(url.pathname);
+    if (image && image[2] && req.method === 'GET') {this.request(req, res, decodeURIComponent(image[1]), new URL(`/?action=blob.image&sha=${image[2]}`, url));return true;}
+    if (image && !image[2] && req.method === 'PUT') {
+      const mime = String(req.headers['content-type'] || '').split(';')[0].trim();
+      if (!/^image\/(png|jpeg|webp|gif)$/.test(mime)) {res.writeHead(415);res.end();return true;}
+      this.upload(req, res, decodeURIComponent(image[1]), new URL(`/?action=blob.image.put&mime=${encodeURIComponent(mime)}`, url));return true;
+    }
     const upload = /^\/blob\/([\w-]{1,80})\/upload$/.exec(url.pathname);
     if (upload && req.method === 'PUT') {this.upload(req, res, decodeURIComponent(upload[1]), url);return true;}
     const sink = /^\/blob-sink\/([a-f0-9]{64})$/.exec(url.pathname);
@@ -114,7 +122,7 @@ export class BlobChannel {
     if (!this.host.pull(machineId, {type: 'blob.pull', stream, action, payload, ...asked ? {range: asked} : {}})) {res.writeHead(503);res.end();return;}
     this.open.set(sessionId, (this.open.get(sessionId) || 0) + 1);
     const timer = setTimeout(() => {if (this.waiting.delete(stream)) {res.writeHead(504);res.end();}}, FEED_WAIT_MS);
-    this.waiting.set(stream, {response: res, session: sessionId, timer, download: url.searchParams.get('download') === '1'});
+    this.waiting.set(stream, {response: res, session: sessionId, timer, download: url.searchParams.get('download') === '1', immutable: action === 'blob.image'});
     res.on('close', () => {
       const left = (this.open.get(sessionId) || 1) - 1;if (left) this.open.set(sessionId, left);else this.open.delete(sessionId);
       const waiting = this.waiting.get(stream);if (waiting?.response === res) {clearTimeout(waiting.timer);this.waiting.delete(stream);}
@@ -176,7 +184,7 @@ export class BlobChannel {
       // A file is never this site's page: no scripts, no frames, saved rather than run.
       'Content-Security-Policy': "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'",
       'X-Content-Type-Options': 'nosniff',
-      'Cache-Control': 'private, no-store',
+      'Cache-Control': waiting.immutable ? 'private, max-age=31536000, immutable' : 'private, no-store',
       ...inline ? {} : {'Content-Disposition': `attachment; filename*=UTF-8''${name}`},
     });
     try {await pipeline(req, phone);res.writeHead(204);res.end();}

@@ -24,6 +24,7 @@ import { ClaudeVoiceAuth, ClaudeVoiceStreams } from './claude-voice.js';
 import { traced } from './trace.js';
 import { ThreadHub } from './thread-hub.js';
 import { BLOB_ACTIONS, BLOB_UPLOADS, receiveBlob, sendBlob } from './blob.js';
+import { BlobStore } from './blob-store.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -62,6 +63,8 @@ const browserPreview=new BrowserPreview({lan:!guest});
 const bridges:ServiceBridge[]=[];
 // Subscriptions (docs/sync/DESIGN.md): a phone opens a thread with sync.open and gets its changes as numbered live frames.
 const hub=new ThreadHub(frame=>send(frame),()=>Date.now()<traceUntil);
+// Images by content for synced messages and for images a phone uploads to send (src/connector/blob-store.ts).
+const images=new BlobStore(join(config.dataDir,'images'));
 // Dictation streams through Claude Code's login or the local Antigravity Hub, routed by each stream's provider.
 let renewClaudeLogin=async()=>{};
 const claudeVoiceStreams=new ClaudeVoiceStreams(new ClaudeVoiceAuth(()=>renewClaudeLogin()));
@@ -153,7 +156,9 @@ function connect() {
   ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname(),services:available,protocol:PROTOCOL_VERSION,features:CONNECTOR_FEATURES,...guest?{guest:true}:{}}));
   ws.on('message',async data=>{
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
-    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');usageRelay=Array.isArray(m.features)&&m.features.includes('team');usageSending=false;console.log('电脑已连接中继');flushUsage();return;}
+    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');
+      // Synced messages refer to images only through a relay that serves them.
+      hub.images=Array.isArray(m.features)&&m.features.includes('blob.image')?images:null;usageRelay=Array.isArray(m.features)&&m.features.includes('team');usageSending=false;console.log('电脑已连接中继');flushUsage();return;}
     if(!ready)return;
     if(m.type==='usage.ack'){if(Array.isArray(m.ids))ledger.ackUsage(m.ids);usageSending=false;flushUsage();return;}
     if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
@@ -162,14 +167,22 @@ function connect() {
     if(m.type==='blob.pull'){
       if(typeof m.stream!=='string'||!BLOB_ACTIONS.has(m.action))return;
       const payload=m.payload&&typeof m.payload==='object'?{...m.payload,stream:true,range:m.range}:{stream:true,range:m.range};
-      void sendBlob(config.relayUrl,m.stream,()=>services.handle({id:m.stream,action:m.action,payload}));
+      void sendBlob(config.relayUrl,m.stream,()=>m.action==='blob.image'?images.open(payload.sha):services.handle({id:m.stream,action:m.action,payload}));
       return;
     }
     // An upload part through the data channel: the same chunk action, its bytes streamed instead of base64.
     if(m.type==='blob.push'){
       if(typeof m.stream!=='string'||!BLOB_UPLOADS.has(m.action)||!Number.isSafeInteger(m.length))return;
       const stream=m.stream,payload=m.payload&&typeof m.payload==='object'?m.payload:{};
-      void receiveBlob(config.relayUrl,stream,m.length,body=>services.handle({id:stream,action:m.action,payload:{...payload,offset:Number(payload.offset),body}}))
+      void receiveBlob(config.relayUrl,stream,m.length,async body=>{
+        // An image to send: kept by content, referred to in the message that follows.
+        if(m.action==='blob.image.put'){
+          const parts:Buffer[]=[];for await(const chunk of body.stream)parts.push(chunk);
+          const bytes=Buffer.concat(parts);if(bytes.length!==body.length)throw new BridgeError('incomplete','图片上传中断，请重试');
+          return {ref:'cmw-image:'+images.put(bytes,String(payload.mime))};
+        }
+        return services.handle({id:stream,action:m.action,payload:{...payload,offset:Number(payload.offset),body}});
+      })
         .then(outcome=>{if(socket===ws)try{send({type:'blob.done',stream,...outcome});}catch{}});
       return;
     }
@@ -184,6 +197,9 @@ function connect() {
     const traceOn=m.trace===true;if(traceOn)traceUntil=Date.now()+TRACE_LIVE_MS;
     // Only the data channel above opens files for streaming; a phone cannot ask for it.
     if(m.payload&&typeof m.payload==='object'){delete m.payload.stream;delete m.payload.range;}
+    // Images uploaded beforehand arrive as references; the runtimes and the ledger get the data URLs as before.
+    if(m.payload&&typeof m.payload==='object'&&m.payload.images!==undefined)try{m.payload.images=await images.resolve(m.payload.images);}
+      catch(e){if(socket===ws)send({type:'response',id:m.id,error:{code:(e as BridgeError).code||'invalid',message:(e as Error).message}});return;}
     const started=performance.now();
     try{
       // Operations started by this request record the team member the relay names as its sender.

@@ -102,7 +102,7 @@ test('without members the shared Token still signs in phones',async()=>{
   try{
     const phone=await relay.hello({role:'phone',token:MAIN});
     assert.ok(phone.ready);assert.equal(phone.ready.user,undefined);
-    assert.deepEqual(phone.ready.features,['live','sync','blob','team']);
+    assert.deepEqual(phone.ready.features,['live','sync','blob','blob.image','team']);
   }finally{await relay.close();store.close();await removeTestTemp(dir);}
 });
 

@@ -26,8 +26,11 @@ export function blobUrl(machine:string,action:string,payload:Json,download=false
   return `/blob/${encodeURIComponent(machine)}/file?${query}`;
 }
 
-/** The computer uploads go to through the data channel, and the token that signs in; null while either side lacks it. */
-export type BlobUploadTarget={machine:string;token:string};
+/**
+ * The computer uploads go to through the data channel, and the token that signs in; null while either side lacks it.
+ * `images`: it also keeps images by content (web/blob-image.tsx).
+ */
+export type BlobUploadTarget={machine:string;token:string;images?:boolean};
 let uploadTarget:BlobUploadTarget|null=null;
 export function setBlobUploadTarget(target:BlobUploadTarget|null){uploadTarget=target;}
 export function blobUploadTarget(){return uploadTarget;}

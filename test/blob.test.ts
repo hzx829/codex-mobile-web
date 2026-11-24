@@ -142,3 +142,40 @@ test('upload parts reach the computer as streams, in order, from this site only'
     connector.close();await relay.close();ledger.close();await removeTestTemp(root);
   }
 });
+
+test('images go both ways by content: kept for good when read, stored when sent', async () => {
+  const {receiveBlob} = await import('../src/connector/blob.js');
+  const {BlobStore} = await import('../src/connector/blob-store.js');
+  const root = await mkdtemp(join(tmpdir(), 'cmw-blob-img-'));
+  const token = 'blob-image-fixture-token-for-tests';
+  const relay = createRelay(token, undefined, 0), store = new BlobStore(root);
+  relay.server.listen(0, '127.0.0.1');await once(relay.server, 'listening');
+  const base = `http://127.0.0.1:${(relay.server.address() as any).port}`;
+  const connector = new WebSocket(base.replace('http', 'ws') + '/ws'), opened = once(connector, 'open');
+  try {
+    await opened;
+    connector.send(JSON.stringify({type: 'hello', role: 'connector', token, machineId: 'pc', name: 'pc'}));
+    connector.on('message', raw => {
+      const m = JSON.parse(raw.toString());
+      // What the connector does with images (src/connector/main.ts).
+      if (m.type === 'blob.pull' && m.action === 'blob.image') void sendBlob(base, m.stream, () => store.open(m.payload.sha));
+      if (m.type === 'blob.push' && m.action === 'blob.image.put') void receiveBlob(base, m.stream, m.length, async body => {
+        const parts: Buffer[] = [];for await (const chunk of body.stream) parts.push(chunk);
+        return {ref: 'cmw-image:' + store.put(Buffer.concat(parts), m.payload.mime)};
+      }).then(outcome => connector.send(JSON.stringify({type: 'blob.done', stream: m.stream, ...outcome})));
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const cookie = (await fetch(`${base}/blob/session`, {method: 'POST', headers: {Authorization: `Bearer ${token}`}})).headers.get('set-cookie')!.split(';')[0];
+    const bytes = Buffer.from('89504e470d0a1a0a' + 'ab'.repeat(500), 'hex');
+    const sent = await fetch(`${base}/blob/pc/image`, {method: 'PUT', body: new Uint8Array(bytes), headers: {cookie, 'Content-Type': 'image/png'}});
+    const {result} = await sent.json();
+    assert.match(result.ref, /^cmw-image:[a-f0-9]{64}$/);
+    assert.equal((await fetch(`${base}/blob/pc/image`, {method: 'PUT', body: 'x', headers: {cookie, 'Content-Type': 'text/html'}})).status, 415);
+    const read = await fetch(`${base}/blob/pc/image/${result.ref.slice('cmw-image:'.length)}`, {headers: {cookie}});
+    assert.equal(read.status, 200);
+    assert.equal(read.headers.get('content-type'), 'image/png');
+    assert.equal(read.headers.get('cache-control'), 'private, max-age=31536000, immutable');
+    assert.ok(Buffer.from(await read.arrayBuffer()).equals(bytes));
+    assert.equal((await fetch(`${base}/blob/pc/image/${'f'.repeat(64)}`, {headers: {cookie}})).status, 404);
+  } finally {connector.close();await relay.close();await removeTestTemp(root);}
+});
