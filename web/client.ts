@@ -1,5 +1,6 @@
 import type { Json, RequestAction } from '../src/shared/types';
 import { VOICE_REQUEST_TIMEOUT_MS } from '../src/shared/voice';
+import {recordLive,recordRequest,tracing} from './trace';
 export function uuid(){return typeof crypto.randomUUID==='function'?crypto.randomUUID():'10000000-1000-4000-8000-100000000000'.replace(/[018]/g,c=>(Number(c)^crypto.getRandomValues(new Uint8Array(1))[0]&15>>Number(c)/4).toString(16));}
 export const operationId=()=>`${Date.now()}:${uuid()}`;
 /** A one-time team invite, from a pasted link or code; the relay swaps it for this device's own token. */
@@ -16,7 +17,7 @@ export class Client {
   private stopped=false;
   private retry=0;
   private timer:ReturnType<typeof setTimeout>|undefined;
-  private pending=new Map<string,{resolve:(v:any)=>void;reject:(e:any)=>void;timer:ReturnType<typeof setTimeout>;receiptTimeout:number}>();
+  private pending=new Map<string,{resolve:(v:any)=>void;reject:(e:any)=>void;timer:ReturnType<typeof setTimeout>;receiptTimeout:number;trace?:{action:string;sentAt:number;sentWall:number}}>();
   private previewListeners=new Set<(message:Json)=>void>();
   private watching:{machineId:string;threadId:string}|null=null;
   /** `credential`: called when an invite became this device's token, which replaces it from then on. */
@@ -36,9 +37,11 @@ export class Client {
       }
       if(m.type==='response') {
         const p=this.pending.get(m.id);if(!p)return;clearTimeout(p.timer);this.pending.delete(m.id);
+        if(p.trace)recordRequest(p.trace.action,p.trace.sentAt,performance.now(),p.trace.sentWall,typeof e.data==='string'?e.data.length:0,m.trace);
         if(m.error)p.reject(m.error);else p.resolve(m.result);return;
       }
       if(m.type==='preview.ended'){for(const listener of this.previewListeners)listener(m);return;}
+      if(m.type==='live')recordLive(m,typeof e.data==='string'?e.data.length:0,typeof m.service==='string'?m.service:'codex');
       this.receive(m);
     };
     ws.onclose=e=>{
@@ -67,8 +70,10 @@ export class Client {
       // Attachments can spend much of the ordinary 45 seconds on a slow uplink.
       const timeout=action==='voice.transcribe'||action.endsWith('file.uploadChunk')||(action==='turn.send'||action==='claude.send'||action==='claude.create'||action==='antigravity.send'||action==='antigravity.create')&&(payload.images?.length||payload.files?.length)?240_000:45_000;
       const id=uuid();const timer=setTimeout(()=>{this.pending.delete(id);reject({code:'timeout',message:'回执超时，请核实操作结果',uncertain:true});},timeout);
-      this.pending.set(id,{resolve,reject,timer,receiptTimeout:action==='voice.transcribe'?VOICE_REQUEST_TIMEOUT_MS+5000:45_000});
-      try{this.ws!.send(JSON.stringify({type:'request',id,machineId,action,payload}));}
+      // Traced requests (web/trace.ts) ask the relay and the connector to report their share of the time.
+      const trace=tracing()?{action,sentAt:performance.now(),sentWall:Date.now()}:undefined;
+      this.pending.set(id,{resolve,reject,timer,receiptTimeout:action==='voice.transcribe'?VOICE_REQUEST_TIMEOUT_MS+5000:45_000,trace});
+      try{this.ws!.send(JSON.stringify({type:'request',id,machineId,action,payload,...trace?{trace:true}:{}}));}
       catch(e){clearTimeout(timer);this.pending.delete(id);reject(e);}
     });
   }

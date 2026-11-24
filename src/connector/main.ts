@@ -21,6 +21,7 @@ import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './
 import { setWorkspace } from './project.js';
 import { recordClaudeTurn } from './usage-meter.js';
 import { ClaudeVoiceAuth, ClaudeVoiceStreams } from './claude-voice.js';
+import { traced } from './trace.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -158,14 +159,18 @@ function connect() {
     });
     // Audio is taken in the order it arrives, before anything else can interleave.
     if(typeof m.action==='string'&&m.action.startsWith('voice.stream.')){void respond(handleVoiceStream(m.action,m.payload&&typeof m.payload==='object'?m.payload:{}));return;}
+    // A traced request (web/trace.ts) reports how long it took here; live frames carry timings for a while after one.
+    const traceOn=m.trace===true;if(traceOn)traceUntil=Date.now()+TRACE_LIVE_MS;
+    const started=performance.now();
     try{
       // Operations started by this request record the team member the relay names as its sender.
-      const result=await requestActor.run(actorOf(m.actor),async()=>m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):await browserPreview.startAddress(m.payload?.url,m.payload?.threadId))
+      const {value:result,trace}=await traced(traceOn,()=>requestActor.run(actorOf(m.actor),async()=>m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):await browserPreview.startAddress(m.payload?.url,m.payload?.threadId))
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
-        :await services.handle({id:String(m.id),action:String(m.action) as BridgeRequest['action'],payload:m.payload&&typeof m.payload==='object'?m.payload:{}}));
-      if(socket===ws)send({type:'response',id:m.id,result});
+        :await services.handle({id:String(m.id),action:String(m.action) as BridgeRequest['action'],payload:m.payload&&typeof m.payload==='object'?m.payload:{}})));
+      if(socket===ws)send({type:'response',id:m.id,result,...trace?{trace}:{}});
     }
-    catch(e){const err=e instanceof BridgeError?e:new BridgeError('computer_error','电脑处理失败，请查看本机状态');if(socket===ws)send({type:'response',id:m.id,error:{code:err.code,message:err.message,uncertain:err.uncertain}});}
+    catch(e){const err=e instanceof BridgeError?e:new BridgeError('computer_error','电脑处理失败，请查看本机状态');if(socket===ws)send({type:'response',id:m.id,error:{code:err.code,message:err.message,uncertain:err.uncertain},
+      ...traceOn?{trace:{handleMs:Math.round((performance.now()-started)*10)/10,now:Date.now(),steps:{}}}:{}});}
   });
   ws.on('error',()=>{});
   ws.on('close',code=>{
@@ -185,12 +190,15 @@ const CHANGE_DELAY=60;
 // Running-turn content is pushed at most once per window; changes within it are merged into one frame.
 // The first change after a quiet window goes out at once, so a reply's first words are not held back.
 const LIVE_DELAY=40;
-const liveIds=new Set<string>();let liveTimer:NodeJS.Timeout|undefined,liveSentAt=0;
+// After a traced request, live frames say when their first change arrived (`at`, this clock) and how long it waited (`queuedMs`).
+const TRACE_LIVE_MS=5*60_000;let traceUntil=0;
+const liveIds=new Map<string,number>();let liveTimer:NodeJS.Timeout|undefined,liveSentAt=0;
 function scheduleLive(id:string){
-  liveIds.add(id);if(liveTimer)return;
+  if(!liveIds.has(id))liveIds.set(id,Date.now());if(liveTimer)return;
   liveTimer=setTimeout(()=>{
     liveTimer=undefined;liveSentAt=Date.now();const ids=[...liveIds];liveIds.clear();
-    for(const threadId of ids){try{const frame=control.liveFrame(threadId);if(frame)send({type:'live',...frame});}catch{}}
+    const timed=Date.now()<traceUntil;
+    for(const [threadId,at] of ids){try{const frame=control.liveFrame(threadId);if(frame)send({type:'live',...frame,...timed?{at,queuedMs:Date.now()-at}:{}});}catch{}}
   },Math.max(0,LIVE_DELAY-(Date.now()-liveSentAt)));
 }
 control.on('stream',(id:string)=>scheduleLive(id));

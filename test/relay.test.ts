@@ -287,3 +287,25 @@ test('live frames reach only the phone watching that thread, and phone frames ar
     assert.deepEqual(seen,['b'],'Leaving the thread stops its frames.');
   }finally{await relay.close();}
 });
+
+test('a traced request carries the relay round trip and the computer timing; others carry none', async () => {
+  const token='trace-fixture-token-for-relay-tests';
+  const relay=createRelay(token,undefined,0);
+  relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');
+  const url=`ws://127.0.0.1:${(relay.server.address() as any).port}/ws`;
+  const join=async(fields:object)=>{const socket=new WebSocket(url);await once(socket,'open');const ready=waitFrame(socket,frame=>frame.type==='ready');socket.send(JSON.stringify({type:'hello',token,...fields}));await ready;return socket;};
+  const connector=await join({role:'connector',machineId:'pc',name:'pc'}),phone=await join({role:'phone'});
+  // The connector answers every request with a timing of its own, asked for or not.
+  connector.on('message',raw=>{const m=JSON.parse(raw.toString());if(m.type==='request')connector.send(JSON.stringify({type:'response',id:m.id,result:{traced:m.trace===true},trace:{handleMs:3,now:Date.now(),steps:{read:2}}}));});
+  try{
+    const ask=async(id:string,trace:boolean)=>{const answer=waitFrame(phone,frame=>frame.type==='response'&&frame.id===id);phone.send(JSON.stringify({type:'request',id,machineId:'pc',action:'info',payload:{},...trace?{trace:true}:{}}));return answer;};
+    const timed=await ask('a',true);
+    assert.equal(timed.result.traced,true,'The connector is asked to time it.');
+    assert.equal(timed.trace.handleMs,3);
+    assert.deepEqual(timed.trace.steps,{read:2});
+    assert.ok(timed.trace.relayMs>=0);
+    const plain=await ask('b',false);
+    assert.equal(plain.result.traced,false);
+    assert.equal(plain.trace,undefined);
+  }finally{phone.close();connector.close();await relay.close();}
+});

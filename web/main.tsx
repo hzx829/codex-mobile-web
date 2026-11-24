@@ -56,6 +56,7 @@ import './preview.css';
 // The model and permission pickers share these styles; imported here so the components stay importable in tests.
 import './model-picker.css';
 import {SenderRoot,SenderScope} from './senders';
+import {traceOpen} from './trace';
 
 const FilePreviewPanel=lazy(()=>import('./file-preview').then(module=>({default:module.FilePreviewPanel})));
 const DiffViewer=lazy(()=>import('./diff-viewer').then(module=>({default:module.DiffViewer})));
@@ -282,13 +283,19 @@ function App(){
     setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
     // Show the last known content at once; it stays marked as cached until the read below lands.
     const cached=selected?cachedView(`${machine}:${selected}`):null;
+    if(selected)traceOpen('codex',`${machine}:${selected}`,'start');
     sequence.current++;setView(cached);setLoading(Boolean(selected)&&!cached);olderRequest.current=null;setLoadingOlder(false);setHistoryError('');setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;lastScrollTop.current=0;
     setServiceTier(undefined);
     // A message that is still being sent keeps its place when a new chat turns into its thread.
     const sending=optimisticRef.current?.key===scope;setOptimistic(old=>old?.key===scope?old:null);
     setDraft(sending?'':load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
   },[machine,selected,newChat]);
-  useEffect(()=>{if(view&&view.id===selected&&!(view as CachedView).cached)rememberView(`${machine}:${selected}`,view);},[view]);
+  useEffect(()=>{
+    if(!view||view.id!==selected)return;
+    const cachedShown=Boolean((view as CachedView).cached);
+    traceOpen('codex',`${machine}:${selected}`,cachedShown?'cached':'fresh');
+    if(!cachedShown)rememberView(`${machine}:${selected}`,view);
+  },[view]);
   useEffect(()=>{
     if(!optimistic?.acceptedAt)return;
     if(optimistic.key===scope&&optimisticDelivered(optimistic,view)){setOptimistic(null);return;}

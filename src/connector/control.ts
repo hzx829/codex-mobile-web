@@ -22,6 +22,7 @@ import {revertThread} from './revert.js';
 import {fastTier} from '../shared/models.js';
 import {transcribeVoice} from './voice.js';
 import {sessionSnapshot} from './session-snapshot.js';
+import {step,stepSync} from './trace.js';
 
 /** A phone keeps a thread watched by reading it; the poll renews well within this. */
 const WATCH_MS=30_000;
@@ -198,10 +199,10 @@ export class Control extends EventEmitter {
     if(req.action==='session.read') {
       const cursor:TurnCursor|undefined=p.cursor==null?undefined:{before:textRequired(p.cursor.before,'历史位置',200)};
       if(cursor&&p.cursor.native!=null)cursor.native=textRequired(p.cursor.native,'历史游标',4000);
-      const view=await this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(1,Math.floor(Number(p.limit)||20))),cursor);
+      const view=await step('read',()=>this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(1,Math.floor(Number(p.limit)||20))),cursor));
       if(!cursor&&p.watch===true){this.watch(view.id);this.liveDiff.prime(view.id,this.generation,view.turns.at(-1));}
       markCodexSenders(view.turns,this.ledger.senders('codex',view.id));
-      return sessionSnapshot(view,cursor?undefined:p.known);
+      return stepSync('snapshot',()=>sessionSnapshot(view,cursor?undefined:p.known));
     }
     if(req.action==='session.status') {
       const session=await this.read(textRequired(p.threadId,'会话'),5);

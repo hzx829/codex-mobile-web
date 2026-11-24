@@ -1,4 +1,5 @@
 import {readdir, readFile, stat} from 'node:fs/promises';
+import {step, stepSync} from './trace.js';
 import {createHash} from 'node:crypto';
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
@@ -326,7 +327,7 @@ export class ClaudeCodeBridge {
   }
 
   private async read(id: string, known?: string, window: ReadWindow = {}): Promise<Json> {
-    let current = await this.revision(id);
+    let current = await step('revision', () => this.revision(id));
     if (known && known === current.revision) {
       if (this.watchers >= 32) throw new BridgeError('busy', '观察请求较多，请稍后重试');
       this.watchers++;
@@ -344,18 +345,19 @@ export class ClaudeCodeBridge {
     // Right after a session starts its transcript can exist before the SDK can describe it; a live session just shows no messages yet.
     if (live && guestWorkspace()) await projectDirectory(live.cwd);
     const readMessages = () => sessions.getSessionMessages(id, {includeSystemMessages: true});
-    const [info, messages] = !current.exists ? [undefined, []] :
+    const [info, messages] = await step('messages', async () => !current.exists ? [undefined, []] :
       guestWorkspace() && !live ? [await this.info(id), await readMessages()] :
-      await Promise.all([live ? sessions.getSessionInfo(id) : this.info(id), readMessages()]);
+      await Promise.all([live ? sessions.getSessionInfo(id) : this.info(id), readMessages()]));
     // A session this connector runs reports its real state; others are judged by recent transcript writes.
     const external = !live && current.external;
     const running = live ? live.running : external;
     // Edits keep their diffs only in the raw transcript; read it alongside the SDK's messages.
-    const raw = current.exists ? await this.raw(id) : '';
+    const raw = current.exists ? await step('raw', () => this.raw(id)) : '';
     // The SDK starts at the latest compaction; the transcript still holds what came before, which the phone can scroll back to.
-    const {all, earlier} = this.withEarlier(id, messages, raw);
+    const {all, earlier} = stepSync('earlier', () => this.withEarlier(id, messages, raw));
     const before = new Set(all.slice(0, earlier).map(entry => entry.uuid));
-    const turns = claudeTurns(all, running, claudePatches(raw, info?.cwd || live?.cwd || ''), claudeArtifactTitles(raw), uuid => entryTimestamp(raw, uuid));
+    const patches = stepSync('patches', () => claudePatches(raw, info?.cwd || live?.cwd || '')), titles = stepSync('titles', () => claudeArtifactTitles(raw));
+    const turns = stepSync('turns', () => claudeTurns(all, running, patches, titles, uuid => entryTimestamp(raw, uuid)));
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
     const records = this.ledger?.senders('claude', id) || [];
     // Edits and forks resume from the SDK's branch, which starts at the latest compaction.

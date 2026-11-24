@@ -28,6 +28,7 @@ import {SenderScope} from './senders';
 import {useTurnNotice,watchWhileHidden} from './turn-notify';
 import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
 import {cachedView,rememberView,threadKey} from './session-cache';
+import {traceOpen} from './trace';
 
 type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;guest?:boolean;
@@ -102,8 +103,13 @@ export function ClaudeCodePanel(props:Props){
     catch(e){failed(e);}
     finally{if(alive.current)setBusy(false);}
   });
+  useEffect(()=>{if(!creating)traceOpen('claude',cacheKey,'start');},[]);
   useEffect(()=>{void refresh();},[connected,conversationId,refresh]);
-  useEffect(()=>{if(view&&!view.cached&&!creating)rememberView(cacheKey,view);},[view]);
+  useEffect(()=>{
+    if(!view||creating)return;
+    traceOpen('claude',cacheKey,view.cached?'cached':'fresh');
+    if(!view.cached)rememberView(cacheKey,view);
+  },[view]);
   const cached=Boolean(view?.cached);
   useEffect(()=>{
     if(!creating||!connected)return;

@@ -1,6 +1,7 @@
 import {fileAttachment,UPLOAD_CHUNK_BYTES,type FileAttachment} from '../src/shared/attachments';
 import type {Json,RequestAction} from '../src/shared/types';
 import type {DraftFileAttachment} from './attachments';
+import {recordTransfer} from './trace';
 
 type Call=(action:RequestAction,payload:Json)=>Promise<any>;
 export type UploadProgress={name:string;index:number;count:number;loaded:number;size:number};
@@ -13,8 +14,9 @@ export async function uploadAttachments(call:Call,target:string|UploadTarget,fil
     const ref=refs[index],file=draft.file;
     if(!file)continue; // Withdrawn queue entries already refer to complete uploads.
     if(file.size!==ref.size||file.name!==ref.name)throw Error('文件已变化，请重新选择');
+    const startedAt=performance.now();
     const started=await call(`${prefix}file.uploadStart` as RequestAction,{...scope,...ref});
-    let offset=started.offset;
+    let offset=started.offset;const resumedAt=offset;
     if(started.id!==ref.id||!Number.isSafeInteger(offset)||offset<0||offset>file.size)throw Error('上传位置无效，请重试');
     progress?.({name:ref.name,index:index+1,count:files.length,loaded:offset,size:file.size});
     while(offset<file.size){
@@ -26,6 +28,7 @@ export async function uploadAttachments(call:Call,target:string|UploadTarget,fil
       offset=result.offset;
       progress?.({name:ref.name,index:index+1,count:files.length,loaded:offset,size:file.size});
     }
+    if(file.size>resumedAt)recordTransfer('upload',file.size-resumedAt,performance.now()-startedAt);
   }
   return refs;
 }

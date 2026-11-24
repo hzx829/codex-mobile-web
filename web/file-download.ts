@@ -1,8 +1,9 @@
 import {FILE_CHUNK_SIZE, MAX_DOWNLOAD_SIZE, type FilePreview, type FileChunk} from '../src/shared/types';
+import {recordTransfer} from './trace';
 
 export async function receiveFile(file:FilePreview,read:(offset:number)=>Promise<FileChunk>,signal:AbortSignal,progress:(bytes:number)=>void=()=>{}) {
   if(!Number.isSafeInteger(file.size)||file.size<0||file.size>MAX_DOWNLOAD_SIZE)throw new Error('下载上限为 100 MiB，请在电脑获取此文件');
-  const parts:ArrayBuffer[]=[];let offset=0;
+  const parts:ArrayBuffer[]=[];let offset=0;const started=performance.now();
   do {
     signal.throwIfAborted();
     let cancel=()=>{};
@@ -19,6 +20,7 @@ export async function receiveFile(file:FilePreview,read:(offset:number)=>Promise
     parts.push(bytes.buffer);offset+=bytes.length;progress(offset);
   }while(offset<file.size);
   signal.throwIfAborted();
+  if(file.size)recordTransfer('download',file.size,performance.now()-started);
   // Download as a file even for HTML/SVG; never run active content as a same-origin page.
   return new Blob(parts,{type:'application/octet-stream'});
 }

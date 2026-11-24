@@ -9,6 +9,7 @@ import {SheetPanel} from './sheet';
 import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {cachedView,rememberView,threadKey} from './session-cache';
+import {traceOpen} from './trace';
 import {MAX_ATTACHMENTS} from '../src/shared/attachments';
 import {MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import {AntigravityMessages,antigravityIssueText} from './antigravity-messages';
@@ -114,7 +115,12 @@ export function AntigravityPanel(props:Props){
   const cacheKey=threadKey('antigravity',machine,conversationId);
   const [view,setView]=useState<Json|null>(()=>creating?null:cachedView<Json>(cacheKey));
   const cached=Boolean(view?.cached);
-  useEffect(()=>{if(view&&!view.cached&&!creating)rememberView(cacheKey,view);},[view]);
+  useEffect(()=>{if(!creating)traceOpen('antigravity',cacheKey,'start');},[]);
+  useEffect(()=>{
+    if(!view||creating)return;
+    traceOpen('antigravity',cacheKey,view.cached?'cached':'fresh');
+    if(!view.cached)rememberView(cacheKey,view);
+  },[view]);
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[submitting,setSubmitting]=useState(false);
   const [draft,setDraft]=useState(()=>saved(`${key}:draft`)),[pending,setPending]=useState(()=>saved(`${key}:pending`));
   const [watchError,setWatchError]=useState('');

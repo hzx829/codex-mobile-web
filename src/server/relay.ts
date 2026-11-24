@@ -15,7 +15,8 @@ import { CREATE_ACTIONS, LIST_ACTIONS, MUTATION_ACTIONS, READ_ACTIONS, SENDER_AC
 
 /** `member`: the signed-in person on a phone once the relay has a team; absent with the shared Token. */
 type Peer={role:'phone'|'connector';machine?:Machine;alive:boolean;watch?:{machineId:string;threadId:string};member?:Member};
-type Route={phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;threadId?:string;timer:NodeJS.Timeout;machineId:string;payload:Json;member?:Member};
+/** `tracedAt`: when a request the phone asked to time (web/trace.ts) went to the computer. */
+type Route={phone:WebSocket;connector:WebSocket;id:string;action:string;sessionId?:string;threadId?:string;timer:NodeJS.Timeout;machineId:string;payload:Json;member?:Member;tracedAt?:number};
 // Text frames compress well; file bytes and preview traffic are already dense or large.
 const COMPRESS_LIMIT=2*1024*1024;
 const DENSE_ACTIONS=new Set(['file.download','file.uploadChunk','claude.file.uploadChunk','antigravity.file.uploadChunk','voice.transcribe','voice.stream.audio']);
@@ -120,6 +121,9 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
     }
     if(r.action==='preview.stop'&&!message.error&&message.result?.stopped===true&&r.sessionId&&r.threadId)preview.stopForThread(r.sessionId,r.threadId,r.connector);
     teamRecord(r,message);
+    // A traced request's answer says how long it took from here to the computer and back.
+    if(r.tracedAt!==undefined)message={...message,trace:{...message.trace&&typeof message.trace==='object'?message.trace:{},relayMs:performance.now()-r.tracedAt}};
+    else if(message.trace!==undefined){const {trace:_,...rest}=message;message=rest;}
     send(r.phone,{...message,id:r.id,type:'response'},DENSE_ACTIONS.has(r.action));
   }
   wss.on('connection',ws=>{
@@ -209,10 +213,11 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         const routeId=randomUUID();
         const voice=m.action==='voice.transcribe';
         const timer=setTimeout(()=>finish(routeId,{error:{code:'timeout',message:voice?'语音识别超时，请重试':'电脑回执超时，请核实操作结果',uncertain:!voice}}),voice?VOICE_REQUEST_TIMEOUT_MS:40_000);
-        routes.set(routeId,{phone:ws,connector,id:m.id,action:m.action,sessionId:m.payload.sessionId,threadId:m.payload.threadId,timer,machineId:m.machineId,payload:m.payload,member:p.member});
+        const traced=m.trace===true;
+        routes.set(routeId,{phone:ws,connector,id:m.id,action:m.action,sessionId:m.payload.sessionId,threadId:m.payload.threadId,timer,machineId:m.machineId,payload:m.payload,member:p.member,...traced?{tracedAt:performance.now()}:{}});
         // The relay alone says who sent a request; anything the phone claims is replaced.
         const actor=p.member?{userId:p.member.user.id,deviceId:p.member.device.id,name:p.member.user.name}:undefined;
-        send(connector,{type:'request',id:routeId,action:m.action,payload:m.payload,...actor?{actor}:{}},DENSE_ACTIONS.has(m.action));
+        send(connector,{type:'request',id:routeId,action:m.action,payload:m.payload,...actor?{actor}:{},...traced?{trace:true}:{}},DENSE_ACTIONS.has(m.action));
       } else if(p.role==='connector'&&m.type==='response') {
         if(routes.get(m.id)?.connector===ws)finish(m.id,m);
       } else if(p.role==='connector'&&m.type==='preview.ended') {
