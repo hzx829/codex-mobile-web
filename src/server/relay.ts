@@ -244,6 +244,8 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         send(connector,{type:'request',id:routeId,action:m.action,payload:m.payload,...actor?{actor}:{},...traced?{trace:true}:{}},DENSE_ACTIONS.has(m.action));
       } else if(p.role==='connector'&&m.type==='response') {
         if(routes.get(m.id)?.connector===ws)finish(m.id,m);
+      } else if(p.role==='connector'&&m.type==='blob.done'&&p.machine) {
+        blob.done(p.machine.id,m);
       } else if(p.role==='connector'&&m.type==='preview.ended') {
         preview.stopForThread(m.sessionId,m.threadId,ws);
       } else if(p.role==='connector'&&typeof m.type==='string'&&m.type.startsWith('proxy.')) {

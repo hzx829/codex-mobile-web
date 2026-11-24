@@ -58,7 +58,7 @@ import './model-picker.css';
 import {SenderRoot,SenderScope} from './senders';
 import {traceOpen} from './trace';
 import type {SyncLink} from './sync/engine';
-import {blobSession,blobUrl} from './blob';
+import {blobSession,blobUrl,setBlobUploadTarget} from './blob';
 import type {FileStreamSource} from './file-preview';
 
 const FilePreviewPanel=lazy(()=>import('./file-preview').then(module=>({default:module.FilePreviewPanel})));
@@ -497,6 +497,11 @@ function App(){
     const request=fileAction(action,threadId,payload);
     return request?call(request.action,request.payload,ownerMachine):Promise.reject(new Error('这个应用暂不支持读取文件'));
   }
+  // Uploads to the open computer go through the data channel when the relay and its connector both take them.
+  useEffect(()=>{
+    const link=client.current;
+    setBlobUploadTarget(link&&status==='online'&&link.relayFeatures.includes('blob')&&connectorHas(activeMachine,'blob.upload')?{machine,token:link.signInToken}:null);
+  },[status,machine,activeMachine]);
   /** A file through the relay's data channel, when both the relay and that computer's connector have it (web/blob.ts). */
   function fileStream(ownerMachine:string,threadId:string,file:FilePreview):FileStreamSource|undefined{
     const link=client.current,request=fileAction('download',threadId,{path:file.path,revision:file.revision});

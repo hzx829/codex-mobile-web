@@ -93,3 +93,52 @@ test('files reach a signed-in phone as plain HTTP downloads, with ranges, errors
     connector.close();await relay.close();await removeTestTemp(root);
   }
 });
+
+test('upload parts reach the computer as streams, in order, from this site only', async () => {
+  const {receiveBlob} = await import('../src/connector/blob.js');
+  const {startUpload, appendUpload} = await import('../src/connector/attachments.js');
+  const {Ledger} = await import('../src/connector/ledger.js');
+  const {randomUUID} = await import('node:crypto');
+  const {readFile} = await import('node:fs/promises');
+  const root = await mkdtemp(join(tmpdir(), 'cmw-blob-up-'));
+  const token = 'blob-upload-fixture-token-for-tests';
+  const relay = createRelay(token, undefined, 0), ledger = new Ledger(':memory:');
+  relay.server.listen(0, '127.0.0.1');await once(relay.server, 'listening');
+  const base = `http://127.0.0.1:${(relay.server.address() as any).port}`;
+  const connector = new WebSocket(base.replace('http', 'ws') + '/ws'), opened = once(connector, 'open');
+  try {
+    await opened;
+    connector.send(JSON.stringify({type: 'hello', role: 'connector', token, machineId: 'pc', name: 'pc'}));
+    connector.on('message', raw => {
+      const m = JSON.parse(raw.toString());
+      if (m.type !== 'blob.push') return;
+      // What the connector does: the chunk action, given the part as a stream.
+      void receiveBlob(base, m.stream, m.length, body => appendUpload(ledger, m.payload.threadId, m.payload.id, Number(m.payload.offset), body))
+        .then(outcome => connector.send(JSON.stringify({type: 'blob.done', stream: m.stream, ...outcome})));
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const bytes = Buffer.from(Array.from({length: 9_000_000}, (_, index) => (index * 7) % 256));
+    const id = randomUUID();
+    assert.deepEqual(await startUpload(ledger, 'thread', root, {id, name: 'big.bin', size: bytes.length}), {id, offset: 0});
+    const signedIn = await fetch(`${base}/blob/session`, {method: 'POST', headers: {Authorization: `Bearer ${token}`}});
+    const cookie = signedIn.headers.get('set-cookie')!.split(';')[0];
+    const put = (offset: number, part: Buffer, extra: Record<string, string> = {}, action = 'file.uploadChunk') =>
+      fetch(`${base}/blob/pc/upload?action=${action}&threadId=thread&id=${id}&offset=${offset}`, {method: 'PUT', body: new Uint8Array(part), headers: {cookie, ...extra}});
+
+    assert.equal((await put(0, bytes.subarray(0, 10), {Origin: 'https://elsewhere.example'})).status, 403, 'Another site cannot write.');
+    assert.equal((await put(0, bytes.subarray(0, 10), {}, 'claude.send')).status, 400, 'Only upload parts are relayed.');
+    assert.equal((await put(0, Buffer.alloc(8 * 1024 * 1024 + 1))).status, 413);
+    const first = await put(0, bytes.subarray(0, 5_000_000), {Origin: base});
+    assert.equal(first.status, 200);
+    assert.deepEqual(await first.json(), {result: {id, offset: 5_000_000}});
+    const skipped = await put(6_000_000, bytes.subarray(6_000_000, 7_000_000));
+    assert.equal(skipped.status, 409, 'A part must start where the file ends.');
+    assert.equal((await skipped.json()).error.code, 'conflict');
+    const second = await put(5_000_000, bytes.subarray(5_000_000));
+    assert.deepEqual(await second.json(), {result: {id, offset: bytes.length}});
+    assert.ok((await readFile(join(root, '.codex-mobile-attachments', id, 'big.bin'))).equals(bytes));
+    assert.equal((await startUpload(ledger, 'thread', root, {id, name: 'big.bin', size: bytes.length})).offset, bytes.length);
+  } finally {
+    connector.close();await relay.close();ledger.close();await removeTestTemp(root);
+  }
+});

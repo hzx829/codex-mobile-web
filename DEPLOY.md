@@ -187,7 +187,7 @@ curl --fail http://127.0.0.1:3340/health
 
 在现有代理上将域名根路径转到 `127.0.0.1:3340`，并允许 `/ws` 的 WebSocket 长连接。另将同一域名的 HTTPS 3341 端口完整转到 `127.0.0.1:3341`，保留普通 HTTP 和 WebSocket 转发。不要同时启动本包的 Caddy。若现有代理也在 Docker 容器里，回环地址指向代理容器自身，需要把代理接到中继的 Docker 网络后用 `relay:3340` 和 `relay:3341`。
 
-文件下载走中继的数据通道（[设计](docs/sync/DESIGN.md#8-数据通道)）：电脑把文件作为一个 HTTP 请求体上传到 `/blob-feed/`，中继原样转给手机。现有代理要对这个路径关闭请求缓冲、放开请求体大小（下载上限 100 MiB），否则大于默认 1 MB 的文件会被拒绝，或者要等整个文件传到代理才开始转给手机。Nginx 示例，放在主入口的 `server` 里：
+文件走中继的数据通道（[设计](docs/sync/DESIGN.md#8-数据通道)）。下载时电脑把文件作为一个 HTTP 请求体上传到 `/blob-feed/`；上传时手机把每段（最多 8 MiB）用 `PUT` 发到 `/blob/<电脑>/upload`。中继都是边收边转。现有代理要对这两个路径关闭请求缓冲、放开请求体大小，否则大于默认 1 MB 的请求会被拒绝（网页会退回分块上传），或者要等整个请求传到代理才开始转发。Nginx 示例，放在主入口的 `server` 里：
 
 ```nginx
 location /blob-feed/ {
@@ -201,9 +201,20 @@ location /blob-feed/ {
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
 }
+location /blob/ {
+    proxy_pass http://127.0.0.1:3340;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    client_max_body_size 9m;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
 ```
 
-手机端的 `/blob/` 下载由 `location /` 转发，需要 `proxy_buffering off`（上面已有），并建议开启 HTTP/2，同一页面的多张图片和视频分段请求可以并行。Caddy 默认流式转发且不限制请求体，不需要额外配置。
+手机端的 `/blob/` 下载同样经这一段转发，需要 `proxy_buffering off`（上面已有），并建议开启 HTTP/2，同一页面的多张图片和视频分段请求可以并行。Caddy 默认流式转发且不限制请求体，不需要额外配置。
 
 ### 没有域名：使用 IP 证书
 

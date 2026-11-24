@@ -13,7 +13,7 @@ import { readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor, type TurnView } from '../shared/types.js';
 import {imageBytes} from '../shared/images.js';
 import {validateAttachments,uploadId,fileAttachment} from '../shared/attachments.js';
-import {startUpload,appendUpload,attachmentLinks} from './attachments.js';
+import {startUpload,appendUpload,attachmentLinks,UploadBody} from './attachments.js';
 import {contextUsage,accountLimits} from './usage.js';
 import {codexBase,codexTokens} from './usage-meter.js';
 import {markCodexSenders} from './message-senders.js';
@@ -151,7 +151,7 @@ export class Control extends EventEmitter {
     if(req.action==='file.uploadStart'||req.action==='file.uploadChunk'){
       const threadId=textRequired(p.threadId,'会话'),id=uploadId(p.id);
       return this.exclusive(`upload:${id}`,async()=>{
-        if(req.action==='file.uploadChunk')return appendUpload(this.ledger,threadId,id,p.offset,p.data);
+        if(req.action==='file.uploadChunk')return appendUpload(this.ledger,threadId,id,p.offset,p.body instanceof UploadBody?p.body:p.data);
         const session=await this.read(threadId,5);
         if(session.source==='history')throw new BridgeError('read_only',session.notice||'请先接入当前会话');
         return startUpload(this.ledger,threadId,session.cwd,p);

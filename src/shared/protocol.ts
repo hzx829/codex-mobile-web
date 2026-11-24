@@ -32,11 +32,15 @@ export const CONNECTOR_FEATURES = [
   'sync.antigravity',
   /** Files download through the relay's data channel (blob.pull), as HTTP streams instead of base64 chunks. */
   'blob',
+  /** Upload parts go through it too (blob.push), up to 8 MiB each. */
+  'blob.upload',
 ] as const;
 export type ConnectorFeature = typeof CONNECTOR_FEATURES[number];
 
 /** The downloads the relay's data channel may ask a computer for (src/server/blob.ts, src/connector/blob.ts). */
 export const BLOB_ACTIONS: ReadonlySet<string> = new Set(['file.download', 'claude.file.download', 'antigravity.file.download']);
+/** The upload parts it may carry; each still needs its file registered with the matching uploadStart first. */
+export const BLOB_UPLOADS: ReadonlySet<string> = new Set(['file.uploadChunk', 'claude.file.uploadChunk', 'antigravity.file.uploadChunk']);
 
 const featureName = /^[a-z][\w.-]{0,63}$/i;
 /** What a relay keeps from a connector's report: a sane version and at most 64 well-formed names. */

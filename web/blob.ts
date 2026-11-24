@@ -25,3 +25,23 @@ export function blobUrl(machine:string,action:string,payload:Json,download=false
   if(download)query.set('download','1');
   return `/blob/${encodeURIComponent(machine)}/file?${query}`;
 }
+
+/** The computer uploads go to through the data channel, and the token that signs in; null while either side lacks it. */
+export type BlobUploadTarget={machine:string;token:string};
+let uploadTarget:BlobUploadTarget|null=null;
+export function setBlobUploadTarget(target:BlobUploadTarget|null){uploadTarget=target;}
+export function blobUploadTarget(){return uploadTarget;}
+
+/** The answer to one upload part, or why it failed; `status` 0 when the request did not get through. */
+export type PartAnswer={status:number;result?:Json;error?:{code?:string;message?:string}};
+/** Sends one upload part (web/file-upload.ts) with the browser's upload progress. */
+export function putPart(url:string,body:Blob,progress:(sent:number)=>void):Promise<PartAnswer>{
+  return new Promise(resolve=>{
+    const request=new XMLHttpRequest();
+    request.open('PUT',url);request.withCredentials=true;
+    request.upload.onprogress=event=>progress(event.loaded);
+    request.onload=()=>{let value:Json={};try{value=JSON.parse(request.responseText||'{}');}catch{}resolve({status:request.status,result:value.result,error:value.error});};
+    request.onerror=request.onabort=request.ontimeout=()=>resolve({status:0});
+    request.send(body);
+  });
+}

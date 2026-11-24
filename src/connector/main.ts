@@ -23,7 +23,7 @@ import { recordClaudeTurn } from './usage-meter.js';
 import { ClaudeVoiceAuth, ClaudeVoiceStreams } from './claude-voice.js';
 import { traced } from './trace.js';
 import { ThreadHub } from './thread-hub.js';
-import { BLOB_ACTIONS, sendBlob } from './blob.js';
+import { BLOB_ACTIONS, BLOB_UPLOADS, receiveBlob, sendBlob } from './blob.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -163,6 +163,14 @@ function connect() {
       if(typeof m.stream!=='string'||!BLOB_ACTIONS.has(m.action))return;
       const payload=m.payload&&typeof m.payload==='object'?{...m.payload,stream:true,range:m.range}:{stream:true,range:m.range};
       void sendBlob(config.relayUrl,m.stream,()=>services.handle({id:m.stream,action:m.action,payload}));
+      return;
+    }
+    // An upload part through the data channel: the same chunk action, its bytes streamed instead of base64.
+    if(m.type==='blob.push'){
+      if(typeof m.stream!=='string'||!BLOB_UPLOADS.has(m.action)||!Number.isSafeInteger(m.length))return;
+      const stream=m.stream,payload=m.payload&&typeof m.payload==='object'?m.payload:{};
+      void receiveBlob(config.relayUrl,stream,m.length,body=>services.handle({id:stream,action:m.action,payload:{...payload,offset:Number(payload.offset),body}}))
+        .then(outcome=>{if(socket===ws)try{send({type:'blob.done',stream,...outcome});}catch{}});
       return;
     }
     if(m.type!=='request')return;

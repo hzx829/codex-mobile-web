@@ -46,9 +46,38 @@ export async function startUpload(ledger:Ledger,threadId:string,cwd:string,value
   const {handle,size}=await uploadFile(stored,'r');await handle.close();
   return {id:file.id,offset:size};
 }
+/**
+ * A part of an upload arriving through the relay's data channel (src/connector/blob.ts): `length` bytes from `stream`.
+ * Only the connector makes these; a phone's JSON cannot, so it can only send base64 parts.
+ */
+export class UploadBody {
+  constructor(readonly stream:AsyncIterable<Buffer>,readonly length:number){}
+}
+/** The most one data channel request may carry. */
+export const UPLOAD_STREAM_BYTES=8*1024*1024;
+async function appendStream(file:UploadRecord,id:string,start:number,body:UploadBody) {
+  const end=start+body.length;
+  if(!Number.isSafeInteger(body.length)||body.length<=0||body.length>UPLOAD_STREAM_BYTES||end>file.size)throw new BridgeError('invalid','文件分块超过上传大小');
+  const {handle,size}=await uploadFile(file,'r+');
+  try {
+    // A phone that lost an answer asks uploadStart where to go on, so a part always starts where the file ends.
+    if(start!==size)throw new BridgeError('conflict','上传位置不连续，请重试');
+    let position=start;
+    for await(const chunk of body.stream){
+      if(position+chunk.length>end)throw new BridgeError('invalid','文件分块超过声明的大小');
+      let written=0;
+      while(written<chunk.length){const result=await handle.write(chunk,written,chunk.length-written,position+written);if(!result.bytesWritten)throw new BridgeError('upload_failed','附件写入失败，请重试');written+=result.bytesWritten;}
+      position+=chunk.length;
+    }
+    // What arrived stays: the next uploadStart reports it and the phone goes on from there.
+    if(position!==end)throw new BridgeError('incomplete','上传中断，请重试');
+    return {id,offset:end};
+  }finally{await handle.close();}
+}
 export async function appendUpload(ledger:Ledger,threadId:string,id:string,offset:unknown,value:unknown) {
   const file=record(ledger,threadId,id);
   if(!Number.isSafeInteger(offset)||(offset as number)<0)throw new BridgeError('invalid','上传位置无效');
+  if(value instanceof UploadBody)return appendStream(file,id,offset as number,value);
   if(typeof value!=='string'||!value.length||value.length>Math.ceil(UPLOAD_CHUNK_BYTES/3)*4||value.length%4!==0||!/^[a-z\d+/]+={0,2}$/i.test(value))throw new BridgeError('invalid','文件分块数据无效');
   const bytes=Buffer.from(value,'base64'),start=offset as number,end=start+bytes.length;
   if(bytes.length>UPLOAD_CHUNK_BYTES||end>file.size)throw new BridgeError('invalid','文件分块超过上传大小');
@@ -81,7 +110,7 @@ function uploadStep<T>(id:string,run:()=>Promise<T>):Promise<T> {
  */
 export function scopedUpload(ledger:Ledger,stage:'start'|'chunk',scope:string,cwd:()=>Promise<string>,p:any) {
   const id=uploadId(p?.id);
-  return uploadStep(id,async()=>stage==='chunk'?appendUpload(ledger,scope,id,p.offset,p.data):startUpload(ledger,scope,await cwd(),p));
+  return uploadStep(id,async()=>stage==='chunk'?appendUpload(ledger,scope,id,p.offset,p.body instanceof UploadBody?p.body:p.data):startUpload(ledger,scope,await cwd(),p));
 }
 /** Files as ledger identity: what was attached, not where it is stored. */
 export const attachmentIds=(files:FileAttachment[])=>files.map(file=>file.id);

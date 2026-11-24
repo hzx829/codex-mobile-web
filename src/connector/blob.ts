@@ -1,9 +1,10 @@
-import {request as httpRequest} from 'node:http';
+import {request as httpRequest, type IncomingMessage} from 'node:http';
 import {request as httpsRequest} from 'node:https';
 import {pipeline} from 'node:stream/promises';
 import {BridgeError} from '../shared/types.js';
 import {FileStream} from './project.js';
-export {BLOB_ACTIONS} from '../shared/protocol.js';
+import {UploadBody} from './attachments.js';
+export {BLOB_ACTIONS, BLOB_UPLOADS} from '../shared/protocol.js';
 
 /**
  * The connector's side of the relay's data channel (docs/sync/DESIGN.md §8). The relay asks for a file with a `blob.pull`
@@ -38,4 +39,25 @@ export async function sendBlob(relayUrl: string, stream: string, open: () => Pro
   } catch { /* The phone left or the relay went away; nothing waits for this answer. */ } finally {
     await file?.handle.close().catch(() => {});
   }
+}
+
+/**
+ * Receives one upload part through the data channel: the relay asked with `blob.push`, the connector fetches
+ * `/blob-sink/<stream>` (the phone's request body, passed through) and hands it to `write`, the upload action. What the
+ * action answered, or why it failed, goes back on the control connection as `blob.done`.
+ */
+export async function receiveBlob(relayUrl: string, stream: string, length: number, write: (body: UploadBody) => Promise<unknown>): Promise<{result?: unknown; error?: {code: string; message: string}}> {
+  const url = new URL(`/blob-sink/${encodeURIComponent(stream)}`, relayUrl);
+  let response: IncomingMessage | undefined;
+  try {
+    response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const get = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {method: 'GET'}, resolve);
+      get.on('error', reject);get.end();
+    });
+    if (response.statusCode !== 200) throw new BridgeError('offline', '上传已中断，请重试');
+    return {result: await write(new UploadBody(response, length))};
+  } catch (error) {
+    const known = error instanceof BridgeError ? error : new BridgeError('upload_failed', '附件写入失败，请重试');
+    return {error: {code: known.code, message: known.message}};
+  } finally {response?.resume();}
 }

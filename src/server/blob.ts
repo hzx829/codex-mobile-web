@@ -2,7 +2,7 @@ import type {IncomingMessage, ServerResponse} from 'node:http';
 import {randomBytes} from 'node:crypto';
 import {pipeline} from 'node:stream/promises';
 import type {Json} from '../shared/types.js';
-import {BLOB_ACTIONS} from '../shared/protocol.js';
+import {BLOB_ACTIONS, BLOB_UPLOADS} from '../shared/protocol.js';
 
 /**
  * The relay's data channel (docs/sync/DESIGN.md §8). A phone downloads a file with a plain GET, which the relay joins to
@@ -13,9 +13,17 @@ import {BLOB_ACTIONS} from '../shared/protocol.js';
  *   relay    → computer, on its connection: {type:'blob.pull', stream, action, payload, range}
  *   computer POST /blob-feed/<stream>      body: the bytes; status, size and type in x-blob-* headers
  *
- * Only download actions are relayed, and the computer runs them with all their usual checks.
+ * Uploads run the other way, one part (up to 8 MiB) per request:
+ *
+ *   phone    PUT  /blob/<machine>/upload?action=…&…   body: the part
+ *   relay    → computer: {type:'blob.push', stream, action, payload, length}
+ *   computer GET  /blob-sink/<stream>      gets the phone's body as it arrives
+ *   computer → relay: {type:'blob.done', stream, result | error}, which answers the phone's PUT
+ *
+ * Only download and upload-part actions are relayed, and the computer runs them with all their usual checks.
  */
-const COOKIE = 'cmw_blob', SESSION_MS = 12 * 3600_000, FEED_WAIT_MS = 60_000, PER_SESSION = 4;
+const COOKIE = 'cmw_blob', SESSION_MS = 12 * 3600_000, FEED_WAIT_MS = 60_000, UPLOAD_WAIT_MS = 120_000, PER_SESSION = 4, UPLOAD_PART = 8 * 1024 * 1024;
+const UPLOAD_STATUS: Record<string, number> = {invalid: 400, conflict: 409, incomplete: 409, read_only: 409, offline: 503};
 /** Types a page may show inline; anything else is always a download and never runs as this site's page. */
 const INLINE = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'application/pdf']);
 
@@ -31,11 +39,13 @@ export type BlobHost = {
 };
 
 type Waiting = {response: ServerResponse; session: string; timer: NodeJS.Timeout; download: boolean};
+type Upload = {request: IncomingMessage; response: ServerResponse; machineId: string; length: number; timer: NodeJS.Timeout; started: boolean};
 
 export class BlobChannel {
   private sessions = new Map<string, BlobSession>();
   private waiting = new Map<string, Waiting>();
   private open = new Map<string, number>();
+  private uploads = new Map<string, Upload>();
   constructor(private host: BlobHost, private now = Date.now) {}
 
   /** Handles `/blob…` and `/blob-feed/…`; false for any other path. */
@@ -46,10 +56,27 @@ export class BlobChannel {
     if (file && req.method === 'GET') {this.request(req, res, decodeURIComponent(file[1]), url);return true;}
     const feed = /^\/blob-feed\/([a-f0-9]{64})$/.exec(url.pathname);
     if (feed && req.method === 'POST') {void this.feed(req, res, feed[1]);return true;}
+    const upload = /^\/blob\/([\w-]{1,80})\/upload$/.exec(url.pathname);
+    if (upload && req.method === 'PUT') {this.upload(req, res, decodeURIComponent(upload[1]), url);return true;}
+    const sink = /^\/blob-sink\/([a-f0-9]{64})$/.exec(url.pathname);
+    if (sink && req.method === 'GET') {void this.sink(res, sink[1]);return true;}
     if (url.pathname.startsWith('/blob')) {res.writeHead(404);res.end();return true;}
     return false;
   }
-  close() {for (const waiting of this.waiting.values()) {clearTimeout(waiting.timer);waiting.response.destroy();}this.waiting.clear();}
+  /** The computer's answer to an upload part; only the computer it was sent to can give it. */
+  done(machineId: string, message: Json) {
+    const upload = typeof message.stream === 'string' ? this.uploads.get(message.stream) : undefined;
+    if (!upload || upload.machineId !== machineId) return;
+    this.uploads.delete(message.stream);clearTimeout(upload.timer);
+    const error = message.error && typeof message.error === 'object' ? message.error : null;
+    upload.response.writeHead(error ? UPLOAD_STATUS[error.code] || 502 : 200, {'Content-Type': 'application/json'});
+    upload.response.end(JSON.stringify(error ? {error: {code: String(error.code), message: String(error.message)}} : {result: message.result ?? null}));
+    upload.request.resume();
+  }
+  close() {
+    for (const waiting of this.waiting.values()) {clearTimeout(waiting.timer);waiting.response.destroy();}this.waiting.clear();
+    for (const upload of this.uploads.values()) {clearTimeout(upload.timer);upload.response.destroy();}this.uploads.clear();
+  }
 
   private signIn(req: IncomingMessage, res: ServerResponse) {
     const token = /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1] || '';
@@ -92,6 +119,40 @@ export class BlobChannel {
       const left = (this.open.get(sessionId) || 1) - 1;if (left) this.open.set(sessionId, left);else this.open.delete(sessionId);
       const waiting = this.waiting.get(stream);if (waiting?.response === res) {clearTimeout(waiting.timer);this.waiting.delete(stream);}
     });
+  }
+  private upload(req: IncomingMessage, res: ServerResponse, machineId: string, url: URL) {
+    const found = this.session(req);
+    if (!found) {res.writeHead(401);res.end();return;}
+    const [sessionId, session] = found;
+    // The cookie is SameSite=Strict already; a write is also refused from any other page.
+    const proto = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any).encrypted ? 'https' : 'http';
+    if (req.headers.origin && req.headers.origin !== `${proto}://${req.headers.host}`) {res.writeHead(403);res.end();return;}
+    if (!this.host.allowed(session, machineId)) {res.writeHead(403);res.end();return;}
+    const action = url.searchParams.get('action') || '';
+    if (!BLOB_UPLOADS.has(action)) {res.writeHead(400);res.end();return;}
+    const length = Number(req.headers['content-length']);
+    if (!Number.isSafeInteger(length) || length <= 0) {res.writeHead(411);res.end();return;}
+    if (length > UPLOAD_PART) {res.writeHead(413);res.end();return;}
+    if ((this.open.get(sessionId) || 0) >= PER_SESSION) {res.writeHead(429);res.end();return;}
+    const payload: Json = {};
+    for (const [key, value] of url.searchParams) if (key !== 'action' && key.length <= 40 && value.length <= 4096) payload[key] = value;
+    const stream = randomBytes(32).toString('hex');
+    if (!this.host.pull(machineId, {type: 'blob.push', stream, action, payload, length})) {res.writeHead(503);res.end();return;}
+    this.open.set(sessionId, (this.open.get(sessionId) || 0) + 1);
+    const timer = setTimeout(() => {if (this.uploads.delete(stream)) {res.writeHead(504);res.end();req.destroy();}}, UPLOAD_WAIT_MS);
+    this.uploads.set(stream, {request: req, response: res, machineId, length, timer, started: false});
+    res.on('close', () => {
+      const left = (this.open.get(sessionId) || 1) - 1;if (left) this.open.set(sessionId, left);else this.open.delete(sessionId);
+      const upload = this.uploads.get(stream);if (upload?.response === res) {clearTimeout(upload.timer);this.uploads.delete(stream);req.destroy();}
+    });
+  }
+  /** The computer reads an upload part: the phone's body, passed on as it arrives, once. */
+  private async sink(res: ServerResponse, stream: string) {
+    const upload = this.uploads.get(stream);
+    if (!upload || upload.started) {res.writeHead(404);res.end();return;}
+    upload.started = true;
+    res.writeHead(200, {'Content-Type': 'application/octet-stream', 'Content-Length': String(upload.length)});
+    try {await pipeline(upload.request, res);} catch {res.destroy();}
   }
   private async feed(req: IncomingMessage, res: ServerResponse, stream: string) {
     const waiting = this.waiting.get(stream);
