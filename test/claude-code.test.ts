@@ -572,3 +572,72 @@ test('a Claude Code session is followed through the subscription hub, built once
     await removeTestTemp(root);
   }
 });
+
+test('a running Claude Code reply reaches followers word by word, then as the transcript has it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-stream-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  const {ThreadHub} = await import('../src/connector/thread-hub.js');
+  const {appendFile, readFile} = await import('node:fs/promises');
+  const hub = new ThreadHub(frame => {frames.push(frame);});
+  const frames: any[] = [];
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, transcript(cwd));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const pause = () => new Promise(resolve => setTimeout(resolve, 120));
+    // A Claude Code process that streams its reply, then writes it to the transcript as the CLI does.
+    const query: QueryFn = ({prompt}) => {
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const message of prompt) {
+          const lines = (await readFile(file, 'utf8')).trim().split('\n'), parent = JSON.parse(lines.at(-1)!).uuid, base = {sessionId: sid, cwd, isSidechain: false, userType: 'external', version: '2.1.0'};
+          const user = {...base, type: 'user', uuid: '00000000-0000-4000-8000-0000000000a1', parentUuid: parent, timestamp: new Date().toISOString(), message: {role: 'user', content: (message.message.content as any[]).find(block => block.type === 'text').text}};
+          await appendFile(file, JSON.stringify(user) + '\n');
+          yield {type: 'system', subtype: 'session_state_changed', state: 'running', session_id: sid};
+          yield {type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: {type: 'message_start', message: {id: 'msg_s'}}};
+          yield {type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: {type: 'content_block_start', index: 0, content_block: {type: 'text', text: ''}}};
+          for (const word of ['Hello', ' streaming', ' world']) {
+            await pause();
+            yield {type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: {type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: word}}};
+          }
+          yield {type: 'stream_event', session_id: sid, parent_tool_use_id: 'toolu_x', event: {type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: 'subagent'}}};
+          await pause();
+          yield {type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: {type: 'message_stop'}};
+          await appendFile(file, JSON.stringify({...base, type: 'assistant', uuid: '00000000-0000-4000-8000-0000000000a2', parentUuid: user.uuid, timestamp: new Date().toISOString(),
+            message: {id: 'msg_s', role: 'assistant', model: 'claude-test', content: [{type: 'text', text: 'Hello streaming world'}]}}) + '\n');
+          yield {type: 'assistant', session_id: sid, message: {id: 'msg_s'}};
+          await pause();
+          yield {type: 'result', subtype: 'success', session_id: sid, errors: []};
+          yield {type: 'system', subtype: 'session_state_changed', state: 'idle', session_id: sid};
+        }
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      return generator;
+    };
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000));
+    hub.register('claude', bridge.syncSource);
+    await hub.open({service: 'claude', threadId: sid});
+    const sent = await bridge.handle('claude.send', {conversationId: sid, opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-00000000abcd`, text: '讲一句'});
+    assert.equal(sent.state, 'accepted', JSON.stringify(sent));
+    for (let i = 0; i < 60 && !frames.some(frame => frame.head?.running === false); i++) await new Promise(resolve => setTimeout(resolve, 100));
+    const streamed = frames.flatMap(frame => [...(frame.entries || []).flatMap((entry: any) => entry.body.items), ...(frame.patches || []).flatMap((patch: any) => patch.ops)])
+      .filter((item: any) => String(item.id ?? item.i).startsWith('stream:')).map((item: any) => item.text ?? item.item?.text ?? item.t);
+    assert.ok(streamed.length >= 2, `The reply grows in several frames: ${JSON.stringify(streamed)}`);
+    assert.ok(streamed.join('').includes('streaming'), JSON.stringify(streamed));
+    assert.ok(!JSON.stringify(frames).includes('subagent'), 'A subagent’s words stay out of the main reply.');
+    const final = await bridge.syncSource.state(sid);
+    const items = final.entries.at(-1)!.items;
+    assert.equal(items.filter((item: any) => item.id.startsWith('stream:')).length, 0, 'Once the transcript has it, the streamed copy is gone.');
+    assert.equal(items.at(-1).text, 'Hello streaming world');
+  } finally {
+    hub.close();bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});

@@ -29,6 +29,8 @@ function sendMode(value: unknown): SendMode {
 }
 const PAGE = 50;
 const MAX_TURNS = 60;
+/** How long a finished streaming block is shown while the transcript has not caught up. */
+const STREAM_SETTLE_MS = 3000;
 /** The most earlier turns one read adds above the ones the phone already shows. */
 const MAX_EARLIER = 100;
 /** Which turns a read returns: the latest ones, back to the turn `from` when the phone already shows it, plus `earlier` before that. */
@@ -429,11 +431,27 @@ export class ClaudeCodeBridge {
     return {head, turns};
   }
 
+  /**
+   * The running turn with the text block Claude is writing now (LiveSession.streaming) added after what the transcript
+   * holds, until the transcript has it too or a few seconds after its message ended.
+   */
+  private withStreaming(id: string, turns: TurnView[]): TurnView[] {
+    const streaming = this.runtime.get(id)?.streaming, last = turns.at(-1);
+    if (!streaming?.text.trim() || !last || last.status !== 'inProgress') return turns;
+    if (streaming.done && Date.now() - streaming.at > STREAM_SETTLE_MS) return turns;
+    const tail = streaming.text.trim().slice(-60);
+    if (last.items.some(item => item.role === 'assistant' && item.text.includes(tail))) return turns;
+    const item = {id: `stream:${streaming.message}:${streaming.block}`, type: 'agentMessage', role: 'assistant', text: streaming.text};
+    return [...turns.slice(0, -1), {...last, items: [...last.items, item]}];
+  }
+
   /** What the subscription hub (src/connector/thread-hub.ts) follows: a session's turns, pushed as they change. */
   readonly syncSource: ThreadSource = {
-    version: async id => (await this.revision(id)).revision,
-    state: async id => {const {head, turns} = await this.state(id, await this.revision(id));return {head, entries: turns};},
+    // Words being written change only the streaming part, not the revision the session is read again at.
+    version: async id => `${(await this.revision(id)).revision}:${this.runtime.get(id)?.streamVersion ?? 0}`,
+    state: async id => {const {head, turns} = await this.state(id, await this.revision(id));return {head, entries: this.withStreaming(id, turns)};},
     watch: poke => {
+      this.runtime.on('stream', (id: string) => {if (id) poke(id);});
       this.runtime.on('change', (id: string) => {if (id) poke(id);});
       this.queueListeners.push(poke);
     },

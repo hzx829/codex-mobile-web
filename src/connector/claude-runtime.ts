@@ -115,6 +115,13 @@ export class LiveSession {
   hint = '';
   /** Claude Code's guess at the user's next prompt, after the latest turn; '' once another turn starts. */
   suggestion = '';
+  /**
+   * The text block Claude is writing now, from the SDK's stream events: shown before the transcript has it
+   * (src/connector/claude-code.ts). `done` once its message ended. `streamVersion` counts its changes apart from `version`,
+   * so a new word does not make the whole session read again.
+   */
+  streaming?: {message: string; block: number; text: string; done: boolean; at: number};
+  streamVersion = 0;
   /** Context window size, read once from Claude Code. */
   window?: number | null;
   /** Started with permission to skip prompts, so it can switch into "bypassPermissions" later. */
@@ -210,6 +217,8 @@ export class ClaudeRuntime extends EventEmitter {
       canUseTool: (tool, input, context) => this.ask(session, tool, input, context),
       // After each turn Claude Code predicts the user's next prompt, offered in the composer as Claude Code's own input does.
       promptSuggestions: true,
+      // Words as they are written, so a phone following the session sees the reply grow (stream events below).
+      includePartialMessages: true,
       stderr: () => {}, // Native diagnostics can contain credentials; never forward them.
     }});} catch (error) {
       throw new BridgeError('unavailable', `Claude Code 无法启动：${(error as Error)?.message || '未知错误'}${hint ? '。' + hint : ''}`);
@@ -239,6 +248,22 @@ export class ClaudeRuntime extends EventEmitter {
     });
   }
 
+  /** Follows one stream event into `session.streaming`; true when what a phone would show changed. */
+  private stream(session: LiveSession, event: Json): boolean {
+    if (!event || typeof event !== 'object') return false;
+    if (event.type === 'message_start') {session.streaming = {message: String(event.message?.id || ''), block: -1, text: '', done: false, at: Date.now()};return false;}
+    const current = session.streaming;
+    if (!current) return false;
+    if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
+      current.block = Number(event.index);current.text = String(event.content_block.text || '');current.at = Date.now();return Boolean(current.text);
+    }
+    if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && Number(event.index) === current.block) {
+      current.text += String(event.delta.text || '');current.at = Date.now();return true;
+    }
+    if (event.type === 'message_stop') {current.done = true;current.at = Date.now();return true;}
+    return false;
+  }
+
   private async consume(session: LiveSession) {
     try {
       for await (const message of session.query as AsyncIterable<SDKMessage>) {
@@ -259,7 +284,12 @@ export class ClaudeRuntime extends EventEmitter {
           session.running = session.inbox.size > 0;
           session.error = m.subtype === 'success' || session.interrupting ? '' : (Array.isArray(m.errors) ? m.errors.join('\n') : '') || 'Claude Code 本轮出错';
           session.interrupting = false;
-        } else if (m.type === 'assistant' || m.type === 'user' || m.type === 'stream_event') {
+        } else if (m.type === 'stream_event') {
+          // Only the main conversation's words; subagents' stay inside their tool calls.
+          if (!m.parent_tool_use_id && this.stream(session, m.event)) {session.streamVersion++;this.emit('stream', session.id);}
+          if (session.running) continue;
+          session.running = true;
+        } else if (m.type === 'assistant' || m.type === 'user') {
           session.running = true;
         } else if (m.type === 'prompt_suggestion' && typeof m.suggestion === 'string') {
           // It follows the turn's result; a turn started since makes it stale.
