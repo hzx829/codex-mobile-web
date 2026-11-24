@@ -2,11 +2,14 @@ import {useEffect,useRef,useState} from 'react';
 import {useComposerAttachments} from './composer-attachments';
 import {useVoiceInput} from './use-voice-input';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
+import {QueuedMessages} from './queued-messages';
 import {PermissionMenu,type PermissionOption} from './permission-picker';
 import {ApprovalCard} from './approval-card';
 import {SheetPanel} from './sheet';
 import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {uploadAttachments,type UploadProgress} from './file-upload';
+import {MAX_ATTACHMENTS} from '../src/shared/attachments';
+import {MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import {AntigravityMessages,antigravityIssueText} from './antigravity-messages';
 import {AntigravityModelPicker,antigravityModelSupportsImages,type AntigravityCatalog} from './antigravity-model-picker';
 import {connectionLost,ConversationStatus,elapsedLabel} from './conversation';
@@ -15,7 +18,7 @@ import {IconButton} from './icon-button';
 import {Icon} from './icons';
 import {useStableEvent} from './use-event';
 import {operationId} from './client';
-import type {AntigravityBackgroundTask,ApprovalRequest,Json,RequestAction} from '../src/shared/types';
+import type {AntigravityBackgroundTask,ApprovalRequest,Json,QueuedMessage,RequestAction} from '../src/shared/types';
 import {SenderScope} from './senders';
 
 const IMAGES_BLOCKED='请更新这台电脑上的连接器后再给 Antigravity 发送图片。';
@@ -106,7 +109,7 @@ export function AntigravityPanel(props:Props){
   const key=`antigravity:${machine}:${conversationId||'new'}`;
   const [projects,setProjects]=useState<{id:string;path:string;name?:string}[]|null>(null),[target,setTarget]=useState(props.newProject||'');
   const [view,setView]=useState<Json|null>(null);
-  const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false);
+  const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[submitting,setSubmitting]=useState(false);
   const [draft,setDraft]=useState(()=>saved(`${key}:draft`)),[pending,setPending]=useState(()=>saved(`${key}:pending`));
   const [watchError,setWatchError]=useState('');
   const lock=useRef(false),alive=useRef(true),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
@@ -208,6 +211,7 @@ export function AntigravityPanel(props:Props){
               ...current,...next,
               requests:next.requests||[],
               backgroundTasks:next.backgroundTasks||[],
+              queuedMessages:next.queuedMessages||[],
               notIdle:Boolean(next.notIdle),
               messages:[...current.messages.slice(0,next.keep),...next.messages],
             };
@@ -227,7 +231,7 @@ export function AntigravityPanel(props:Props){
     try{
       const result=await request.current('antigravity.operation',{opId:pending});
       if(!alive.current)return;
-      if(result.state==='accepted'){if(result.submitted)sent();remember('');setError('');if(creating&&result.conversationId)opened(result);}
+      if(result.state==='accepted'){if(result.submitted||result.kind==='queued')sent();remember('');setError('');if(creating&&result.conversationId)opened(result);}
       else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
       else setError('结果尚未确认。请刷新聊天并在电脑核实；系统不会自动重发。');
     }catch(e){failed(e);}finally{lock.current=false;if(alive.current)setBusy(false);}
@@ -251,6 +255,7 @@ export function AntigravityPanel(props:Props){
     if(!target){setError('请选择项目');return;}
     if(imagesBlocked())return;
     const attached=await prepare({project:target});if(!attached)return;
+    setSubmitting(true);
     const opId=operationId();remember(opId);
     try{
       const result=await request.current('antigravity.create',{
@@ -263,15 +268,17 @@ export function AntigravityPanel(props:Props){
       else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
       else setError(result.error?.message||'结果待核实，请在电脑查看是否已新建对话。');
     }catch(e:any){if(!e?.uncertain&&alive.current)remember('');failed(e);}
-    finally{lock.current=false;if(alive.current)setBusy(false);}
+    finally{lock.current=false;if(alive.current){setBusy(false);setSubmitting(false);}}
   }
   const backgroundTasks:AntigravityBackgroundTask[]=Array.isArray(view?.backgroundTasks)?view.backgroundTasks:[];
   const hasBackgroundTasks=backgroundTasks.length>0||Boolean(!view?.running&&view?.notIdle);
+  const supportsQueue=Boolean(view?.supportsQueue);
+  const queued:QueuedMessage[]=Array.isArray(view?.queuedMessages)?view.queuedMessages:[];
   async function mutate(action:'send'|'stop',options?:{killBackgroundTasks?:boolean}){
     if(action==='send'&&(attachments.loading||voiceBusy))return;
     if(creating){if(action==='send')void start();return;}
     if(lock.current||pending||!connected)return;
-    if(action==='send'&&(!draft.trim()&&!files.length||!view?.canSend))return;
+    if(action==='send'&&(!draft.trim()&&!files.length||!(supportsQueue?Boolean(view):Boolean(view?.canSend))))return;
     const killBackgroundTasks=action==='stop'&&Boolean(options?.killBackgroundTasks);
     if(action==='stop'&&!view?.running&&!(killBackgroundTasks&&hasBackgroundTasks))return;
     if(action==='send'&&imagesBlocked())return;
@@ -280,6 +287,7 @@ export function AntigravityPanel(props:Props){
     if(action==='send')attached=await prepare({conversationId});
     else{lock.current=true;setBusy(true);setError('');}
     if(!attached)return;
+    if(action==='send')setSubmitting(true);
     const opId=operationId();remember(opId);
     try{
       const result=await request.current(`antigravity.${action}`,{
@@ -289,15 +297,43 @@ export function AntigravityPanel(props:Props){
       });
       if(!alive.current)return;
       if(result.state==='accepted'){
-        if(action==='send'){sent();if(permissionMode)setPermissionMode('');}
+        if(action==='send'){
+          sent();if(permissionMode)setPermissionMode('');
+          setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='sent_now'?'已立即发送':'');
+        }
         if(killBackgroundTasks)setNotice('已请求结束后台任务');
         remember('');stick.current=true;
       }
       else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
       else setError(result.error?.message||'结果待核实，请刷新聊天查看。');
     }catch(e:any){if(!e?.uncertain&&alive.current)remember('');failed(e);}
+    finally{lock.current=false;if(alive.current){setBusy(false);setSubmitting(false);}}
+    void refresh(true);
+  }
+  async function queueAction(action:'antigravity.steerQueued'|'antigravity.withdrawQueued'|'antigravity.cancelQueued',payload:Json,onAccepted:(result:Json)=>void){
+    if(lock.current||pending||!connected||creating)return;
+    lock.current=true;setBusy(true);setError('');
+    const opId=operationId();remember(opId);
+    try{
+      const result=await request.current(action,{...payload,opId});
+      if(!alive.current)return;
+      if(result.state==='accepted'){remember('');onAccepted(result);}
+      else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
+      else setError(result.error?.message||'结果待核实，请刷新聊天查看。');
+    }catch(e:any){if(!e?.uncertain&&alive.current)remember('');failed(e);}
     finally{lock.current=false;if(alive.current)setBusy(false);}
     void refresh(true);
+  }
+  function withdrawQueued(queuedId:string){
+    void queueAction('antigravity.withdrawQueued',{conversationId,queuedId},result=>{
+      const msg=result.message||{};
+      edit([draft.trim(),msg.text].filter(Boolean).join('\n\n'));
+      if(Array.isArray(msg.images)&&msg.images.length)setImages(old=>[...old,...msg.images]);
+      if(msg.model)selectModel(msg.model);
+      setPermissionMode(msg.permissionMode||'');
+      setNotice('已撤回到输入框');
+      requestAnimationFrame(()=>composer.current?.focus());
+    });
   }
   async function respondRequest(requestId:string,decision:'allow'|'allowSession'|'deny',answers?:Record<string,string>){
     if(lock.current||pending||!connected||creating)return;
@@ -323,8 +359,10 @@ export function AntigravityPanel(props:Props){
   useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,antigravityStatus]);
   const trackScroll=()=>{const element=scroll.current!;stick.current=element.scrollHeight-element.scrollTop-element.clientHeight<80;};
   const checkPending=<><button disabled={!connected||busy} onClick={()=>void check()}>核实操作结果</button><button disabled={busy} onClick={()=>{if(window.confirm('请先在聊天和电脑页面确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></>;
-  const feedback=error||previewError,sending=Boolean(pending&&busy&&!view?.running);
+  const feedback=error||previewError,sending=Boolean(pending&&busy&&submitting);
   const canOperate=connected&&!busy&&!pending;
+  const queueNext=!creating&&supportsQueue&&Boolean(view&&(view.running||!view.canSend||queued.length>0||requests.length>0));
+  const canSendNow=creating?Boolean(target):(supportsQueue?Boolean(view):Boolean(view?.canSend));
   const effectiveMode=view?.permissionMode||view?.defaultPermissionMode||defaultMode||'AGENT_PERMISSION_PRESET_DEFAULT';
   const chosen=projects?.find(item=>item.id===target);
   const projectName=(item:{path:string;name?:string})=>item.name||workspaceName(item.path);
@@ -351,16 +389,22 @@ export function AntigravityPanel(props:Props){
       {pending&&!busy&&<div className="pending">{checkPending}</div>}
       {view?.running&&!antigravityStatus&&!requests.length&&<div className="running-status"><i className="dot online"/>Antigravity 正在处理</div>}
       {hasBackgroundTasks&&<BackgroundTasksBar tasks={backgroundTasks} onOpen={()=>setTasksOpen(true)}/>}
+      {!creating&&<QueuedMessages messages={queued} disabled={!canOperate} canSteer={Boolean(view?.running)} withdrawBlocked={voiceBusy||attachments.loading}
+        nowLabel="立即发送（打断当前回复并发送；保留后台任务）"
+        attachmentsFull={message=>attachments.count+message.imageCount>MAX_ATTACHMENTS||images.reduce((sum,url)=>sum+imageBytes(url),0)+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
+        onSteer={queuedId=>void queueAction('antigravity.steerQueued',{conversationId,queuedId},()=>setNotice('已追加到当前任务'))}
+        onNow={queuedId=>void queueAction('antigravity.steerQueued',{conversationId,queuedId,mode:'now'},result=>setNotice(result.kind==='sent_now'?'已立即发送':'已追加到当前任务'))}
+        onWithdraw={withdrawQueued}
+        onCancel={queuedId=>void queueAction('antigravity.cancelQueued',{conversationId,queuedId},()=>setNotice('已删除排队消息'))}/>}
       <Composer attachments={attachments} input={composer} draft={draft} edit={edit} maxLength={50_000} readOnly={Boolean(pending)} submit={()=>void mutate('send')}
-        placeholder={creating?'想让 Antigravity 做什么？':view?.running?'当前任务结束后可发送':`在 ${props.machineName} 上继续…`}
+        placeholder={creating?'想让 Antigravity 做什么？':queueNext?'当前任务完成后发送…':view?.running?'当前任务结束后可发送':`在 ${props.machineName} 上继续…`}
         locked={busy||Boolean(pending)} showImage={props.showImage} uploadProgress={uploadProgress}
         voice={voice} voiceMode={props.voiceMode} voiceDisabled={busy||Boolean(pending)} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
         add={()=>setAdding(true)} addDisabled={busy||Boolean(pending)||attachments.loading}
         permission={<PermissionMenu options={ANTIGRAVITY_MODES} value={permissionMode} current={{id:effectiveMode,label:modeLabel(effectiveMode)}} disabled={!canOperate} onChange={setPermissionMode}/>}
         model={<AntigravityModelPicker read={readModels} cached={catalog} turn={creating?target:view?.turn||''} value={model} available={connected&&(creating?Boolean(target):Boolean(view?.supportsModelSelection))} disabled={!canOperate} onChange={selectModel}/>}
-        // The desktop cannot queue a message behind a running turn yet: only stopping is offered then.
-        running={view?.running?{stop:()=>void mutate('stop'),disabled:!canOperate,queue:false}:undefined}
-        send={{label:'发送消息',sending,disabled:!canOperate||attachments.loading||voiceBusy||!(creating?target:view?.canSend)||!draft.trim()&&!files.length}}/>
+        running={view?.running?{stop:()=>void mutate('stop'),disabled:!canOperate,queue:supportsQueue}:undefined}
+        send={{label:queueNext?'完成后发送':'发送消息',sending,disabled:!canOperate||attachments.loading||voiceBusy||!canSendNow||!draft.trim()&&!files.length}}/>
       {pick.inputs}
     </footer>
     {tasksOpen&&<SheetPanel title="后台任务" close={()=>setTasksOpen(false)}>

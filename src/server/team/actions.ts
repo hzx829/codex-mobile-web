@@ -25,7 +25,7 @@ export function refreshSenderNames(store: TeamStore, result: Json) {
   }
 }
 /** Requests that put a message into a session. */
-export const SEND_ACTIONS = ['session.create', 'turn.send', 'turn.steerQueued', 'turn.edit', 'claude.create', 'claude.send', 'claude.steerQueued', 'claude.edit', 'antigravity.create', 'antigravity.send'];
+export const SEND_ACTIONS = ['session.create', 'turn.send', 'turn.steerQueued', 'turn.edit', 'claude.create', 'claude.send', 'claude.steerQueued', 'claude.edit', 'antigravity.create', 'antigravity.send', 'antigravity.steerQueued'];
 /** Requests that change something on a computer; each one is written to the activity log. */
 export const MUTATION_ACTIONS = new Set([
   'project.create', 'runtime.reload', 'session.create', 'session.fork', 'session.resume', 'session.rename', 'session.archive', 'session.unarchive',
@@ -33,6 +33,7 @@ export const MUTATION_ACTIONS = new Set([
   'claude.create', 'claude.send', 'claude.stop', 'claude.respond', 'claude.project.save', 'claude.fork', 'claude.rename', 'claude.archive', 'claude.edit',
   'claude.steerQueued', 'claude.withdrawQueued', 'claude.cancelQueued',
   'antigravity.create', 'antigravity.send', 'antigravity.stop', 'antigravity.respond',
+  'antigravity.steerQueued', 'antigravity.withdrawQueued', 'antigravity.cancelQueued',
 ]);
 
 const text = (value: unknown) => typeof value === 'string' && value ? value : undefined;

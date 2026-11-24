@@ -14,10 +14,12 @@ type Props={
   onSteer:(id:string)=>void;onWithdraw:(id:string)=>void;onCancel:(id:string)=>void;
   /** Sends the message at once, interrupting the reply; only runtimes that can do so pass it. */
   onNow?:(id:string)=>void;
+  /** Accessible label for the immediate-send action when a runtime wants custom wording. */
+  nowLabel?:string;
 };
 
 /** Messages waiting on the computer for the running turn to end; each can join the turn, return to the composer or be deleted. */
-export function QueuedMessages({messages,disabled,canSteer,withdrawBlocked,attachmentsFull,onSteer,onWithdraw,onCancel,onNow}:Props){
+export function QueuedMessages({messages,disabled,canSteer,withdrawBlocked,attachmentsFull,onSteer,onWithdraw,onCancel,onNow,nowLabel}:Props){
   if(!messages.length)return null;
   return <div className="queued-messages" aria-label="待发送消息">
     <div className="queue-heading">完成后发送 <span>{messages.length}</span></div>
@@ -27,7 +29,7 @@ export function QueuedMessages({messages,disabled,canSteer,withdrawBlocked,attac
       return <div className="queued-message" key={message.id}>
         <div className="queued-content"><small>{message.state==='queued'?`排队 ${index+1}`:message.state==='sending'?'正在发送':message.state==='uncertain'?'结果待核实':'发送失败'}{message.imageCount>0?` · ${message.imageCount} 张图片`:''}{message.fileNames?.length?` · ${message.fileNames.length} 个文件`:''}</small><p title={[message.text,...message.fileNames||[]].join('\n')}>{message.text||message.fileNames?.join('、')||'图片消息'}</p>{message.error&&<small className="error">{message.error}；后续消息已暂停，请核实后移出。</small>}</div>
         <div className="queued-actions">
-          {onNow&&<IconButton icon="now" label="立即发送（可转后台的工作转入后台，否则打断当前回复；沿用当前任务设置）" disabled={off||!canSteer||message.state!=='queued'} onClick={()=>onNow(message.id)}/>}
+          {onNow&&<IconButton icon="now" label={nowLabel||'立即发送（可转后台的工作转入后台，否则打断当前回复；沿用当前任务设置）'} disabled={off||!canSteer||message.state!=='queued'} onClick={()=>onNow(message.id)}/>}
           <IconButton icon="steer" label="立即追加到当前任务（Steer，沿用当前任务设置）" disabled={off||!canSteer||message.state!=='queued'} onClick={()=>onSteer(message.id)}/>
           <IconButton icon="undo" label={full?'输入框附件已满，请先处理草稿':'撤回到输入框'} disabled={off||Boolean(withdrawBlocked)||full} onClick={()=>{if(confirmUncertain())onWithdraw(message.id);}}/>
           <IconButton icon="trash" label="删除排队消息" disabled={off} onClick={()=>{if(confirmUncertain())onCancel(message.id);}}/>

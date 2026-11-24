@@ -14,6 +14,7 @@ import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
 import {AntigravityBridge,parseAntigravityModels,extractAntigravityRequests,extractAntigravityBackgroundTasks} from '../src/connector/antigravity.js';
 import {BackgroundTasksBar,BackgroundTasksPanel} from '../web/antigravity.js';
+import {QueuedMessages} from '../web/queued-messages.js';
 import {antigravityModelSupportsImages,antigravityPickerModels,concreteAntigravityModel,splitAntigravityModel} from '../web/antigravity-model-picker.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {BridgeError} from '../src/shared/types.js';
@@ -468,4 +469,197 @@ test('Antigravity stays sendable and surfaces stoppable background tasks when id
   assert.match(panelHtml, /wsl\.exe bash -lc grep/);
   assert.match(panelHtml, /venv: command not found/);
   assert.match(panelHtml, /结束后台任务/);
+});
+
+test('Antigravity queues messages behind a running turn, drains one per turn, and supports steer, send-now, withdraw and cancel', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-queue-'));
+  const ledgerPath = join(dir, 'ops.sqlite');
+  let ledger = new Ledger(ledgerPath);
+  const db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  let bridge: AntigravityBridge | undefined;
+  t.after(async () => { bridge?.close(); db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+  const id = randomUUID();
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const project = pathToFileURL(dir).href;
+  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(id, 'Queue Test', 'CASCADE_RUN_STATUS_RUNNING', '2026-11-24T00:00:00.000Z', 5, 0, 't0', 0, JSON.stringify([project]));
+
+  const config = {plannerConfig: {planModel: 'MODEL_A', toolConfig: {runCommand: {autoCommandConfig: {}}}}};
+  let waitingSteps: any[] = [];
+  let cancelAutoIdle = true;
+  let sendFailure: BridgeError | null = null;
+  const writes: {method: string; body: any}[] = [];
+
+  const createBridge = () => new AntigravityBridge(dir, ledger, async (_dir, method, body) => {
+    if (method === 'GetPermissionSettings' || method === 'GetAllCascadeTrajectories') return {};
+    if (method === 'GetCascadeTrajectorySteps') return {steps: waitingSteps};
+    if (method === 'GetCascadeModelConfigData') {
+      return {clientModelConfigs: [{label: 'A', modelOrAlias: {model: 'MODEL_A'}}, {label: 'B', modelOrAlias: {model: 'MODEL_B'}}]};
+    }
+    if (method === 'GetTrajectoryTurns') return {turns: [{startStepIndex: 0, firstStep: {userInput: {userConfig: config}}}]};
+    writes.push({method, body});
+    if (method === 'CancelCascadeInvocation' && cancelAutoIdle) {
+      db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_CANCELING'");
+      setTimeout(() => {
+        try { db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE'"); } catch {}
+      }, 25);
+    }
+    if (method === 'SendUserCascadeMessage' && sendFailure) throw sendFailure;
+    return {};
+  }, undefined, {cancelTimeoutMs: 250, cancelPollMs: 15, dispatchGraceMs: 60_000, queueIntervalMs: 60_000});
+
+  bridge = createBridge();
+  const makeOp = () => `${Date.now()}:${randomUUID()}`;
+  const png = 'data:image/png;base64,iVBORw0KGgo=';
+
+  // Invalid model fails upfront even when the turn is running (never enqueued).
+  assert.equal((await bridge.handle('antigravity.send', {conversationId: id, text: 'bad model', model: 'MODEL_UNKNOWN', opId: makeOp()})).state, 'failed');
+
+  // Enqueue two messages while running; read surfaces supportsQueue and queuedMessages.
+  const q1Op = makeOp(), q2Op = makeOp();
+  const q1 = await bridge.handle('antigravity.send', {
+    conversationId: id, text: '第一条排队', images: [png], model: 'MODEL_B', permissionMode: 'AGENT_PERMISSION_PRESET_AUTO', opId: q1Op,
+  });
+  assert.deepEqual(q1, {state: 'accepted', conversationId: id, kind: 'queued'});
+  const q2 = await bridge.handle('antigravity.send', {conversationId: id, text: '第二条排队', opId: q2Op});
+  assert.deepEqual(q2, {state: 'accepted', conversationId: id, kind: 'queued'});
+  assert.equal(writes.length, 0);
+
+  const viewRunning = await bridge.handle('antigravity.read', {conversationId: id});
+  assert.equal(viewRunning.supportsQueue, true);
+  assert.equal(viewRunning.running, true);
+  assert.equal(viewRunning.queuedMessages.length, 2);
+  assert.equal(viewRunning.queuedMessages[0].text, '第一条排队');
+  assert.equal(viewRunning.queuedMessages[0].imageCount, 1);
+  assert.equal(viewRunning.queuedMessages[1].text, '第二条排队');
+
+  // Watch wakes up when queue changes (e.g. a third message is enqueued).
+  const watchPromise = bridge.handle('antigravity.watch', {conversationId: id, revision: viewRunning.revision});
+  const q3Op = makeOp();
+  await bridge.handle('antigravity.send', {conversationId: id, text: '第三条待撤回', model: 'MODEL_B', images: [png], permissionMode: 'AGENT_PERMISSION_PRESET_TURBO', opId: q3Op});
+  const watched = await watchPromise;
+  assert.equal(watched.queuedMessages.length, 3);
+
+  // Withdraw restores text, images, model and permissionMode with a replayable receipt.
+  const withdrawOp = makeOp();
+  const withdrawn = await bridge.handle('antigravity.withdrawQueued', {conversationId: id, queuedId: q3Op, opId: withdrawOp});
+  assert.deepEqual(withdrawn, {
+    state: 'accepted',
+    queuedId: q3Op,
+    kind: 'queue_withdrawn',
+    message: {text: '第三条待撤回', images: [png], model: 'MODEL_B', permissionMode: 'AGENT_PERMISSION_PRESET_TURBO'},
+  });
+  assert.deepEqual(await bridge.handle('antigravity.withdrawQueued', {conversationId: id, queuedId: q3Op, opId: withdrawOp}), withdrawn);
+
+  // Steer sends a queued message into the running turn with NEXT_INVOCATION and without changing turn settings.
+  const steerOp = makeOp();
+  const steered = await bridge.handle('antigravity.steerQueued', {conversationId: id, queuedId: q2Op, opId: steerOp});
+  assert.deepEqual(steered, {state: 'accepted', queuedId: q2Op, kind: 'steer_accepted'});
+  assert.deepEqual(await bridge.handle('antigravity.steerQueued', {conversationId: id, queuedId: q2Op, opId: steerOp}), steered);
+  assert.deepEqual(writes.at(-1), {
+    method: 'SendUserCascadeMessage',
+    body: {cascadeId: id, items: [{text: '第二条排队'}], clientMessageId: q2Op.split(':')[1], deliveryStrategy: 'MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION'},
+  });
+
+  // Direct steer while running also uses NEXT_INVOCATION.
+  const directSteer = await bridge.handle('antigravity.send', {conversationId: id, text: '直接追加', mode: 'steer', opId: makeOp()});
+  assert.equal(directSteer.state, 'accepted');
+  assert.equal(directSteer.kind, 'steer_accepted');
+  assert.equal(writes.at(-1)!.body.deliveryStrategy, 'MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION');
+
+  // If cancel fails to settle to idle before timeout, send-now leaves the queued item 'queued' and never sends it.
+  cancelAutoIdle = false;
+  const timedOutNow = await bridge.handle('antigravity.steerQueued', {conversationId: id, queuedId: q1Op, mode: 'now', opId: makeOp()});
+  assert.equal(timedOutNow.state, 'failed');
+  assert.equal((await bridge.handle('antigravity.read', {conversationId: id})).queuedMessages[0].state, 'queued');
+
+  // When cancel settles to idle, send-now interrupts (keeping background tasks) and sends with saved model & permissionMode.
+  cancelAutoIdle = true;
+  const sentNow = await bridge.handle('antigravity.steerQueued', {conversationId: id, queuedId: q1Op, mode: 'now', opId: makeOp()});
+  assert.deepEqual(sentNow, {state: 'accepted', queuedId: q1Op, kind: 'sent_now'});
+  assert.deepEqual(writes.slice(-3).map(w => w.method), ['CancelCascadeInvocation', 'UpdateConversationAnnotations', 'SendUserCascadeMessage']);
+  assert.deepEqual(writes.at(-3)!.body, {cascadeId: id, killBackgroundTasks: false});
+  assert.equal(writes.at(-1)!.body.cascadeConfig.plannerConfig.planModel, 'MODEL_B');
+  assert.equal(writes.at(-1)!.body.cascadeConfig.plannerConfig.toolConfig.runCommand.autoCommandConfig.autoExecutionPolicy, 'CASCADE_COMMANDS_AUTO_EXECUTION_AUTO');
+  assert.equal(writes.at(-1)!.body.deliveryStrategy, undefined);
+
+  // Direct mode='now' validates invalid model before canceling.
+  db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING', last_user_input_time='t1'");
+  const writesBeforeInvalidNow = writes.length;
+  assert.equal((await bridge.handle('antigravity.send', {conversationId: id, text: 'bad now', mode: 'now', model: 'MODEL_UNKNOWN', opId: makeOp()})).state, 'failed');
+  assert.equal(writes.length, writesBeforeInvalidNow);
+  const directNow = await bridge.handle('antigravity.send', {conversationId: id, text: '直接打断发', mode: 'now', opId: makeOp()});
+  assert.equal(directNow.state, 'accepted');
+  assert.equal(directNow.kind, 'sent_now');
+
+  // Draining respects waiting approval requests and slow SQLite snapshot updates (one message per turn).
+  db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING', not_fully_idle=1, last_user_input_time='t2'");
+  const d1 = makeOp(), d2 = makeOp();
+  await bridge.handle('antigravity.send', {conversationId: id, text: '自动发 1', opId: d1});
+  await bridge.handle('antigravity.send', {conversationId: id, text: '自动发 2', opId: d2});
+  waitingSteps = [{stepIndex: 4, status: 'CORTEX_STEP_STATUS_WAITING', requestedInteraction: {runCommand: {}}}];
+  db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE'");
+  const writesBeforeWaiting = writes.length;
+  await bridge.drainQueue(id);
+  assert.equal(writes.length, writesBeforeWaiting, 'must not drain while waiting approval exists');
+
+  // Stale steer when idle fails cleanly and leaves item queued.
+  assert.equal((await bridge.handle('antigravity.steerQueued', {conversationId: id, queuedId: d1, opId: makeOp()})).state, 'failed');
+  assert.equal(ledger.antigravityQueue.queued(id)[0].state, 'queued');
+
+  // Clearing approval allows draining d1 only; a second drain before SQLite updates turnKey must not send d2.
+  waitingSteps = [];
+  db.exec('UPDATE conversation_summaries SET not_fully_idle=0');
+  await bridge.drainQueue(id);
+  assert.equal(writes.length, writesBeforeWaiting + 1);
+  assert.equal(writes.at(-1)!.body.items[0].text, '自动发 1');
+  await bridge.drainQueue(id);
+  assert.equal(writes.length, writesBeforeWaiting + 1, 'slow SQLite summary after dispatch must not start next queued message');
+
+  // Uncertain dispatch pauses the queue; removing the uncertain head via cancelQueued unblocks subsequent entries.
+  const d3 = makeOp();
+  await bridge.handle('antigravity.send', {conversationId: id, text: '自动发 3', opId: d3});
+  db.exec("UPDATE conversation_summaries SET last_user_input_time='t3'");
+  sendFailure = new BridgeError('uncertain', 'lost receipt', true);
+  await bridge.drainQueue(id);
+  assert.equal(ledger.antigravityQueue.queued(id)[0].state, 'uncertain');
+  sendFailure = null;
+  const writesWhilePaused = writes.length;
+  await bridge.drainQueue(id);
+  assert.equal(writes.length, writesWhilePaused, 'queue stays paused while uncertain head remains');
+  assert.equal((await bridge.handle('antigravity.cancelQueued', {conversationId: id, queuedId: d2, opId: makeOp()})).kind, 'queue_cancelled');
+  await bridge.drainQueue(id);
+  assert.equal(writes.at(-1)!.body.items[0].text, '自动发 3');
+
+  // In-flight 'sending' entry becomes 'uncertain' across connector restart and never auto-resends.
+  db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING', last_user_input_time='t4'");
+  const crashOp = makeOp();
+  await bridge.handle('antigravity.send', {conversationId: id, text: '重启前发送中', opId: crashOp});
+  ledger.antigravityQueue.sending(crashOp);
+  bridge.close();
+  ledger.close();
+  ledger = new Ledger(ledgerPath);
+  bridge = createBridge();
+  db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_IDLE'");
+  const afterRestart = await bridge.handle('antigravity.read', {conversationId: id});
+  assert.equal(afterRestart.queuedMessages[0].state, 'uncertain');
+  const writesAfterRestart = writes.length;
+  await bridge.drainQueue(id);
+  assert.equal(writes.length, writesAfterRestart);
+
+  // SSR check: QueuedMessages renders immediate-send and steer actions when running.
+  const queueHtml = renderToStaticMarkup(createElement(QueuedMessages, {
+    messages: [{id: 'q1', text: '下一句', imageCount: 0, state: 'queued'}],
+    disabled: false,
+    canSteer: true,
+    nowLabel: '立即发送（打断当前回复并发送；保留后台任务）',
+    attachmentsFull: () => false,
+    onNow: () => {},
+    onSteer: () => {},
+    onWithdraw: () => {},
+    onCancel: () => {},
+  }));
+  assert.match(queueHtml, /立即发送（打断当前回复并发送；保留后台任务）/);
+  assert.match(queueHtml, /立即追加到当前任务/);
+  assert.match(queueHtml, /下一句/);
 });

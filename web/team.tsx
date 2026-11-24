@@ -13,9 +13,9 @@ const isAdmin=(user:TeamUser)=>user.role==='owner'||user.role==='admin';
 const ACTION_LABELS:Record<string,string>={
   'session.create':'新建会话','claude.create':'新建会话','antigravity.create':'新建会话',
   'turn.send':'发送消息','claude.send':'发送消息','antigravity.send':'发送消息',
-  'turn.steerQueued':'立即追加','claude.steerQueued':'立即追加','turn.withdrawQueued':'撤回排队消息','claude.withdrawQueued':'撤回排队消息',
-  'turn.cancelQueued':'删除排队消息','claude.cancelQueued':'删除排队消息','turn.edit':'编辑消息','claude.edit':'编辑消息',
-  'turn.stop':'停止任务','claude.stop':'停止任务','antigravity.stop':'停止任务','request.respond':'回应请求','claude.respond':'回应请求',
+  'turn.steerQueued':'立即追加','claude.steerQueued':'立即追加','antigravity.steerQueued':'立即追加','turn.withdrawQueued':'撤回排队消息','claude.withdrawQueued':'撤回排队消息','antigravity.withdrawQueued':'撤回排队消息',
+  'turn.cancelQueued':'删除排队消息','claude.cancelQueued':'删除排队消息','antigravity.cancelQueued':'删除排队消息','turn.edit':'编辑消息','claude.edit':'编辑消息',
+  'turn.stop':'停止任务','claude.stop':'停止任务','antigravity.stop':'停止任务','request.respond':'回应请求','claude.respond':'回应请求','antigravity.respond':'回应请求',
   'session.fork':'分叉会话','claude.fork':'分叉会话','session.rename':'重命名','claude.rename':'重命名',
   'session.archive':'归档','claude.archive':'归档','session.unarchive':'取消归档','session.resume':'恢复会话',
   'project.create':'新建项目','claude.project.save':'保存项目设置','runtime.reload':'更新连接器',

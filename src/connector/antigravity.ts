@@ -17,10 +17,11 @@ import {
   type AntigravityPermissionMode,
   type ApprovalRequest,
   type Json,
+  type QueuedMessage,
 } from '../shared/types.js';
 import type {Ledger} from './ledger.js';
 import {callHub} from './antigravity-hub.js';
-import {validateImages} from '../shared/images.js';
+import {imageBytes, validateImages} from '../shared/images.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
 import {sendersByText} from './message-senders.js';
@@ -28,8 +29,17 @@ import {sendersByText} from './message-senders.js';
 const guid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const idle = 'CASCADE_RUN_STATUS_IDLE';
 const active = 'CASCADE_RUN_STATUS_RUNNING';
+const canceling = 'CASCADE_RUN_STATUS_CANCELING';
 const waitingStep = 'CORTEX_STEP_STATUS_WAITING';
 const runningStep = 'CORTEX_STEP_STATUS_RUNNING';
+const NEXT_INVOCATION = 'MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION';
+const SEND_MODES = ['queue', 'steer', 'now'] as const;
+type SendMode = typeof SEND_MODES[number];
+function sendMode(value: unknown): SendMode {
+  if (value === undefined || value === null || value === '') return 'queue';
+  if (!SEND_MODES.includes(value as SendMode)) throw new BridgeError('invalid', '发送方式无效');
+  return value as SendMode;
+}
 // The full transcript keeps tool output too, so read a larger tail of it.
 const tailSize = 4 * 1024 * 1024;
 const WAITING_STEP_WINDOW = 25;
@@ -623,12 +633,181 @@ type LiveState = {
   taskLogPaths: string[];
 };
 
+type QueuedAntigravityPayload = {
+  text: string;
+  images?: string[];
+  fileNames?: string[];
+  model?: string;
+  permissionMode?: AntigravityPermissionMode;
+};
+
+export type AntigravityBridgeOptions = {
+  cancelTimeoutMs?: number;
+  cancelPollMs?: number;
+  dispatchGraceMs?: number;
+  queueIntervalMs?: number;
+};
+
 export class AntigravityBridge {
   private writing = new Set<string>();
   private watchers = 0;
   private recent = new Map<string, {revision: string; baseRevision: string; live: LiveState; messages: AntigravityMessage[]}>();
+  /** Bumped when a conversation's queue changes, so watching phones update without waiting for a transcript write. */
+  private queueVersions = new Map<string, number>();
+  /** Guards automatic draining right after a turn is dispatched while desktop SQLite still reports the prior idle summary. */
+  private dispatchedTurn = new Map<string, {previousTurnKey: string; at: number}>();
+  private queueTimer: NodeJS.Timeout;
+  private closed = false;
+  private cancelTimeoutMs: number;
+  private cancelPollMs: number;
+  private dispatchGraceMs: number;
   constructor(private root: string, private ledger: Ledger, private hub = callHub,
-    private projectsDir = join(dirname(root), 'config', 'projects')) {}
+    private projectsDir = join(dirname(root), 'config', 'projects'), options: AntigravityBridgeOptions = {}) {
+    this.cancelTimeoutMs = options.cancelTimeoutMs ?? 8000;
+    this.cancelPollMs = options.cancelPollMs ?? 150;
+    this.dispatchGraceMs = options.dispatchGraceMs ?? 15_000;
+    const intervalMs = options.queueIntervalMs ?? 1500;
+    this.queueTimer = setInterval(() => {
+      try {
+        if (!this.closed) for (const id of new Set(this.queue.queued().map(message => message.threadId))) this.drainSoon(id);
+      } catch {}
+    }, intervalMs);
+    this.queueTimer.unref?.();
+  }
+
+  private get queue() { return this.ledger.antigravityQueue; }
+  get busy() { return this.writing.size > 0 || Boolean(this.queue.queued().length); }
+  close() { this.closed = true; clearInterval(this.queueTimer); }
+  private queueChanged(id: string) { this.queueVersions.set(id, (this.queueVersions.get(id) || 0) + 1); }
+  private drainSoon(id: string) { if (!this.closed) setImmediate(() => { this.drain(id).catch(() => {}); }); }
+
+  private isAwaitingDispatch(id: string, summary: Summary): boolean {
+    const pending = this.dispatchedTurn.get(id);
+    if (!pending) return false;
+    if (summary.status !== idle || turnKey(summary) !== pending.previousTurnKey || Date.now() - pending.at >= this.dispatchGraceMs) {
+      this.dispatchedTurn.delete(id);
+      return false;
+    }
+    return true;
+  }
+
+  private async hasWaitingRequests(id: string, summary: Summary): Promise<boolean> {
+    if (!summary.notIdle && summary.status === idle) return false;
+    const tailOffset = Math.max(0, summary.steps - WAITING_STEP_WINDOW);
+    const tail = await this.fetchSteps(id, tailOffset);
+    return extractAntigravityRequests(tail, tailOffset).length > 0;
+  }
+
+  private queuedViews(id: string): QueuedMessage[] {
+    return this.queue.queued(id).map(message => ({
+      id: message.id,
+      text: message.payload.text || '',
+      imageCount: message.payload.images?.length || 0,
+      ...(message.payload.fileNames?.length ? {fileNames: message.payload.fileNames} : {}),
+      imageBytes: (message.payload.images || []).reduce((sum: number, url: string) => sum + imageBytes(url), 0),
+      state: message.state,
+      ...(message.error ? {error: message.error} : {}),
+    }));
+  }
+
+  private async sendToHub(
+    id: string,
+    summary: Summary,
+    payload: {text: string; images?: string[]; model?: string; permissionMode?: AntigravityPermissionMode},
+    opId: string,
+    opts?: {deliveryStrategy?: typeof NEXT_INVOCATION; expectedTurn?: string},
+  ): Promise<void> {
+    const directory = this.daemonDir();
+    const images = payload.images || [];
+    const message: Json = {
+      cascadeId: id,
+      items: [{text: payload.text}],
+      ...(images.length ? {media: antigravityMedia(images)} : {}),
+      clientMessageId: opId.split(':')[1],
+      ...(opts?.deliveryStrategy ? {deliveryStrategy: opts.deliveryStrategy} : {}),
+    };
+    if (payload.model || payload.permissionMode) {
+      const base = await this.turnConfig(summary);
+      const withModel = await this.withModel(base, payload.model);
+      message.cascadeConfig = this.withPermission(withModel, payload.permissionMode);
+      if (opts?.expectedTurn !== undefined) {
+        const latest = this.summary(id);
+        if (turnKey(latest) !== opts.expectedTurn || !canSend(latest)) {
+          throw new BridgeError('changed', '会话状态已变化，请刷新后再发送');
+        }
+      }
+    }
+    if (payload.permissionMode) {
+      await this.hub(directory, 'UpdateConversationAnnotations', {
+        cascadeId: id,
+        annotations: {permissionPreset: payload.permissionMode},
+        mergeAnnotations: true,
+      }).catch(() => {});
+    }
+    await this.hub(directory, 'SendUserCascadeMessage', message);
+    if (!opts?.deliveryStrategy) {
+      this.dispatchedTurn.set(id, {previousTurnKey: turnKey(summary), at: Date.now()});
+    }
+    // Antigravity reports no tokens; the turn still counts for whoever sent it.
+    this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
+    this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: payload.text});
+  }
+
+  private async cancelAndWaitForIdle(id: string): Promise<Summary> {
+    const initial = this.summary(id);
+    if (initial.status === idle) return initial;
+    if (initial.status !== canceling) {
+      await this.hub(this.daemonDir(), 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks: false});
+    }
+    const deadline = Date.now() + this.cancelTimeoutMs;
+    while (Date.now() < deadline) {
+      const latest = this.summary(id);
+      if (latest.status === idle) return latest;
+      await delay(Math.min(this.cancelPollMs, Math.max(10, deadline - Date.now())));
+    }
+    const final = this.summary(id);
+    if (final.status === idle) return final;
+    throw new BridgeError('active', '当前任务未能及时停止，请稍后重试');
+  }
+
+  /** Drains queued messages for one conversation (or all conversations); safe to call repeatedly. */
+  async drainQueue(id?: string): Promise<void> {
+    const ids = id ? [id] : [...new Set(this.queue.queued().map(message => String(message.threadId)))];
+    for (const target of ids) await this.drain(target);
+  }
+
+  /**
+   * Sends the first queued message once the conversation is idle without pending approval requests, one per turn.
+   * A failed or uncertain message pauses the queue until the phone removes it.
+   */
+  private async drain(id: string): Promise<void> {
+    const head = this.queue.queued(id)[0];
+    if (!head || head.state !== 'queued' || this.writing.has(id) || this.closed) return;
+    let summary: Summary;
+    try { summary = this.summary(id); } catch { return; }
+    if (!canSend(summary) || this.isAwaitingDispatch(id, summary)) return;
+    this.writing.add(id);
+    try {
+      const currentHead = this.queue.queued(id)[0];
+      if (!currentHead || currentHead.id !== head.id || currentHead.state !== 'queued') return;
+      summary = this.summary(id);
+      if (!canSend(summary) || this.isAwaitingDispatch(id, summary)) return;
+      if (await this.hasWaitingRequests(id, summary)) return;
+      this.queue.sending(head.id);
+      this.queueChanged(id);
+      try {
+        await this.sendToHub(id, summary, head.payload as QueuedAntigravityPayload, head.id);
+        this.queue.finishQueued(head.id, {conversationId: id, submitted: true});
+      } catch (error) {
+        this.queue.finishQueued(
+          head.id,
+          {},
+          error instanceof BridgeError ? error : new BridgeError('unexpected', '排队消息发送结果待核实，不会自动重发', true),
+        );
+      }
+      this.queueChanged(id);
+    } finally { this.writing.delete(id); }
+  }
 
   private daemonDir() { return join(this.root, 'daemon'); }
 
@@ -902,23 +1081,27 @@ export class AntigravityBridge {
       };
     }
     const {permissionMode, defaultPermissionMode, requests, backgroundTasks, taskLogPaths} = resolved;
+    const queuedMessages = this.queuedViews(id);
+    const queueVersion = this.queueVersions.get(id) || 0;
+    const queueFingerprint = queuedMessages.map(item => `${item.id}:${item.state}:${item.error || ''}`).join('|');
     const taskLogStat = await statTaskLogs(taskLogPaths);
     const requestFingerprint = requests.map(req => `${req.id}:${req.kind}:${req.title}`).join('|');
     const taskFingerprint = backgroundTasks.map(task => `${task.id}:${task.title}:${task.output?.length ?? 0}:${task.output?.slice(-64) ?? ''}`).join('|');
     const baseRevision = JSON.stringify([
       summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, cwd,
-      String(file?.mtimeNs), String(file?.size), taskLogStat,
+      String(file?.mtimeNs), String(file?.size), taskLogStat, queueVersion, queueFingerprint,
     ]);
     const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint, taskFingerprint]);
     return {
       path, revision, baseRevision, live: resolved, turn: turnKey(summary), title: summary.title || '未命名对话', cwd,
       running: summary.status === active, canSend: canSend(summary) && !requests.length,
       notIdle: Boolean(summary.notIdle),
-      supportsModelSelection: true, supportsImages: true,
+      supportsModelSelection: true, supportsImages: true, supportsQueue: true,
       ...(permissionMode ? {permissionMode} : {}),
       ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
       requests,
       backgroundTasks,
+      queuedMessages,
     };
   }
 
@@ -942,6 +1125,7 @@ export class AntigravityBridge {
         while (known === current.revision && Date.now() < deadline) {
           await delay(650);
           ticks++;
+          const wasRunning = current.running;
           const nextLocal = await this.snapshot(id, current.live);
           const activeOrWaiting = nextLocal.running || !nextLocal.canSend;
           if (nextLocal.baseRevision !== current.baseRevision) {
@@ -954,6 +1138,9 @@ export class AntigravityBridge {
             });
           } else {
             current = nextLocal;
+          }
+          if (wasRunning && !current.running && current.canSend && this.queue.queued(id).length) {
+            this.drainSoon(id);
           }
         }
       } finally { this.watchers--; }
@@ -1064,49 +1251,134 @@ export class AntigravityBridge {
     }
     if (action === 'antigravity.read') return this.read(id);
     if (action === 'antigravity.watch') return this.read(id, textRequired(p.revision, '会话版本', 4096));
+    if (action === 'antigravity.steerQueued' || action === 'antigravity.withdrawQueued' || action === 'antigravity.cancelQueued') {
+      const queuedId = textRequired(p.queuedId, '排队消息', 100);
+      const opId = textRequired(p.opId, '操作标识', 100);
+      const delivery = action === 'antigravity.steerQueued' ? sendMode(p.mode ?? 'steer') : undefined;
+      if (delivery === 'queue') throw new BridgeError('invalid', '发送方式无效');
+      return this.ledger.run(opId, {action, id, queuedId, ...(delivery === 'now' ? {delivery} : {})}, async () => {
+        if (action !== 'antigravity.steerQueued') {
+          const msg = this.queue.cancelQueued(id, queuedId);
+          this.queueChanged(id);
+          this.drainSoon(id);
+          return action === 'antigravity.withdrawQueued'
+            ? {queuedId, kind: 'queue_withdrawn', message: {text: msg.text || '', images: msg.images || [], model: msg.model, permissionMode: msg.permissionMode}}
+            : {queuedId, kind: 'queue_cancelled'};
+        }
+        const message = this.queue.queued(id).find(item => item.id === queuedId);
+        if (!message) throw new BridgeError('changed', '消息已经发送或移出队列，请刷新');
+        if (message.state !== 'queued') throw new BridgeError('active', '这条消息暂不能追加，请核实发送状态');
+        if (this.writing.has(id)) throw new BridgeError('busy', '此会话正在处理另一次操作');
+        const summary = this.summary(id);
+        if (delivery === 'steer') {
+          if (summary.status !== active) throw new BridgeError('changed', '当前没有正在运行的任务，消息会按顺序发送');
+          this.writing.add(id);
+          try {
+            this.queue.sending(queuedId);
+            this.queueChanged(id);
+            try {
+              // Steer into the running turn keeping that turn's model/permission settings, as Codex and Claude Code do.
+              await this.sendToHub(id, summary, {text: message.payload.text || '', images: message.payload.images || []}, queuedId, {deliveryStrategy: NEXT_INVOCATION});
+            } catch (error) {
+              const failure = error instanceof BridgeError ? error : new BridgeError('unexpected', '追加结果待核实，不会自动重发', true);
+              this.queue.finishQueued(queuedId, {}, failure);
+              throw failure;
+            }
+            this.queue.finishQueued(queuedId, {conversationId: id, submitted: true, kind: 'steer_accepted'});
+            return {queuedId, kind: 'steer_accepted'};
+          } finally { this.writing.delete(id); this.queueChanged(id); }
+        }
+        this.writing.add(id);
+        try {
+          // Cancel the current reply first; only mark the queued entry 'sending' once the turn is idle and ready to submit.
+          const ready = summary.status === idle ? summary : await this.cancelAndWaitForIdle(id);
+          const fresh = this.queue.queued(id).find(item => item.id === queuedId);
+          if (!fresh || fresh.state !== 'queued') throw new BridgeError('changed', '消息已经发送或移出队列，请刷新');
+          this.queue.sending(queuedId);
+          this.queueChanged(id);
+          try {
+            await this.sendToHub(id, ready, fresh.payload as QueuedAntigravityPayload, queuedId);
+          } catch (error) {
+            const failure = error instanceof BridgeError ? error : new BridgeError('unexpected', '立即发送结果待核实，不会自动重发', true);
+            this.queue.finishQueued(queuedId, {}, failure);
+            throw failure;
+          }
+          this.queue.finishQueued(queuedId, {conversationId: id, submitted: true, kind: 'sent_now'});
+          return {queuedId, kind: 'sent_now'};
+        } finally { this.writing.delete(id); this.queueChanged(id); }
+      });
+    }
     if (action !== 'antigravity.send' && action !== 'antigravity.stop') throw new BridgeError('unsupported', '不支持此 Antigravity 操作');
     const sending = action === 'antigravity.send';
+    const delivery = sending ? sendMode(p.mode) : undefined;
     const killBackgroundTasks = !sending && p.killBackgroundTasks === true;
     const files = sending ? requestFiles(p.files) : [], text = sending ? messageText(p.text, files) : undefined;
     const opId = textRequired(p.opId, '操作标识', 100);
-    const turn = textRequired(p.turn, '对话轮次', 200);
+    const turn = sending
+      ? (p.turn !== undefined && p.turn !== '' ? textRequired(p.turn, '对话轮次', 200) : undefined)
+      : textRequired(p.turn, '对话轮次', 200);
     const model = sending && p.model !== undefined ? textRequired(p.model, '模型', 200) : undefined;
     const permissionMode = sending ? readPermissionMode(p.permissionMode) : undefined;
     const images = sending ? readImages(p.images) : [];
     checkCount(images, files);
     return this.ledger.run(opId, {
-      action, id, text, turn, ...attached(images, files),
+      action, id, text, ...(turn !== undefined ? {turn} : {}), ...attached(images, files),
       ...(model ? {model} : {}), ...(permissionMode ? {permissionMode} : {}),
+      ...(delivery && delivery !== 'queue' ? {delivery} : {}),
       ...(killBackgroundTasks ? {killBackgroundTasks: true} : {}),
     }, async () => {
       if (this.writing.has(id)) throw new BridgeError('busy', '此会话正在处理另一次操作');
       const summary = this.summary(id);
-      const canStop = summary.status === active || (killBackgroundTasks && Boolean(summary.notIdle));
-      if (turnKey(summary) !== turn || !(sending ? canSend(summary) : canStop)) throw new BridgeError('changed', '会话状态已变化，请刷新后再操作');
+      if (!sending) {
+        const canStop = summary.status === active || (killBackgroundTasks && Boolean(summary.notIdle));
+        if (turnKey(summary) !== turn || !canStop) throw new BridgeError('changed', '会话状态已变化，请刷新后再操作');
+        this.writing.add(id);
+        try {
+          await this.hub(this.daemonDir(), 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks});
+          return {stopRequested: true};
+        } finally { this.writing.delete(id); }
+      }
       this.writing.add(id);
       try {
-        const directory = this.daemonDir();
-        if (sending) {
+        if (delivery === 'queue') {
+          const behind = !canSend(summary) || this.queue.queued(id).length > 0 || await this.hasWaitingRequests(id, summary);
+          if (behind) {
+            if (model) {
+              const {models} = await this.modelCatalog();
+              if (!models.some(option => option.id === model)) throw new BridgeError('invalid', '所选模型已不可用，请重新选择');
+            }
+            const prompt = await withAttachmentLinks(this.ledger, conversationScope(id), text!, files);
+            this.queue.enqueue(opId, id, {
+              text: prompt,
+              ...(images.length ? {images} : {}),
+              ...(files.length ? {fileNames: files.map(file => file.name)} : {}),
+              ...(model ? {model} : {}),
+              ...(permissionMode ? {permissionMode} : {}),
+            });
+            this.queueChanged(id);
+            return {conversationId: id, kind: 'queued'};
+          }
+          if (turn !== undefined && turnKey(summary) !== turn) throw new BridgeError('changed', '会话状态已变化，请刷新后再操作');
           const prompt = await withAttachmentLinks(this.ledger, conversationScope(id), text!, files);
-          const message: Json = {cascadeId: id, items: [{text: prompt}], ...(images.length ? {media: antigravityMedia(images)} : {}), clientMessageId: opId.split(':')[1]};
-          if (model || permissionMode) {
-            const base = await this.turnConfig(summary);
-            const withModel = await this.withModel(base, model);
-            message.cascadeConfig = this.withPermission(withModel, permissionMode);
-            const latest = this.summary(id);
-            if (turnKey(latest) !== turn || !canSend(latest)) throw new BridgeError('changed', '会话状态已变化，请刷新后再发送');
-          }
-          if (permissionMode) {
-            await this.hub(directory, 'UpdateConversationAnnotations', {cascadeId: id, annotations: {permissionPreset: permissionMode}, mergeAnnotations: true}).catch(() => {});
-          }
-          await this.hub(directory, 'SendUserCascadeMessage', message);
-          // Antigravity reports no tokens; the turn still counts for whoever sent it.
-          this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
-          this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: prompt});
-          return {submitted: true};
+          await this.sendToHub(id, summary, {text: prompt, images, model, permissionMode}, opId, {expectedTurn: turn});
+          return {submitted: true, kind: 'turn_accepted'};
         }
-        await this.hub(directory, 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks});
-        return {stopRequested: true};
+        if (delivery === 'steer') {
+          const running = summary.status === active;
+          if (!running && !canSend(summary)) throw new BridgeError('changed', '会话正在切换状态，请稍后重试');
+          const prompt = await withAttachmentLinks(this.ledger, conversationScope(id), text!, files);
+          await this.sendToHub(id, summary, {text: prompt, images, model, permissionMode}, opId, running ? {deliveryStrategy: NEXT_INVOCATION} : undefined);
+          return {submitted: true, kind: running ? 'steer_accepted' : 'turn_accepted'};
+        }
+        // Immediate send ('now'): validate model and attachments before interrupting any running turn.
+        if (model) {
+          const {models} = await this.modelCatalog();
+          if (!models.some(option => option.id === model)) throw new BridgeError('invalid', '所选模型已不可用，请重新选择');
+        }
+        const prompt = await withAttachmentLinks(this.ledger, conversationScope(id), text!, files);
+        const ready = summary.status === idle ? summary : await this.cancelAndWaitForIdle(id);
+        await this.sendToHub(id, ready, {text: prompt, images, model, permissionMode}, opId);
+        return {submitted: true, kind: 'sent_now'};
       } finally { this.writing.delete(id); }
     });
   }

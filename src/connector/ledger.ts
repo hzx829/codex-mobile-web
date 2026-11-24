@@ -21,7 +21,7 @@ function canonical(v: any): string {
   if(v&&typeof v==='object')return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';
   return JSON.stringify(v);
 }
-const QUEUE_TABLES=['queued_messages','claude_queued_messages'] as const;
+const QUEUE_TABLES=['queued_messages','claude_queued_messages','antigravity_queued_messages'] as const;
 
 /** Messages held on this computer until their session's running turn ends; each row is also an operation. */
 export class MessageQueue {
@@ -65,6 +65,8 @@ export class Ledger {
   readonly codexQueue: MessageQueue;
   /** Claude Code's own queue, apart from Codex's so neither drains the other's messages. */
   readonly claudeQueue: MessageQueue;
+  /** Antigravity's own queue, apart from Codex's and Claude Code's. */
+  readonly antigravityQueue: MessageQueue;
   private inflight = new Map<string,Promise<Json>>();
   constructor(path:string) {
     this.db=new DatabaseSync(path);
@@ -96,6 +98,7 @@ export class Ledger {
     this.db.exec('DELETE FROM operation_actors WHERE id NOT IN (SELECT id FROM operations)');
     this.codexQueue=new MessageQueue(this,'queued_messages');
     this.claudeQueue=new MessageQueue(this,'claude_queued_messages');
+    this.antigravityQueue=new MessageQueue(this,'antigravity_queued_messages');
   }
   read(id:string):Json {
     const row=this.db.prepare('SELECT state,result FROM operations WHERE id=?').get(id);

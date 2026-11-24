@@ -100,7 +100,8 @@ if(available.includes('claude')){
 }
 if(!guest){
   const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
-  bridges.push({prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.create','antigravity.send','antigravity.stop','antigravity.respond']});
+  bridges.push({prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.create','antigravity.send','antigravity.stop','antigravity.respond','antigravity.steerQueued','antigravity.withdrawQueued','antigravity.cancelQueued'],
+    prepareReload:()=>{if(antigravity.busy)throw new BridgeError('active','Antigravity 排队消息正在处理，请稍后更新');},close:()=>antigravity.close()});
 }
 const useCodex=available.includes('codex');
 const services=new ServiceRouter(bridges,request=>{

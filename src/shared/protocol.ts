@@ -24,6 +24,8 @@ export const CONNECTOR_FEATURES = [
   'voice.antigravity',
   /** Antigravity supports grouped models, permission presets and approval cards (`antigravity.respond`). */
   'antigravity.composer',
+  /** Antigravity supports queuing messages behind a running turn, steering and sending immediately. */
+  'antigravity.queue',
 ] as const;
 export type ConnectorFeature = typeof CONNECTOR_FEATURES[number];
 

@@ -1,5 +1,5 @@
 export type Json = Record<string, any>;
-export type AntigravityAction = `antigravity.${'list' | 'create' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'respond' | 'operation' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk'}`;
+export type AntigravityAction = `antigravity.${'list' | 'create' | 'read' | 'watch' | 'models' | 'send' | 'stop' | 'respond' | 'operation' | 'steerQueued' | 'withdrawQueued' | 'cancelQueued' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk'}`;
 export type ClaudeAction = `claude.${'list' | 'read' | 'watch' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'models' | 'create' | 'send' | 'stop' | 'respond' | 'operation' | 'project.get' | 'project.save' | 'fork' | 'rename' | 'archive' | 'edit' | 'steerQueued' | 'withdrawQueued' | 'cancelQueued' | 'artifact.snapshot' | 'artifact.download' | 'artifact.login'}`;
 export type AntigravityModel = {id:string; label:string; description?:string; supportsImages?:boolean; group?:string; groupLabel?:string; effort?:string};
 export type AntigravityModelGroup = {id:string; label:string; description?:string; efforts?:string[]; defaultEffort?:string; variants?:Record<string,string>; supportsImages?:boolean};
