@@ -30,8 +30,13 @@ export const CONNECTOR_FEATURES = [
   'sync.claude',
   /** Antigravity conversations are followed the same way, their messages as entries. */
   'sync.antigravity',
+  /** Files download through the relay's data channel (blob.pull), as HTTP streams instead of base64 chunks. */
+  'blob',
 ] as const;
 export type ConnectorFeature = typeof CONNECTOR_FEATURES[number];
+
+/** The downloads the relay's data channel may ask a computer for (src/server/blob.ts, src/connector/blob.ts). */
+export const BLOB_ACTIONS: ReadonlySet<string> = new Set(['file.download', 'claude.file.download', 'antigravity.file.download']);
 
 const featureName = /^[a-z][\w.-]{0,63}$/i;
 /** What a relay keeps from a connector's report: a sane version and at most 64 well-formed names. */

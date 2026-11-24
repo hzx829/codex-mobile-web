@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {open, readFile, readdir, stat} from 'node:fs/promises';
 import {dirname, isAbsolute, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {readProjectFile, downloadProjectFile} from './project.js';
+import {readProjectFile, downloadProjectFile, openProjectDownload} from './project.js';
 import {setTimeout as delay} from 'node:timers/promises';
 import {
   ANTIGRAVITY_PERMISSION_MODES,
@@ -1299,6 +1299,7 @@ export class AntigravityBridge {
       if (!row) throw new BridgeError('missing', '桌面上找不到这条 Antigravity 会话');
       const cwd=isAbsolute(path)?'':singleWorkspace(String(row.workspace_uris));
       return action === 'antigravity.file.read' ? readProjectFile(cwd, path)
+        : p.stream === true ? openProjectDownload(cwd, path, textRequired(p.revision, '文件版本', 64), p.range) as unknown as Promise<Json>
         : downloadProjectFile(cwd, path, textRequired(p.revision, '文件版本', 64), p.offset);
     }
     if (action === 'antigravity.models') {

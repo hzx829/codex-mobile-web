@@ -10,6 +10,7 @@ import { machineIdPattern, type ConnectorToken } from '../shared/config.js';
 import { PreviewTunnel } from './preview-tunnel.js';
 import { connectorReport } from '../shared/protocol.js';
 import { isSyncService } from '../shared/sync.js';
+import { BlobChannel } from './blob.js';
 import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 import { TeamError, type TeamStore } from './team/store.js';
 import { CREATE_ACTIONS, LIST_ACTIONS, MUTATION_ACTIONS, READ_ACTIONS, SENDER_ACTIONS, SEND_ACTIONS, createdThread, handleTeam, publicUser, refreshSenderNames, serviceOf, threadOf, type Member } from './team/actions.js';
@@ -39,6 +40,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
     try{const origin=new URL(`${secure?'https':'http'}://${req.headers.host}`);origin.port=String((preview.server.address() as any)?.port||previewPort);frameOrigin=origin.origin+' ';}catch{}
     res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; font-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: ${outside}; img-src 'self' data: blob:; frame-src ${frameOrigin}${outside}; frame-ancestors 'none'; object-src 'none'; base-uri 'none'`);
     if(req.url==='/health'){res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');return;}
+    if(blob.handle(req,res))return;
     try {
       const pathname=decodeURIComponent(new URL(req.url||'/', 'http://localhost').pathname);
       const file=resolve(staticDir,'.'+(pathname==='/'?'/index.html':pathname));
@@ -70,6 +72,24 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
     ws.send(frame,{compress:!dense&&size<=COMPRESS_LIMIT});
   }
   const preview=new PreviewTunnel(send,previewPort);
+  // Files go to phones as HTTP streams (src/server/blob.ts). A device signs in as it does on its connection; with a team,
+  // every download checks again that the device still exists and may use that computer.
+  const blob=new BlobChannel({
+    signIn:supplied=>{
+      if(team?.enabled){try{const member=team.authenticate(supplied);return member?{deviceId:member.device.id}:null;}catch{return null;}}
+      return matches(Buffer.from(supplied),mainToken)?{}:null;
+    },
+    allowed:(session,machineId)=>{
+      if(!session.deviceId)return !team?.enabled;
+      const current=team?.session(session.deviceId);
+      return Boolean(current&&team!.canUse(current.user,machineId));
+    },
+    pull:(machineId,message)=>{
+      const connector=[...peers].find(([,q])=>q.role==='connector'&&q.machine?.id===machineId)?.[0];
+      if(!connector||connector.readyState!==WebSocket.OPEN)return false;
+      send(connector,message);return true;
+    },
+  });
   const allowed=(p:Peer,machineId:string|undefined)=>!p.member||Boolean(machineId&&team?.canUse(p.member.user,machineId));
   function machines(viewer?:Peer){return [...peers.values()].flatMap(p=>p.machine&&(!viewer||allowed(viewer,p.machine.id))?[p.machine]:[]);}
   function publish(){for(const [ws,p]of peers)if(p.role==='phone')send(ws,{type:'machines',data:machines(p)});}
@@ -175,7 +195,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         const peer:Peer={role:m.role,machine,alive:true,member};
         peers.set(ws,peer);clearTimeout(authTimer);
         // `features` lets connectors push live frames only through a relay that forwards them.
-        send(ws,{type:'ready',machines:machines(m.role==='phone'?peer:undefined),features:team?['live','sync','team']:['live','sync'],
+        send(ws,{type:'ready',machines:machines(m.role==='phone'?peer:undefined),features:team?['live','sync','blob','team']:['live','sync','blob'],
           ...member?{user:publicUser(member.user),device:{id:member.device.id,name:member.device.name}}:{},...deviceToken?{deviceToken}:{}});
         publish();return;
       }
@@ -254,5 +274,5 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
   });
   const heartbeat=setInterval(()=>{for(const [ws,p]of peers){if(!p.alive){ws.terminate();continue;}p.alive=false;ws.ping();}},15_000);
   server.on('close',()=>clearInterval(heartbeat));
-  return {server,previewServer:preview.server,wss,close:async()=>{clearInterval(heartbeat);for(const ws of wss.clients)ws.terminate();for(const r of routes.values())clearTimeout(r.timer);await preview.close();await new Promise<void>(r=>wss.close(()=>server.close(()=>r())));}};
+  return {server,previewServer:preview.server,wss,close:async()=>{clearInterval(heartbeat);blob.close();for(const ws of wss.clients)ws.terminate();for(const r of routes.values())clearTimeout(r.timer);await preview.close();await new Promise<void>(r=>wss.close(()=>server.close(()=>r())));}};
 }

@@ -7,7 +7,7 @@ import { Ledger } from './ledger.js';
 import { codexRetryText, desktopTurns, normalizeSession, normalizeTurn, turnPage } from './normalize.js';
 import { LiveDiff, RuntimeLive, type LiveFrame } from './live.js';
 import { approvalResult } from './approvals.js';
-import { createGuestProject, guestWorkspace, projectDirectory, readProjectFile, downloadProjectFile, workspaceProjects } from './project.js';
+import { createGuestProject, guestWorkspace, projectDirectory, readProjectFile, downloadProjectFile, openProjectDownload, workspaceProjects } from './project.js';
 import { nativeProjects, indexedSessions, indexedProjectPaths } from './projects.js';
 import { readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor, type TurnView } from '../shared/types.js';
@@ -214,7 +214,9 @@ export class Control extends EventEmitter {
     }
     if(req.action==='file.read'||req.action==='file.download') {
       const session=await this.read(textRequired(p.threadId,'会话'),5),path=textRequired(p.path,'文件路径');
-      return req.action==='file.read'?readProjectFile(session.cwd,path):downloadProjectFile(session.cwd,path,textRequired(p.revision,'文件版本',64),p.offset);
+      // `stream`: set only by the connector itself for a download through the relay's data channel (src/connector/blob.ts).
+      return req.action==='file.read'?readProjectFile(session.cwd,path):p.stream===true?openProjectDownload(session.cwd,path,textRequired(p.revision,'文件版本',64),p.range) as unknown as Json
+        :downloadProjectFile(session.cwd,path,textRequired(p.revision,'文件版本',64),p.offset);
     }
     throw new BridgeError('unsupported','此操作暂不支持');
   }

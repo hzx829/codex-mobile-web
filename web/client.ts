@@ -14,6 +14,8 @@ export function deviceName(agent=typeof navigator==='undefined'?'':navigator.use
 export class Client {
   ws:WebSocket|null=null;
   ready=false;
+  /** What the relay said it supports when this connection signed in. */
+  relayFeatures:string[]=[];
   private stopped=false;
   private retry=0;
   private timer:ReturnType<typeof setTimeout>|undefined;
@@ -32,7 +34,7 @@ export class Client {
     ws.onopen=()=>{const invite=inviteCode(this.token);ws.send(JSON.stringify(invite?{type:'hello',role:'phone',invite,deviceName:deviceName()}:{type:'hello',role:'phone',token:this.token}));};
     ws.onmessage=e=>{
       let m:Json;try{m=JSON.parse(e.data);}catch{return;}
-      if(m.type==='ready'){if(typeof m.deviceToken==='string'){this.token=m.deviceToken;this.credential(m.deviceToken);}this.ready=true;this.retry=0;this.sendWatch();this.setStatus('online');}
+      if(m.type==='ready'){if(typeof m.deviceToken==='string'){this.token=m.deviceToken;this.credential(m.deviceToken);}this.relayFeatures=Array.isArray(m.features)?m.features:[];this.ready=true;this.retry=0;this.sendWatch();this.setStatus('online');}
       if(m.type==='received'){
         const p=this.pending.get(m.id);if(!p)return;
         clearTimeout(p.timer);
@@ -88,6 +90,8 @@ export class Client {
     if(this.watching?.machineId===target?.machineId&&this.watching?.threadId===target?.threadId&&this.watching?.service===target?.service)return;
     this.watching=target;if(this.ready)this.sendWatch();
   }
+  /** The token this device signs in with now; also signs it in to the relay's data channel (web/blob.ts). */
+  get signInToken(){return this.token;}
   /** The thread this page follows, as last set with {@link watch}. */
   get watched(){return this.watching;}
   private sendWatch(){try{this.ws?.send(JSON.stringify({type:'watch',machineId:this.watching?.machineId??null,threadId:this.watching?.threadId??null,...this.watching?.service?{service:this.watching.service}:{}}));}catch{}}

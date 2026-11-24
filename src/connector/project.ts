@@ -1,5 +1,6 @@
 import { lstat, mkdir, open, readdir, realpath, stat } from 'node:fs/promises';
 import type { BigIntStats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { resolve, isAbsolute, extname, basename, dirname, join, relative, sep, toNamespacedPath } from 'node:path';
 import { createHash } from 'node:crypto';
 import { BridgeError, FILE_CHUNK_SIZE, MAX_DOWNLOAD_SIZE, type FilePreview, type FileChunk } from '../shared/types.js';
@@ -110,6 +111,28 @@ export async function readProjectFile(cwd:string,path:string):Promise<FilePrevie
     if(data.includes(0)||/\.(pdf|pptx?|docx?|xlsx?|zip)$/i.test(target))return binary;
     try{return {...file,mime:'text/plain',text:new TextDecoder('utf-8',{fatal:true}).decode(data)};}catch{return binary;}
   }catch(error){fileError(error);}finally{await handle.close();}
+}
+
+/** A file opened for a stream download (src/connector/blob.ts); whoever gets it reads `start`..`end` and closes `handle`. */
+export class FileStream {
+  constructor(readonly handle:FileHandle,readonly size:number,readonly start:number,readonly end:number,readonly name:string,readonly mime:string){}
+}
+const STREAM_TYPES:Record<string,string>={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif',
+  '.mp4':'video/mp4','.m4v':'video/mp4','.webm':'video/webm','.ogv':'video/ogg','.mov':'video/quicktime','.pdf':'application/pdf'};
+/**
+ * Opens a file for a stream download with the same checks as {@link downloadProjectFile}. `range`: the bytes asked for,
+ * `end` included; the whole file without it.
+ */
+export async function openProjectDownload(cwd:string,path:string,expectedRevision:string,range?:unknown):Promise<FileStream> {
+  const {handle,target,info}=await openProjectFile(cwd,path);
+  try {
+    if(info.size>BigInt(MAX_DOWNLOAD_SIZE))throw new BridgeError('too_large','下载上限为 100 MiB，请在电脑获取此文件');
+    if(revision(target,info)!==expectedRevision)throw changed();
+    const size=Number(info.size),asked=range&&typeof range==='object'?range as {start?:unknown;end?:unknown}:{};
+    const start=asked.start===undefined?0:Number(asked.start),end=asked.end===undefined?size-1:Math.min(size-1,Number(asked.end));
+    if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||(size>0&&start>end))throw new BridgeError('range','请求的文件范围无效');
+    return new FileStream(handle,size,start,end,basename(target),STREAM_TYPES[extname(target).toLowerCase()]||'application/octet-stream');
+  }catch(error){await handle.close();fileError(error);}
 }
 
 export async function downloadProjectFile(cwd:string,path:string,expectedRevision:string,offset:number):Promise<FileChunk> {

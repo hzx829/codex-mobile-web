@@ -102,7 +102,7 @@ test('without members the shared Token still signs in phones',async()=>{
   try{
     const phone=await relay.hello({role:'phone',token:MAIN});
     assert.ok(phone.ready);assert.equal(phone.ready.user,undefined);
-    assert.deepEqual(phone.ready.features,['live','sync','team']);
+    assert.deepEqual(phone.ready.features,['live','sync','blob','team']);
   }finally{await relay.close();store.close();await removeTestTemp(dir);}
 });
 
@@ -204,4 +204,32 @@ test('senders in synced snapshots, pages and frames carry the member’s current
   assert.equal(value.entries[0].body.items![0].sender.name,'Current');
   assert.equal(value.entries[1].body.sender!.name,'Current');
   assert.equal((value.patches[0].ops[0] as any).item.sender.name,'Current');
+});
+
+test('the data channel signs in members by device and checks their computers on every download',async()=>{
+  const {dir,store}=await tempStore();
+  const {relay,connector,close}=await startRelay(store);
+  try{
+    const base=`http://127.0.0.1:${(relay.server.address() as any).port}`;
+    const owner=store.createUser({name:'Ada',role:'owner'});store.redeemInvite(store.createInvite(owner.id,null).code,'owner phone');
+    const member=store.createUser({name:'Bo',role:'member',machines:['pc-a']});
+    const {token,device}=store.redeemInvite(store.createInvite(member.id,null).code,'Bo phone');
+    const pulls:string[]=[];
+    const a=await connector('pc-a');await connector('pc-b');
+    a.ws.on('message',(raw:any)=>{if(JSON.parse(raw.toString()).type==='blob.pull')pulls.push('pc-a');});
+    const signIn=(value:string)=>fetch(`${base}/blob/session`,{method:'POST',headers:{Authorization:`Bearer ${value}`}});
+    assert.equal((await signIn(MAIN)).status,401,'With a team, the shared token does not sign in.');
+    const signed=await signIn(token);
+    assert.equal(signed.status,204);
+    const cookie=signed.headers.get('set-cookie')!.split(';')[0];
+    const file=(machine:string,signal?:AbortSignal)=>fetch(`${base}/blob/${machine}/file?action=file.download&threadId=t&path=x&revision=r`,{headers:{cookie},signal});
+    assert.equal((await file('pc-b')).status,403,'A computer the member may not use is refused before it is asked.');
+    // The fake computer never sends the file; the download is left waiting and then abandoned.
+    const controller=new AbortController(),waiting=file('pc-a',controller.signal).catch(()=>null);
+    await new Promise(resolve=>setTimeout(resolve,150));
+    controller.abort();await waiting;
+    assert.deepEqual(pulls,['pc-a']);
+    store.revokeDevice(device.id);
+    assert.equal((await file('pc-a')).status,403,'A removed device loses the channel at once.');
+  }finally{await close();store.close();await removeTestTemp(dir);}
 });

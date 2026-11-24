@@ -41,7 +41,7 @@ import {relativeTime,ThreadMenu,ThreadRow} from './thread-menu';
 import type {MenuPoint} from './popover';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import {groupThreads,visibleThreads,rememberThreads,saveThread,type ThreadPreferences,type ThreadPreference} from './thread-preferences';
-import {type Json,type Machine,type SessionView,type RequestAction,type TurnView} from '../src/shared/types';
+import {type FilePreview,type Json,type Machine,type SessionView,type RequestAction,type TurnView} from '../src/shared/types';
 import {submitTurn,editTurn} from './turn-request';
 import {modelDisplayName,reasoningLabel,resolveModelSelection} from '../src/shared/models';
 import {ModelButton,ModelPicker} from './model-picker';
@@ -58,6 +58,8 @@ import './model-picker.css';
 import {SenderRoot,SenderScope} from './senders';
 import {traceOpen} from './trace';
 import type {SyncLink} from './sync/engine';
+import {blobSession,blobUrl} from './blob';
+import type {FileStreamSource} from './file-preview';
 
 const FilePreviewPanel=lazy(()=>import('./file-preview').then(module=>({default:module.FilePreviewPanel})));
 const DiffViewer=lazy(()=>import('./diff-viewer').then(module=>({default:module.DiffViewer})));
@@ -484,11 +486,22 @@ function App(){
     }
     setBusy(false);setUploadProgress(null);void refreshSession();void list();
   }
-  function fileRequest(action:'read'|'download',ownerMachine:string,threadId:string,payload:Json){
+  /** The action and payload that read a thread's file: Codex's `file.*`, or the app's own with its conversation. */
+  function fileAction(action:'read'|'download',threadId:string,payload:Json):{action:RequestAction;payload:Json}|null{
     const owner=fileOwner(threadId);
-    if(owner.service==='antigravity'||owner.service==='claude')return call(`${owner.service}.file.${action}`,{conversationId:owner.id,...payload},ownerMachine);
-    if(owner.service!=='codex')return Promise.reject(new Error('这个应用暂不支持读取文件'));
-    return call(`file.${action}`,{threadId,...payload},ownerMachine);
+    if(owner.service==='antigravity'||owner.service==='claude')return {action:`${owner.service}.file.${action}`,payload:{conversationId:owner.id,...payload}};
+    if(owner.service!=='codex')return null;
+    return {action:`file.${action}`,payload:{threadId,...payload}};
+  }
+  function fileRequest(action:'read'|'download',ownerMachine:string,threadId:string,payload:Json){
+    const request=fileAction(action,threadId,payload);
+    return request?call(request.action,request.payload,ownerMachine):Promise.reject(new Error('这个应用暂不支持读取文件'));
+  }
+  /** A file through the relay's data channel, when both the relay and that computer's connector have it (web/blob.ts). */
+  function fileStream(ownerMachine:string,threadId:string,file:FilePreview):FileStreamSource|undefined{
+    const link=client.current,request=fileAction('download',threadId,{path:file.path,revision:file.revision});
+    if(!link||!request||!link.relayFeatures.includes('blob')||!connectorHas(machines.find(item=>item.id===ownerMachine),'blob'))return undefined;
+    return {url:download=>blobUrl(ownerMachine,request.action,request.payload,download),ready:()=>blobSession(link.signInToken)};
   }
   async function openFile(reference:string,ownerMachine=machine,ownerThread=previewThread){
     const {path,line}=fileReference(reference),request=++fileSequence.current;
@@ -622,6 +635,7 @@ function App(){
            htmlPreview={browserState?.filePath===target.file.path&&belongsToThread(browserState,target.machineId,target.threadId)?<WebViewer session={browserState} onEnd={closeBrowser}/>:browserBusy?<p role="status">正在打开网页…</p>:null}
            htmlError={target.error} openHtml={()=>void openBrowser({filePath:target.file!.path},target)}
            readFile={path=>fileRequest('read',target.machineId,target.threadId,{path})}
+           stream={fileStream(target.machineId,target.threadId,target.file)}
            read={offset=>fileRequest('download',target.machineId,target.threadId,{path:target.file!.path,revision:target.file!.revision,offset})}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''),target.machineId,target.threadId)}>重试</button>}</div>)}
          {target.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer text={target.text} compact={compactPreview}/></Suspense>}
          {target.kind==='web'&&<WebViewer session={target.session} onEnd={closeBrowser}/>}

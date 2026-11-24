@@ -6,7 +6,7 @@ import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {BridgeError, MAX_FRAME, textRequired, type Json, type TurnView} from '../shared/types.js';
-import {checkProjectPath, downloadProjectFile, guestWorkspace, projectDirectory, readProjectFile, workspaceProjects} from './project.js';
+import {checkProjectPath, downloadProjectFile, openProjectDownload, guestWorkspace, projectDirectory, readProjectFile, workspaceProjects} from './project.js';
 import {imageBytes, validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
@@ -546,6 +546,7 @@ export class ClaudeCodeBridge {
       if (/^[\\/]{2}/.test(path)) throw new BridgeError('invalid', '请选择本机文件');
       const {cwd = ''} = await this.info(id);
       return action === 'claude.file.read' ? readProjectFile(cwd, path)
+        : p.stream === true ? openProjectDownload(cwd, path, textRequired(p.revision, '文件版本', 64), p.range) as unknown as Promise<Json>
         : downloadProjectFile(cwd, path, textRequired(p.revision, '文件版本', 64), p.offset);
     }
     if (action === 'claude.send') {

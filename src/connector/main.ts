@@ -23,6 +23,7 @@ import { recordClaudeTurn } from './usage-meter.js';
 import { ClaudeVoiceAuth, ClaudeVoiceStreams } from './claude-voice.js';
 import { traced } from './trace.js';
 import { ThreadHub } from './thread-hub.js';
+import { BLOB_ACTIONS, sendBlob } from './blob.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -157,6 +158,13 @@ function connect() {
     if(m.type==='usage.ack'){if(Array.isArray(m.ids))ledger.ackUsage(m.ids);usageSending=false;flushUsage();return;}
     if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
     if(m.type==='preview.stop'){if(typeof m.sessionId==='string'&&typeof m.threadId==='string')browserPreview.stop(m.sessionId,m.threadId);return;}
+    // The relay's data channel: a file goes to the relay as one HTTP upload, after the same checks as a chunked download.
+    if(m.type==='blob.pull'){
+      if(typeof m.stream!=='string'||!BLOB_ACTIONS.has(m.action))return;
+      const payload=m.payload&&typeof m.payload==='object'?{...m.payload,stream:true,range:m.range}:{stream:true,range:m.range};
+      void sendBlob(config.relayUrl,m.stream,()=>services.handle({id:m.stream,action:m.action,payload}));
+      return;
+    }
     if(m.type!=='request')return;
     const respond=(promise:Promise<Json>)=>promise.then(result=>{if(socket===ws)send({type:'response',id:m.id,result});},e=>{
       const err=e instanceof BridgeError?e:new BridgeError('computer_error','电脑处理失败，请查看本机状态');
@@ -166,6 +174,8 @@ function connect() {
     if(typeof m.action==='string'&&m.action.startsWith('voice.stream.')){void respond(handleVoiceStream(m.action,m.payload&&typeof m.payload==='object'?m.payload:{}));return;}
     // A traced request (web/trace.ts) reports how long it took here; live frames carry timings for a while after one.
     const traceOn=m.trace===true;if(traceOn)traceUntil=Date.now()+TRACE_LIVE_MS;
+    // Only the data channel above opens files for streaming; a phone cannot ask for it.
+    if(m.payload&&typeof m.payload==='object'){delete m.payload.stream;delete m.payload.range;}
     const started=performance.now();
     try{
       // Operations started by this request record the team member the relay names as its sender.

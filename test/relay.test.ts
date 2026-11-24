@@ -265,7 +265,7 @@ test('a disconnected pending preview only cleans up its own session, leaving the
 test('live frames reach only the phone watching that thread, and phone frames are compressed',async()=>{
   const token='test-token-not-a-real-secret-123456789';const relay=createRelay(token);relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');
   const url=`ws://127.0.0.1:${(relay.server.address() as any).port}/ws`;
-  async function peer(role:string){const ws=new WebSocket(url);await once(ws,'open');const ready=waitFrame(ws,m=>m.type==='ready');ws.send(JSON.stringify({type:'hello',role,token,machineId:'pc',name:'PC'}));assert.deepEqual((await ready).features,['live','sync']);return ws;}
+  async function peer(role:string){const ws=new WebSocket(url);await once(ws,'open');const ready=waitFrame(ws,m=>m.type==='ready');ws.send(JSON.stringify({type:'hello',role,token,machineId:'pc',name:'PC'}));assert.deepEqual((await ready).features,['live','sync','blob']);return ws;}
   try{
     const connector=await peer('connector');
     connector.on('message',raw=>{const m=JSON.parse(raw.toString());if(m.type==='request')connector.send(JSON.stringify({type:'response',id:m.id,result:{id:m.payload.threadId,text:'x'.repeat(50_000)}}));});
