@@ -10,6 +10,8 @@ import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {cachedView,rememberView,threadKey} from './session-cache';
 import {traceOpen} from './trace';
+import {seedOf,useSyncedPanel,useThreadSync} from './use-thread-sync';
+import type {SyncLink} from './sync/engine';
 import {MAX_ATTACHMENTS} from '../src/shared/attachments';
 import {MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import {AntigravityMessages,antigravityIssueText} from './antigravity-messages';
@@ -56,6 +58,8 @@ type Props={
   machineName:string;showFiles:()=>void;showImage:(url:string,title:string)=>void;copyText:(text:string)=>Promise<void>;clearPreviewError:()=>void;
   /** Voice provider chosen for Antigravity; `chooseVoice` opens this app's voice settings. */
   voiceMode:VoiceProvider;chooseVoice:()=>void;
+  /** Set when the computer's connector pushes this app's conversations (`sync.antigravity`): the conversation follows it. */
+  sync?:SyncLink;
 };
 
 export function BackgroundTasksBar({tasks,onOpen}:{tasks:AntigravityBackgroundTask[];onOpen:()=>void}){
@@ -179,8 +183,14 @@ export function AntigravityPanel(props:Props){
   const copy=useStableEvent((text:string)=>{void props.copyText(text).catch(()=>setError('复制失败，请长按选择文字'));});
   function remember(op:string){setPending(op);store(`${key}:pending`,op);}
   function failed(e:any){if(alive.current)setError(e?.code==='unsupported'?'请更新这台电脑上的连接器以使用 Antigravity。':e?.message||'Antigravity 操作失败');}
+  // With a connector that pushes conversations, the conversation follows its frames; reads and watches are for older ones.
+  const synced=useThreadSync(creating?undefined:props.sync,'antigravity',conversationId,()=>seedOf(cachedView<Json>(cacheKey),'messages'));
+  const syncing=Boolean(props.sync&&!creating);
+  useSyncedPanel(synced.view,'messages',setView,setError,'请更新这台电脑上的连接器以使用 Antigravity。');
   async function refresh(quiet=false){
-    if(!connected||lock.current||creating)return;lock.current=true;setBusy(true);
+    if(!connected||creating)return;
+    if(synced.engine.current){if(!quiet)setError('');await synced.engine.current.open();return;}
+    if(lock.current)return;lock.current=true;setBusy(true);
     try{
       const value=await request.current('antigravity.read',{conversationId});
       if(!alive.current)return;
@@ -193,7 +203,7 @@ export function AntigravityPanel(props:Props){
     return()=>{alive.current=false;};
   },[]);
   useEffect(()=>{
-    void refresh(true);
+    if(!syncing)void refresh(true);
   },[connected]);
   useEffect(()=>{
     if(!creating||!connected)return;
@@ -204,7 +214,7 @@ export function AntigravityPanel(props:Props){
     }).catch(failed);
   },[creating,connected]);
   useEffect(()=>{
-    if(!connected||!view?.revision)return;
+    if(!connected||!view?.revision||syncing)return;
     let active=true,inflight=false;
     let timer:ReturnType<typeof setTimeout>;
     async function watch(){
@@ -238,7 +248,7 @@ export function AntigravityPanel(props:Props){
     void watch();
     document.addEventListener('visibilitychange',watch);
     return()=>{active=false;clearTimeout(timer);document.removeEventListener('visibilitychange',watch);};
-  },[connected,conversationId,view?.revision]);
+  },[connected,conversationId,view?.revision,syncing]);
   async function check(){
     if(lock.current||!pending||!connected)return;lock.current=true;setBusy(true);
     try{
@@ -393,7 +403,7 @@ export function AntigravityPanel(props:Props){
           {projects?.map(item=><option key={item.id} value={item.id}>{projectName(item)}</option>)}
         </select></label></div>}
       {view&&<SenderScope senders={view.messages.map((message:{sender?:{id:string;name:string}})=>message.sender)}><AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/></SenderScope>}
-      {!view&&busy&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
+      {!view&&(busy||synced.view?.phase==='syncing'&&!synced.view.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
       {view&&!view.messages.length&&<p className="muted">{view.running?'Antigravity 正在开始处理…':'桌面尚未记录可显示的消息。'}</p>}
       {antigravityStatus&&<ConversationStatus>{antigravityStatus}</ConversationStatus>}
     </div></div>

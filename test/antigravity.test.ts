@@ -663,3 +663,36 @@ test('Antigravity queues messages behind a running turn, drains one per turn, an
   assert.match(queueHtml, /立即追加到当前任务/);
   assert.match(queueHtml, /下一句/);
 });
+
+test('an Antigravity conversation is followed through the subscription hub, its messages pushed as they are written', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'cmw-antigravity-sync-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir,'conversation_summaries.db'));
+  const id = randomUUID(), logs = join(dir,'brain',id,'.system_generated','logs');
+  await mkdir(logs,{recursive:true});
+  const transcript = join(logs,'transcript.jsonl');
+  const line = (step:object) => JSON.stringify(step)+'\n';
+  await writeFile(transcript,line({type:'USER_INPUT',step_index:1,content:'<USER_REQUEST>hello</USER_REQUEST>'})+line({type:'PLANNER_RESPONSE',step_index:2,content:'hi'}));
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)').run(id,'Example','CASCADE_RUN_STATUS_IDLE','2026-11-17T02:00:00.000Z',2,1,'before',0,JSON.stringify([pathToFileURL(dir).href]));
+  const bridge = new AntigravityBridge(dir,ledger,async()=>({}),undefined,{queueIntervalMs:60_000});
+  const {ThreadHub} = await import('../src/connector/thread-hub.js');
+  const frames:any[]=[];
+  const hub = new ThreadHub(frame=>{frames.push(frame);});
+  hub.register('antigravity',bridge.syncSource);
+  t.after(async()=>{hub.close();bridge.close();db.close();ledger.close();await rm(dir,{recursive:true,force:true});});
+  const snapshot = await hub.open({service:'antigravity',threadId:id});
+  assert.deepEqual(snapshot.entries.map(entry=>entry.body),[{id:'1',role:'user',text:'hello'},{id:'2',role:'assistant',text:'hi'}]);
+  assert.equal(snapshot.head.title,'Example');
+  assert.equal('revision' in snapshot.head||'path' in snapshot.head||'live' in snapshot.head,false,'Only what the panel shows is in the head.');
+  const read = await bridge.handle('antigravity.read',{conversationId:id});
+  assert.deepEqual(read.messages.map((message:any)=>message.id),snapshot.order,'The old read and the subscription agree.');
+  db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING',step_count=3,last_modified_time='2026-11-17T02:01:00.000Z'");
+  await appendFile(transcript,line({type:'PLANNER_RESPONSE',step_index:3,content:'more'}));
+  await new Promise(resolve=>setTimeout(resolve,1000));
+  assert.ok(frames.length>=1);
+  assert.equal(frames[0].seq,snapshot.seq+1);
+  assert.deepEqual(frames.flatMap(frame=>frame.entries||[]).map((entry:any)=>entry.body),[{id:'3',role:'assistant',text:'more'}]);
+  assert.equal(frames.find(frame=>frame.head?.running!==undefined)?.head.running,true);
+  const again = await hub.open({service:'antigravity',threadId:id,have:Object.fromEntries([...snapshot.entries,...frames.flatMap(frame=>frame.entries||[])].map((entry:any)=>[entry.id,entry.rev]))});
+  assert.deepEqual(again.entries,[],'Reopening with what it holds sends no messages.');
+});

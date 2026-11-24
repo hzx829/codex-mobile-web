@@ -16,6 +16,8 @@ export interface ThreadSource {
   state(threadId: string): Promise<ThreadState>;
   /** Lets the source say a thread changed, so an open one is checked before the next poll. */
   watch?(poke: (threadId: string) => void): void;
+  /** How many of the newest entries a phone is sent and frames are compared over; turns default to 60. */
+  window?: number;
 }
 
 const WATCH_MS = 30_000, WINDOW = 60, POLL_MS = 250, MIN_GAP_MS = 40, KEEP_BODIES = 2, PAGE = 30;
@@ -77,7 +79,8 @@ export class ThreadHub {
     const state = thread.state!, all = state.entries;
     const have: Record<string, string> = payload.have && typeof payload.have === 'object' ? payload.have : {};
     const from = typeof payload.from === 'string' ? all.findIndex(entry => entry.id === payload.from) : -1;
-    const start = from >= 0 ? Math.min(from, Math.max(0, all.length - WINDOW)) : Math.max(0, all.length - WINDOW);
+    const size = this.source(thread.service).window ?? WINDOW;
+    const start = from >= 0 ? Math.min(from, Math.max(0, all.length - size)) : Math.max(0, all.length - size);
     const {order, entries} = this.fill(all.slice(start), have, Buffer.byteLength(JSON.stringify(state.head)));
     return {epoch: thread.epoch, seq: thread.seq, head: state.head, order, entries, hasMore: all.length > order.length};
   }
@@ -176,7 +179,8 @@ export class ThreadHub {
     return run;
   }
   private push(thread: Thread, state: ThreadState) {
-    const window = state.entries.slice(-WINDOW), order = window.map(entry => entry.id as string);
+    const size = this.source(thread.service).window ?? WINDOW;
+    const window = state.entries.slice(-size), order = window.map(entry => entry.id as string);
     const head = new Map(Object.entries(state.head).map(([key, value]) => [key, JSON.stringify(value) ?? 'null']));
     const sent: Sent = {head, order, revs: new Map(window.map(entry => [entry.id, revOf(entry)])), bodies: new Map(window.slice(-KEEP_BODIES).map(entry => [entry.id, entry]))};
     const previous = thread.sent;

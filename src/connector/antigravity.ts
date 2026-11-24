@@ -25,6 +25,7 @@ import {imageBytes, validateImages} from '../shared/images.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
 import {sendersByText} from './message-senders.js';
+import type {ThreadSource} from './thread-hub.js';
 
 const guid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const idle = 'CASCADE_RUN_STATUS_IDLE';
@@ -625,6 +626,9 @@ async function transcript(path: string): Promise<{messages: AntigravityMessage[]
   } finally { await file.close(); }
 }
 
+/** Checks of a followed conversation; see AntigravityBridge.followedSnapshot. */
+const FOLLOW_CHECK_MS = 200, FOLLOW_FULL_MS = 1300;
+type Snapshot = Awaited<ReturnType<AntigravityBridge['snapshot']>>;
 type LiveState = {
   permissionMode?: AntigravityPermissionMode;
   defaultPermissionMode?: AntigravityPermissionMode;
@@ -654,6 +658,10 @@ export class AntigravityBridge {
   private recent = new Map<string, {revision: string; baseRevision: string; live: LiveState; messages: AntigravityMessage[]}>();
   /** Bumped when a conversation's queue changes, so watching phones update without waiting for a transcript write. */
   private queueVersions = new Map<string, number>();
+  private queueListeners: ((id: string) => void)[] = [];
+  /** Conversations a phone follows (src/connector/thread-hub.ts): their last snapshot, as the watch loop below keeps it. */
+  private followed = new Map<string, {snapshot: Snapshot; checkedAt: number; fullAt: number; stale: boolean}>();
+  private views = new Map<string, {revision: string; value: Promise<{head: Json; entries: Json[]}>}>();
   /** Guards automatic draining right after a turn is dispatched while desktop SQLite still reports the prior idle summary. */
   private dispatchedTurn = new Map<string, {previousTurnKey: string; at: number}>();
   private queueTimer: NodeJS.Timeout;
@@ -678,7 +686,11 @@ export class AntigravityBridge {
   private get queue() { return this.ledger.antigravityQueue; }
   get busy() { return this.writing.size > 0 || Boolean(this.queue.queued().length); }
   close() { this.closed = true; clearInterval(this.queueTimer); }
-  private queueChanged(id: string) { this.queueVersions.set(id, (this.queueVersions.get(id) || 0) + 1); }
+  private queueChanged(id: string) {
+    this.queueVersions.set(id, (this.queueVersions.get(id) || 0) + 1);
+    const followed = this.followed.get(id);if (followed) followed.stale = true;
+    for (const listener of this.queueListeners) listener(id);
+  }
   private drainSoon(id: string) { if (!this.closed) setImmediate(() => { this.drain(id).catch(() => {}); }); }
 
   private isAwaitingDispatch(id: string, summary: Summary): boolean {
@@ -1167,6 +1179,60 @@ export class AntigravityBridge {
     }
     return {...view, issue, messages: items, notice: '显示桌面已记录的最近对话内容。'};
   }
+
+  /**
+   * How a followed conversation is checked, as the watch loop in {@link read} does: a cheap local snapshot (the desktop's
+   * index and the transcript's size) at most every {@link FOLLOW_CHECK_MS}, and the desktop's live steps again when the
+   * index moved, or every {@link FOLLOW_FULL_MS} while a turn runs or waits. A queue change is checked at once.
+   */
+  private async followedSnapshot(id: string): Promise<Snapshot> {
+    const now = Date.now(), previous = this.followed.get(id);
+    if (previous && !previous.stale && now - previous.checkedAt < FOLLOW_CHECK_MS) return previous.snapshot;
+    let current: Snapshot, fullAt = previous?.fullAt ?? now;
+    if (!previous) current = await this.snapshot(id);
+    else {
+      const local = await this.snapshot(id, previous.snapshot.live);
+      if (local.baseRevision !== previous.snapshot.baseRevision) {current = await this.snapshot(id);fullAt = now;}
+      else if ((local.running || !local.canSend) && now - previous.fullAt >= FOLLOW_FULL_MS) {
+        current = await this.snapshot(id, undefined, {scanOlder: false, previousBackgroundTasks: previous.snapshot.live.backgroundTasks, previousLogPaths: previous.snapshot.live.taskLogPaths});
+        fullAt = now;
+      } else current = local;
+      // A turn that just ended sends the next queued message at once, as watching did.
+      if (previous.snapshot.running && !current.running && current.canSend && this.queue.queued(id).length) this.drainSoon(id);
+    }
+    this.followed.set(id, {snapshot: current, checkedAt: now, fullAt, stale: false});
+    if (this.followed.size > 16) this.followed.delete(this.followed.keys().next().value!);
+    return current;
+  }
+
+  /** The conversation as the subscription hub sends it: its messages as entries, built once per revision. */
+  private followedView(id: string, current: Snapshot): Promise<{head: Json; entries: Json[]}> {
+    const cached = this.views.get(id);
+    if (cached?.revision === current.revision) return cached.value;
+    const value = (async () => {
+      const {path, baseRevision: _, live: __, revision: ___, ...head} = current;
+      const {messages, issue} = await transcript(path);
+      const records = this.ledger.senders('antigravity', id);
+      if (records.length) {
+        const senders = sendersByText(messages.filter(item => item.role === 'user'), records);
+        for (const item of messages) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
+      }
+      return {head: {id, ...head, issue}, entries: messages};
+    })();
+    this.views.delete(id);this.views.set(id, {revision: current.revision, value});
+    if (this.views.size > 8) this.views.delete(this.views.keys().next().value!);
+    value.catch(() => {if (this.views.get(id)?.value === value) this.views.delete(id);});
+    return value;
+  }
+
+  /** What the subscription hub follows: a conversation's messages, pushed as they change. */
+  readonly syncSource: ThreadSource = {
+    // Messages are short; a phone gets all the transcript tail holds, as it did before.
+    window: 2000,
+    version: async id => (await this.followedSnapshot(id)).revision,
+    state: async id => this.followedView(id, await this.followedSnapshot(id)),
+    watch: poke => {this.queueListeners.push(poke);},
+  };
 
   async handle(action: string, p: Json): Promise<Json> {
     if (action === 'antigravity.create') return this.create(p);

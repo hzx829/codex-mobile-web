@@ -71,7 +71,8 @@ export function stored(key:string,view:Json):Json {
     const keptRevs=Object.fromEntries(kept.flatMap((turn,index)=>turn===turns.at(index-kept.length)&&revs[turn.id]?[[turn.id,revs[turn.id]]]:[]));
     return {...base,turns:kept,truncated:Boolean(base.truncated)||turns.length>STORED_TURNS,revs:keptRevs};
   }
-  return {...base,messages:(base.messages||[]).slice(-STORED_MESSAGES)};
+  const messages:Json[]=(base.messages||[]).slice(-STORED_MESSAGES),revs:Record<string,string>=base.revs&&typeof base.revs==='object'?base.revs:{};
+  return {...base,messages,revs:Object.fromEntries(messages.flatMap(message=>revs[message.id]?[[message.id,revs[message.id]]]:[]))};
 }
 function storedCodex(view:SessionView):SessionView {
   // Images are data URLs and can be megabytes each; a refresh brings them back.

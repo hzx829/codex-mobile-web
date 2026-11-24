@@ -29,7 +29,7 @@ import {useTurnNotice,watchWhileHidden} from './turn-notify';
 import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
 import {cachedView,rememberView,threadKey} from './session-cache';
 import {traceOpen} from './trace';
-import {seedOf,useThreadSync,viewOf} from './use-thread-sync';
+import {seedOf,useSyncedPanel,useThreadSync} from './use-thread-sync';
 import type {SyncLink} from './sync/engine';
 
 type Props={
@@ -104,17 +104,7 @@ export function ClaudeCodePanel(props:Props){
   const synced=useThreadSync(creating?undefined:props.sync,'claude',conversationId,()=>seedOf(cachedView<Json>(cacheKey),'turns'));
   // Known from the first render, so the old read below never starts for a synced session.
   const syncing=Boolean(props.sync&&!creating);
-  // A failed open shows until one succeeds; other messages stay.
-  const syncError=useRef<unknown>(null),syncMessage=useRef('');
-  useEffect(()=>{
-    const value=synced.view;if(!value)return;
-    const next=viewOf(value,'turns');if(next)setView(next);
-    if(value.error===syncError.current)return;
-    syncError.current=value.error;
-    const shown=syncMessage.current;
-    syncMessage.current=value.error?value.error.code==='unsupported'?'请更新这台电脑上的连接器以使用 Claude Code。':value.error.message||'与电脑的会话同步中断，正在重连…':'';
-    setError(old=>syncMessage.current||(old===shown?'':old));
-  },[synced.view]);
+  useSyncedPanel(synced.view,'turns',setView,setError,'请更新这台电脑上的连接器以使用 Claude Code。');
   const refresh=useStableEvent(async(clearError=true)=>{
     if(!connected||creating)return;
     if(synced.engine.current){if(clearError)setError('');await synced.engine.current.open();return;}

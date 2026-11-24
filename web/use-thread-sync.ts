@@ -23,6 +23,23 @@ export function useThreadSync(link:SyncLink|undefined,service:SyncService,thread
   return {view,engine};
 }
 
+/**
+ * Puts a followed thread into a panel: its view, and a failed open as a message until one succeeds, leaving other
+ * messages alone. `unsupported`: what to say when the connector cannot follow this app.
+ */
+export function useSyncedPanel(sync:SyncView|null,list:'turns'|'messages',setView:(view:Json)=>void,setError:(update:(old:string)=>string)=>void,unsupported:string){
+  const failure=useRef<unknown>(null),message=useRef('');
+  useEffect(()=>{
+    if(!sync)return;
+    const next=viewOf(sync,list);if(next)setView(next);
+    if(sync.error===failure.current)return;
+    failure.current=sync.error;
+    const shown=message.current;
+    message.current=sync.error?sync.error.code==='unsupported'?unsupported:sync.error.message||'与电脑的会话同步中断，正在重连…':'';
+    setError(old=>message.current||(old===shown?'':old));
+  },[sync]);
+}
+
 /** The seed of a cached view whose entries are `list` (turns or messages); `revs` holds the revs the cache kept. */
 export function seedOf(view:Json|null,list:'turns'|'messages'):SyncSeed|null {
   if(!view||!Array.isArray(view[list]))return null;

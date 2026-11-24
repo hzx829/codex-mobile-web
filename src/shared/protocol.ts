@@ -28,6 +28,8 @@ export const CONNECTOR_FEATURES = [
   'antigravity.queue',
   /** Claude Code sessions are followed with sync.open and sync.page and pushed as numbered frames (src/shared/sync.ts). */
   'sync.claude',
+  /** Antigravity conversations are followed the same way, their messages as entries. */
+  'sync.antigravity',
 ] as const;
 export type ConnectorFeature = typeof CONNECTOR_FEATURES[number];
 
