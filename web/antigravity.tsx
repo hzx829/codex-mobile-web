@@ -10,7 +10,7 @@ import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {cachedView,rememberView,threadKey} from './session-cache';
 import {traceOpen} from './trace';
-import {seedOf,useSyncedPanel,useThreadSync} from './use-thread-sync';
+import {seedOf,storedView,useSyncedPanel,useThreadSync} from './use-thread-sync';
 import type {SyncLink} from './sync/engine';
 import {MAX_ATTACHMENTS} from '../src/shared/attachments';
 import {MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
@@ -117,13 +117,14 @@ export function AntigravityPanel(props:Props){
   const [projects,setProjects]=useState<{id:string;path:string;name?:string}[]|null>(null),[target,setTarget]=useState(props.newProject||'');
   // A conversation opened before shows what it last held at once, marked `cached` until the read below replaces it.
   const cacheKey=threadKey('antigravity',machine,conversationId);
-  const [view,setView]=useState<Json|null>(()=>creating?null:cachedView<Json>(cacheKey));
+  const [view,setView]=useState<Json|null>(()=>creating?null:props.sync&&storedView('antigravity',machine,conversationId,'messages')||cachedView<Json>(cacheKey));
   const cached=Boolean(view?.cached);
   useEffect(()=>{if(!creating)traceOpen('antigravity',cacheKey,'start');},[]);
   useEffect(()=>{
     if(!view||creating)return;
     traceOpen('antigravity',cacheKey,view.cached?'cached':'fresh');
-    if(!view.cached)rememberView(cacheKey,view);
+    // A followed conversation is kept by its engine (web/sync/idb-store.ts).
+    if(!view.cached&&!props.sync)rememberView(cacheKey,view);
   },[view]);
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[submitting,setSubmitting]=useState(false);
   const [draft,setDraft]=useState(()=>saved(`${key}:draft`)),[pending,setPending]=useState(()=>saved(`${key}:pending`));
@@ -184,7 +185,7 @@ export function AntigravityPanel(props:Props){
   function remember(op:string){setPending(op);store(`${key}:pending`,op);}
   function failed(e:any){if(alive.current)setError(e?.code==='unsupported'?'请更新这台电脑上的连接器以使用 Antigravity。':e?.message||'Antigravity 操作失败');}
   // With a connector that pushes conversations, the conversation follows its frames; reads and watches are for older ones.
-  const synced=useThreadSync(creating?undefined:props.sync,'antigravity',conversationId,()=>seedOf(cachedView<Json>(cacheKey),'messages'));
+  const synced=useThreadSync(creating?undefined:props.sync,'antigravity',conversationId,()=>seedOf(cachedView<Json>(cacheKey),'messages'),machine);
   const syncing=Boolean(props.sync&&!creating);
   useSyncedPanel(synced.view,'messages',setView,setError,'请更新这台电脑上的连接器以使用 Antigravity。');
   async function refresh(quiet=false){

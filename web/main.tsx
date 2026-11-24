@@ -58,6 +58,8 @@ import './model-picker.css';
 import {SenderRoot,SenderScope} from './senders';
 import {traceOpen} from './trace';
 import type {SyncLink} from './sync/engine';
+import {seedOf,storedView,useSyncedPanel,useThreadSync} from './use-thread-sync';
+import {clearThreadStore,flushThreadStore,loadThreadStore} from './sync/idb-store';
 import {blobSession,blobUrl,setBlobUploadTarget} from './blob';
 import {BlobImage,withUploadedImages} from './blob-image';
 import type {FileStreamSource} from './file-preview';
@@ -145,11 +147,12 @@ function App(){
   // Fall back to another available service when the connected computer does not offer the chosen provider.
   const voiceMode=resolveVoiceProvider(voiceChoice,available);
   const connected=status==='online'&&Boolean(activeMachine)&&(!available||available.includes(service));
-  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived,service,connected}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
+  const client=useRef<Client|null>(null),current=useRef({machine,selected,project,newChat,searchQuery,archived,service,connected,synced:false}),sequence=useRef(0),listLoader=useRef(new SessionListLoader()),infoSequence=useRef(0);
   const refreshTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),refreshing=useRef(false),again=useRef(false),sticky=useRef(true),timeline=useRef<HTMLDivElement>(null),timelineContent=useRef<HTMLDivElement>(null),composer=useRef<HTMLTextAreaElement>(null),submitting=useRef(false);
   const scrollAnchor=useRef<{element:HTMLElement;top:number}|null>(null),lastScrollTop=useRef(0),olderRequest=useRef<object|null>(null);
   const liveFrames=useRef<LiveFrame[]>([]),liveFrame=useRef(0);
-  current.current={machine,selected,project,newChat,searchQuery,archived,service,connected};
+  const codexSynced=codexActive&&Boolean(selected)&&!newChat&&connectorHas(activeMachine,'sync.codex');
+  current.current={machine,selected,project,newChat,searchQuery,archived,service,connected,synced:codexSynced};
   const machineName=activeMachine?computerName(activeMachine):'电脑';
   const scope=`${machine}:${selected}`,draftKey=`draft:${scope}`,pendingKey=`operation:${scope}`;
   // Images to send go up through the data channel first when the computer takes them (web/blob-image.tsx).
@@ -193,6 +196,8 @@ function App(){
   },[]);
   useEffect(()=>{history.replaceState({cmwRoute:route,cmwMachine:machine},'',location.pathname);rememberLocation(route,machine);},[machine]);
   async function refreshSession(){
+    // A synced thread asks for what changed; the engine merges calls that overlap.
+    if(codexSync.engine.current&&current.current.synced){await codexSync.engine.current.open();return;}
     if(refreshing.current){again.current=true;return;}
     const c={...current.current};if(!c.connected||c.service!=='codex'||!c.machine||!c.selected||!client.current?.ready)return;
     const seq=sequence.current,previous=viewRef.current;refreshing.current=true;
@@ -206,6 +211,12 @@ function App(){
     setLoadingOlder(true);setHistoryError('');sticky.current=false;
     const here=()=>seq===sequence.current&&c.machine===current.current.machine&&c.selected===current.current.selected;
     try{
+      const engine=codexSync.engine.current;
+      if(engine&&c.synced){
+        const element=timeline.current?.querySelector<HTMLElement>('.turn');
+        if(element)scrollAnchor.current={element,top:element.getBoundingClientRect().top};
+        await engine.page(HISTORY_PAGE_SIZE);return;
+      }
       const page=await call('session.read',{threadId:c.selected,limit:HISTORY_PAGE_SIZE,cursor},c.machine);
       if(!here())return;
       const element=timeline.current?.querySelector<HTMLElement>('.turn');
@@ -266,7 +277,8 @@ function App(){
       if(m.type==='ready'||m.type==='machines')setMachines(m.machines||m.data||[]);
       if(m.type==='ready'){setMe(m.user||null);teamDevice.current=m.device?.id||'';}
       if(m.type==='team.user')setMe(m.user||null);
-      if(m.type==='changed'&&m.machineId===current.current.machine&&(!m.threadId||m.threadId===current.current.selected))scheduleRefresh();
+      // A synced thread gets its changes as frames; notices about it would only ask again.
+      if(m.type==='changed'&&m.machineId===current.current.machine&&(!m.threadId||m.threadId===current.current.selected&&!current.current.synced))scheduleRefresh();
       if(m.type==='live'&&current.current.service==='codex'&&m.machineId===current.current.machine&&m.threadId===current.current.selected)receiveLive(m as LiveFrame);
     },setStatus,next=>save('connection',next));client.current=c;
     const stopSync=c.onSync(frame=>{for(const listener of syncBus.current.frames)listener(frame);});
@@ -283,7 +295,8 @@ function App(){
   },[machines,machine,route,available]);
   // Other apps' threads set their own watch when they open (web/sync/engine.ts); leaving Codex does not clear it here,
   // because their effects run before this one.
-  useEffect(()=>{if(codexActive)client.current?.watch(machine&&selected?{machineId:machine,threadId:selected}:null);},[token,machine,selected,codexActive]);
+  // A synced thread sets its own watch (web/sync/engine.ts); this one is for the reads and live frames of older connectors.
+  useEffect(()=>{if(codexActive&&!codexSynced)client.current?.watch(machine&&selected?{machineId:machine,threadId:selected}:null);},[token,machine,selected,codexActive,codexSynced]);
   // Synced threads (web/sync/engine.ts) reach the client through this bus, which outlives clients, so a panel can start
   // following before the client below exists.
   const syncBus=useRef({frames:new Set<(frame:Json)=>void>(),status:new Set<(online:boolean)=>void>()});
@@ -302,6 +315,12 @@ function App(){
       link.watch(target?{machineId:machine,...target}:null);
     },
   }:undefined,[machine]);
+  // Codex threads follow their frames when the connector pushes them (sync.codex); reads and live frames otherwise.
+  const codexSync=useThreadSync(codexSynced?syncLink:undefined,'codex',codexSynced?selected:'',()=>seedOf(cachedView<Json>(`${machine}:${selected}`),'turns'),machine);
+  useSyncedPanel(codexSync.view,'turns',next=>{
+    if(next.id!==current.current.selected)return;
+    setView({...next,nextCursor:next.truncated&&next.turns.length?{before:next.turns[0].id}:null,hasMore:Boolean(next.truncated)} as unknown as SessionView);setLoading(false);
+  },update=>setError(update),'请更新这台电脑上的连接器。');
   useEffect(()=>{setPreferences({machine,values:load(`thread-preferences:${machine}`,{})});setThreadMenu(null);},[machine]);
   useEffect(()=>{
     draftSave.current.flush();
@@ -309,7 +328,8 @@ function App(){
     attachments.reset();setUploadProgress(null);
     setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
     // Show the last known content at once; it stays marked as cached until the read below lands.
-    const cached=selected?cachedView(`${machine}:${selected}`):null;
+    const stored=selected&&codexSynced?storedView('codex',machine,selected,'turns'):null;
+    const cached=stored?{...stored,hasMore:Boolean(stored.truncated),nextCursor:stored.truncated&&stored.turns.length?{before:stored.turns[0].id}:null} as unknown as CachedView:selected?cachedView(`${machine}:${selected}`):null;
     if(selected)traceOpen('codex',`${machine}:${selected}`,'start');
     sequence.current++;setView(cached);setLoading(Boolean(selected)&&!cached);olderRequest.current=null;setLoadingOlder(false);setHistoryError('');setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;lastScrollTop.current=0;
     setServiceTier(undefined);
@@ -321,7 +341,8 @@ function App(){
     if(!view||view.id!==selected)return;
     const cachedShown=Boolean((view as CachedView).cached);
     traceOpen('codex',`${machine}:${selected}`,cachedShown?'cached':'fresh');
-    if(!cachedShown)rememberView(`${machine}:${selected}`,view);
+    // A followed thread is kept by its engine (web/sync/idb-store.ts).
+    if(!cachedShown&&!current.current.synced)rememberView(`${machine}:${selected}`,view);
   },[view]);
   useEffect(()=>{
     if(!optimistic?.acceptedAt)return;
@@ -330,7 +351,7 @@ function App(){
     return()=>clearTimeout(timer);
   },[optimistic,view,scope]);
   useEffect(()=>{
-    const flush=()=>{draftSave.current.flush();void flushCache();},hidden=()=>{if(document.visibilityState==='hidden')flush();};
+    const flush=()=>{draftSave.current.flush();void flushCache();void flushThreadStore();},hidden=()=>{if(document.visibilityState==='hidden')flush();};
     window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',hidden);
     return()=>{flush();window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',hidden);};
   },[]);
@@ -559,7 +580,7 @@ function App(){
   function logout(){
     // A member signing out also removes this device, so its token stops working everywhere.
     if(me&&teamDevice.current&&client.current?.ready)void client.current.team('team.devices.revoke',{deviceId:teamDevice.current}).catch(()=>{});
-    client.current?.close();save('connection','');setMe(null);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);void clearCache();changeMachine('');}
+    client.current?.close();save('connection','');setMe(null);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);void clearCache();void clearThreadStore();changeMachine('');}
   async function copyText(text:string){
       if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
       else {
@@ -809,4 +830,4 @@ function App(){
 // UpdateBanner moves an open page to a new release once the worker has it.
 if(import.meta.env.PROD&&'serviceWorker' in navigator)window.addEventListener('load',()=>{navigator.serviceWorker.register('/sw.js').catch(()=>{});});
 // The stored cache is read first (bounded by a short timeout) so the first paint can show it.
-void loadCache().finally(()=>createRoot(document.getElementById('root')!).render(<><App/><UpdateBanner/></>));
+void Promise.all([loadCache(),loadThreadStore()]).finally(()=>createRoot(document.getElementById('root')!).render(<><App/><UpdateBanner/></>));

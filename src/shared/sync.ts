@@ -5,8 +5,8 @@ import type {Json} from './types.js';
  * list of entries, each with an `id` and a `rev` (SHA-256 of its body). The phone opens a thread with the revs it has and
  * gets only what differs; the connector then pushes numbered frames with what changed.
  */
-export type SyncService='claude'|'antigravity';
-export const SYNC_SERVICES:readonly SyncService[]=['claude','antigravity'];
+export type SyncService='codex'|'claude'|'antigravity';
+export const SYNC_SERVICES:readonly SyncService[]=['codex','claude','antigravity'];
 
 export interface SyncEntry {id:string;rev:string;body:Json}
 /** An entry changed in place: item-level operations as in Codex's live frames (src/connector/live.ts). */
@@ -29,4 +29,4 @@ export interface SyncPage {order:string[];entries:SyncEntry[];hasMore:boolean}
 export interface SyncFrame {type:'live';service:SyncService;threadId:string;epoch:string;seq:number;
   entries?:SyncEntry[];patches?:SyncPatch[];order?:string[];head?:Json;at?:number;queuedMs?:number}
 
-export const isSyncService=(value:unknown):value is SyncService=>value==='claude'||value==='antigravity';
+export const isSyncService=(value:unknown):value is SyncService=>value==='codex'||value==='claude'||value==='antigravity';

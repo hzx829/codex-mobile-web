@@ -22,6 +22,7 @@ import {revertThread} from './revert.js';
 import {fastTier} from '../shared/models.js';
 import {transcribeVoice} from './voice.js';
 import {sessionSnapshot} from './session-snapshot.js';
+import type {ThreadSource} from './thread-hub.js';
 import {step,stepSync} from './trace.js';
 
 /** A phone keeps a thread watched by reading it; the poll renews well within this. */
@@ -58,6 +59,8 @@ function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   throw new BridgeError('invalid','审批策略无效');
 }
 
+/** Turns a followed thread sends at a time (older ones come by page), and how often it is read again regardless. */
+const SYNC_WINDOW=20,SYNC_REREAD_MS=10_000;
 export class Control extends EventEmitter {
   bundleHash='';
   generation=randomUUID();
@@ -350,6 +353,49 @@ export class Control extends EventEmitter {
     if(until>=Date.now())return true;
     this.watchers.delete(id);this.liveDiff.forget(id);return false;
   }
+  /** Counts of changes per thread (structure, stream) and for all threads, which the subscription source's version follows. */
+  private syncCounts=new Map<string,{structure:number;stream:number}>();
+  private syncAll=0;
+  /** The last full read for each followed thread, reused until something besides the running turn's items changed. */
+  private syncReads=new Map<string,{key:string;value:Promise<SessionView>}>();
+  private syncCount(id:string){let count=this.syncCounts.get(id);if(!count){count={structure:0,stream:0};this.syncCounts.set(id,count);}return count;}
+  /** Which full read a thread's state comes from; changes every ten seconds as well, as the page's own refresh did. */
+  private syncKey(id:string){return `${this.generation}:${this.syncAll}:${this.syncCount(id).structure}:${Math.floor(Date.now()/SYNC_REREAD_MS)}`;}
+  private syncRead(id:string){
+    const key=this.syncKey(id),cached=this.syncReads.get(id);
+    if(cached?.key===key)return cached.value;
+    const value=this.read(id,SYNC_WINDOW).then(view=>{markCodexSenders(view.turns,this.ledger.senders('codex',view.id));return view;});
+    this.syncReads.delete(id);this.syncReads.set(id,{key,value});
+    if(this.syncReads.size>16)this.syncReads.delete(this.syncReads.keys().next().value!);
+    value.catch(()=>{if(this.syncReads.get(id)?.value===value)this.syncReads.delete(id);});
+    return value;
+  }
+  /**
+   * What the subscription hub (src/connector/thread-hub.ts) follows: the newest turns of a thread. A running turn's new
+   * words only change that turn, built from the runtime's notifications or the desktop's patches as live frames were,
+   * without reading the thread again.
+   */
+  readonly syncSource:ThreadSource={
+    window:SYNC_WINDOW,
+    version:async id=>{this.watch(id);const count=this.syncCount(id);return `${this.syncKey(id)}:${count.stream}`;},
+    state:async id=>{
+      this.watch(id);
+      const view=await this.syncRead(id),{turns,hasMore:_more,nextCursor:_cursor,...head}=view;
+      let entries:TurnView[]=turns;
+      const live=this.liveTurn(id),at=live?turns.findIndex(turn=>turn.id===live.id):-1;
+      if(live&&at>=0){markCodexSenders([live],this.ledger.senders('codex',id));entries=[...turns.slice(0,at),live,...turns.slice(at+1)];}
+      return {head,entries,hasMore:Boolean(view.hasMore)};
+    },
+    page:async(id,before,limit)=>{
+      const view=await this.read(id,limit,{before});
+      markCodexSenders(view.turns,this.ledger.senders('codex',view.id));
+      return {entries:view.turns,hasMore:Boolean(view.hasMore)};
+    },
+    watch:poke=>{
+      this.on('change',(id:string|null)=>{if(id){this.syncCount(id).structure++;poke(id);}else this.syncAll++;});
+      this.on('stream',(id:string)=>{if(id){this.syncCount(id).stream++;poke(id);}});
+    },
+  };
   /** The frame that brings watching phones to the current running turn, if it changed. */
   liveFrame(id:string):LiveFrame|null {
     if(!this.watched(id))return null;

@@ -31,8 +31,8 @@ function parse(key:string):{kind:CacheKind;id:string}{
 /** The key of an app's session list (or its project list, with `projects`) in {@link cachedList}. */
 export const listKey=(listAction:string,machine:string,project:string)=>`${listAction}|${machine}|${project}`;
 
-/** What only holds while a thread is live, cleared from what the cache gives back. */
-const offline:Record<CacheKind,(view:Json)=>Json>={
+/** What only holds while a thread is live, cleared from what the cache gives back (also web/sync/idb-store.ts). */
+export const offline:Record<CacheKind,(view:Json)=>Json>={
   codex:view=>({...view,requests:[],queuedMessages:[],running:false,retry:undefined}),
   // `revision` starts the panel's watch; without it the first fresh read comes first.
   claude:view=>({...view,requests:[],queuedMessages:[],running:false,error:'',revision:undefined,controlled:false,external:false,externalStatus:'',
@@ -59,8 +59,8 @@ export function rememberProjects(machine:string,list:string[]){if(!machine)retur
 
 /** Images given as data URLs can be megabytes each and are not stored; a refresh brings them back. References stay. */
 const inline=(url:string)=>url.startsWith('data:');
-const hasInline=(turn:TurnView)=>turn.items.some(item=>item.images?.some(inline));
-const withoutImages=(turn:TurnView)=>hasInline(turn)?{...turn,items:turn.items.map(item=>item.images?.some(inline)?{...item,images:item.images.filter(url=>!inline(url))}:item)}:turn;
+export const hasInline=(turn:TurnView)=>Array.isArray(turn.items)&&turn.items.some(item=>item.images?.some(inline));
+export const withoutImages=(turn:TurnView)=>hasInline(turn)?{...turn,items:turn.items.map(item=>item.images?.some(inline)?{...item,images:item.images.filter(url=>!inline(url))}:item)}:turn;
 /** What goes to IndexedDB: the latest turns or messages, without live state. */
 export function stored(key:string,view:Json):Json {
   const kind=parse(key).kind;
@@ -77,8 +77,11 @@ export function stored(key:string,view:Json):Json {
   return {...base,messages,revs:Object.fromEntries(messages.flatMap(message=>revs[message.id]?[[message.id,revs[message.id]]]:[]))};
 }
 function storedCodex(view:SessionView):SessionView {
-  // Images are data URLs and can be megabytes each; a refresh brings them back.
-  return {...view,requests:[],queuedMessages:[],running:false,retry:undefined,
+  // Images are data URLs and can be megabytes each; a refresh brings them back. A synced view's revs (web/sync/engine.ts)
+  // stay only for turns stored unchanged.
+  const kept=view.turns.slice(-STORED_TURNS),revs:Record<string,string>=(view as Json).revs&&typeof (view as Json).revs==='object'?(view as Json).revs:{};
+  const keptRevs=Object.fromEntries(kept.flatMap(turn=>!hasInline(turn)&&revs[turn.id]?[[turn.id,revs[turn.id]]]:[]));
+  return {...view,requests:[],queuedMessages:[],running:false,retry:undefined,...(view as Json).revs?{revs:keptRevs}:{},
     // A turn without its images must not claim its revision, or the connector would not resend it.
     turns:view.turns.slice(-STORED_TURNS).map(turn=>{
       if(!hasInline(turn))return turn;

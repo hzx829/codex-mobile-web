@@ -115,6 +115,7 @@ if(!guest){
     prepareReload:()=>{if(antigravity.busy)throw new BridgeError('active','Antigravity 排队消息正在处理，请稍后更新');},close:()=>antigravity.close()});
 }
 const useCodex=available.includes('codex');
+if(useCodex)hub.register('codex',control.syncSource);
 const services=new ServiceRouter(bridges,request=>{
   if(guest&&(request.action==='runtime.reload'||request.action.startsWith('antigravity.')||request.action.startsWith('claude.')))
     throw new BridgeError('unsupported','借用电脑暂不支持此操作');

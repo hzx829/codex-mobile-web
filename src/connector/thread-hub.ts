@@ -9,7 +9,8 @@ import {isSyncService, type SyncEntry, type SyncFrame, type SyncPage, type SyncP
  * what changed since the last frame. Phones that miss a frame open again with the revs they hold. The hub keeps, per open
  * thread, the revs of its latest entries and the bodies of the newest few, never earlier frames.
  */
-export interface ThreadState {head: Json; entries: Json[]}
+/** `hasMore`: entries older than these exist, for sources that give only their newest (Codex reads a page). */
+export interface ThreadState {head: Json; entries: Json[]; hasMore?: boolean}
 export interface ThreadSource {
   /** Changes whenever anything the phone sees may have; called often, so it must be cheap. */
   version(threadId: string): Promise<string>;
@@ -19,6 +20,8 @@ export interface ThreadSource {
   watch?(poke: (threadId: string) => void): void;
   /** How many of the newest entries a phone is sent and frames are compared over; turns default to 60. */
   window?: number;
+  /** Entries before `before`, for sources whose state holds only the newest; the hub pages the state otherwise. */
+  page?(threadId: string, before: string, limit: number): Promise<{entries: Json[]; hasMore: boolean}>;
 }
 
 const WATCH_MS = 30_000, WINDOW = 60, POLL_MS = 250, MIN_GAP_MS = 40, KEEP_BODIES = 2, PAGE = 30;
@@ -102,7 +105,7 @@ export class ThreadHub {
     const size = this.source(thread.service).window ?? WINDOW;
     const start = from >= 0 ? Math.min(from, Math.max(0, all.length - size)) : Math.max(0, all.length - size);
     const {order, entries} = this.fill(all.slice(start), have, Buffer.byteLength(JSON.stringify(state.head)));
-    return {epoch: thread.epoch, seq: thread.seq, head: state.head, order, entries, hasMore: all.length > order.length};
+    return {epoch: thread.epoch, seq: thread.seq, head: state.head, order, entries, hasMore: Boolean(state.hasMore) && order[0] === all[0]?.id || all.length > order.length};
   }
 
   /** Entries before `before`, newest `limit` of them; not a subscription. */
@@ -111,6 +114,12 @@ export class ThreadHub {
     if (!isSyncService(service) || !this.sources.has(service)) throw new BridgeError('unsupported', '这个应用暂不支持同步');
     const id = textRequired(payload.threadId, '会话', 200), before = textRequired(payload.before, '历史位置', 200);
     const limit = Math.min(100, Math.max(1, Math.floor(Number(payload.limit) || PAGE)));
+    const source = this.sources.get(service)!;
+    if (source.page) {
+      const result = await source.page(id, before, limit), page = this.shaped({head: {}, entries: result.entries});
+      const {order, entries} = this.fill(page.entries, {}, 0);
+      return {order, entries, hasMore: result.hasMore || page.entries.length > order.length};
+    }
     const all = this.shaped(await this.sources.get(service)!.state(id)).entries, end = all.findIndex(entry => entry.id === before);
     if (end < 0) throw new BridgeError('changed', '历史位置已变化，请重新打开会话');
     const start = Math.max(0, end - limit), {order, entries} = this.fill(all.slice(start, end), {}, 0);

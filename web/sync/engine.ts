@@ -21,6 +21,16 @@ export type SyncEntryState={rev?:string;body:Json};
 /** What the thread looks like now. A new object after every change. */
 export interface SyncView {phase:SyncPhase;head:Json|null;order:string[];entries:ReadonlyMap<string,SyncEntryState>;hasMore:boolean;error:any}
 export type SyncSeed={head:Json;order:string[];bodies:Json[];revs?:Record<string,string>;hasMore:boolean};
+/** A thread as a store keeps it (web/sync/idb-store.ts; SQLite in a native app). */
+export type StoredThread={head:Json;order:string[];entries:ReadonlyMap<string,SyncEntryState>;hasMore:boolean};
+export interface ThreadStore {
+  /** What is in memory now, for showing a thread at once. */
+  get(key:string):StoredThread|null;
+  load(key:string):Promise<StoredThread|null>;
+  put(key:string,thread:StoredThread):void;
+}
+/** Where a followed thread is kept: `seed` turns what is stored into what may be shown before the computer answers. */
+export type SyncPersist={store:ThreadStore;key:string;seed:(thread:StoredThread)=>SyncSeed|null};
 
 const RENEW_MS=10_000,RETRY_MS=2500;
 
@@ -63,13 +73,22 @@ export class ThreadSync {
   private retry:ReturnType<typeof setTimeout>|undefined;
   private closed=false;
   private current:SyncView;
-  constructor(private link:SyncLink,readonly service:SyncService,readonly threadId:string,seed?:SyncSeed|null){
-    if(seed){
-      this.head=seed.head;this.order=[...seed.order];this.hasMore=seed.hasMore;
-      seed.bodies.forEach(body=>this.entries.set(body.id,{body,rev:seed.revs?.[body.id]}));
-    }
+  constructor(private link:SyncLink,readonly service:SyncService,readonly threadId:string,seed?:SyncSeed|null,private persist?:SyncPersist){
+    const stored=persist?.store.get(persist.key);
+    seed=(stored&&persist!.seed(stored))||seed;
+    if(seed)this.adopt(seed);
     this.phase=seed?'cached':'syncing';
     this.current=this.view();
+    // Not in memory: shown from the store as soon as it is read, unless the computer answered first.
+    if(!seed&&persist)void persist.store.load(persist.key).then(thread=>{
+      const found=thread&&persist.seed(thread);
+      if(!found||this.closed||this.head||this.phase!=='syncing')return;
+      this.adopt(found);this.phase='cached';this.emit();
+    }).catch(()=>{});
+  }
+  private adopt(seed:SyncSeed){
+    this.head=seed.head;this.order=[...seed.order];this.hasMore=seed.hasMore;
+    this.entries=new Map(seed.bodies.map(body=>[body.id,{body,rev:seed.revs?.[body.id]}]));
   }
   get snapshot(){return this.current;}
   subscribe(listener:(view:SyncView)=>void){this.listeners.add(listener);return()=>{this.listeners.delete(listener);};}
@@ -196,5 +215,10 @@ export class ThreadSync {
 
   private set(phase:SyncPhase){this.phase=phase;this.emit();}
   private view():SyncView{return {phase:this.phase,head:this.head,order:this.order,entries:this.entries,hasMore:this.hasMore,error:this.error};}
-  private emit(){this.current=this.view();for(const listener of this.listeners)listener(this.current);}
+  private emit(){
+    this.current=this.view();
+    // Only what the computer said is kept; a view shown from the store is not written back.
+    if(this.persist&&this.head&&(this.phase==='live'||this.phase==='offline'))this.persist.store.put(this.persist.key,{head:this.head,order:this.order,entries:this.entries,hasMore:this.hasMore});
+    for(const listener of this.listeners)listener(this.current);
+  }
 }

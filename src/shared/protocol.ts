@@ -30,6 +30,8 @@ export const CONNECTOR_FEATURES = [
   'sync.claude',
   /** Antigravity conversations are followed the same way, their messages as entries. */
   'sync.antigravity',
+  /** Codex threads too, their newest turns at a time with older ones by page. */
+  'sync.codex',
   /** Files download through the relay's data channel (blob.pull), as HTTP streams instead of base64 chunks. */
   'blob',
   /** Upload parts go through it too (blob.push), up to 8 MiB each. */

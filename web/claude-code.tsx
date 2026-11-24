@@ -29,7 +29,7 @@ import {useTurnNotice,watchWhileHidden} from './turn-notify';
 import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
 import {cachedView,rememberView,threadKey} from './session-cache';
 import {traceOpen} from './trace';
-import {seedOf,useSyncedPanel,useThreadSync} from './use-thread-sync';
+import {seedOf,storedView,useSyncedPanel,useThreadSync} from './use-thread-sync';
 import type {SyncLink} from './sync/engine';
 
 type Props={
@@ -81,7 +81,7 @@ export function ClaudeCodePanel(props:Props){
   const scope=`claude:${machine}:${conversationId||'new'}`;
   // A session opened before shows what it last held at once, marked `cached` until the read below replaces it.
   const cacheKey=threadKey('claude',machine,conversationId);
-  const [view,setView]=useState<Json|null>(()=>creating?null:cachedView<Json>(cacheKey)),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
+  const [view,setView]=useState<Json|null>(()=>creating?null:props.sync&&storedView('claude',machine,conversationId,'turns')||cachedView<Json>(cacheKey)),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
   const [draft,setDraft]=useState(()=>load(`${scope}:draft`)),[pending,setPending]=useState(()=>load(`${scope}:pending`));
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   // A saved session keeps its own model and effort until changed here; the last choice only seeds new sessions.
@@ -101,7 +101,7 @@ export function ClaudeCodePanel(props:Props){
   function remember(op:string){setPending(op);store(`${scope}:pending`,op);}
   function failed(e:any){if(alive.current)setError(e?.code==='unsupported'?'请更新这台电脑上的连接器以使用 Claude Code。':e?.message||'Claude Code 操作失败');}
   // With a connector that pushes sessions, the session follows its frames; reads and watches below are for older ones.
-  const synced=useThreadSync(creating?undefined:props.sync,'claude',conversationId,()=>seedOf(cachedView<Json>(cacheKey),'turns'));
+  const synced=useThreadSync(creating?undefined:props.sync,'claude',conversationId,()=>seedOf(cachedView<Json>(cacheKey),'turns'),machine);
   // Known from the first render, so the old read below never starts for a synced session.
   const syncing=Boolean(props.sync&&!creating);
   useSyncedPanel(synced.view,'turns',setView,setError,'请更新这台电脑上的连接器以使用 Claude Code。');
@@ -118,7 +118,8 @@ export function ClaudeCodePanel(props:Props){
   useEffect(()=>{
     if(!view||creating)return;
     traceOpen('claude',cacheKey,view.cached?'cached':'fresh');
-    if(!view.cached)rememberView(cacheKey,view);
+    // A followed session is kept by its engine (web/sync/idb-store.ts).
+    if(!view.cached&&!props.sync)rememberView(cacheKey,view);
   },[view]);
   const cached=Boolean(view?.cached);
   useEffect(()=>{
