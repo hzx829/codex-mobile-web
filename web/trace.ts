@@ -1,6 +1,6 @@
 /**
  * Timing records for measuring where time goes (docs/sync/IMPLEMENTATION.md, M0). Off unless
- * `localStorage['cmw-trace']` is '1'. Kept in memory only; `cmwTrace()` in the console prints
+ * `localStorage['cmw-trace']` is '1'; opening the page with `?trace=1` or `?trace=0` turns it on or off. Kept in memory only; `cmwTrace()` in the console prints
  * p50/p95 per kind, `cmwTrace.export()` returns the records as JSON, `cmwTrace.clear()` empties them.
  *
  * Requests: the relay adds `relayMs` (forwarded to received back), the connector `handleMs`, its own
@@ -85,6 +85,14 @@ export function summary(){
 }
 
 if(typeof window!=='undefined'){
+  // A phone has no console at hand: the address turns tracing on or off, then drops the parameter.
+  try{
+    const url=new URL(location.href),flag=url.searchParams.get('trace');
+    if(flag==='1'||flag==='0'){
+      if(flag==='1')localStorage.setItem('cmw-trace','1');else localStorage.removeItem('cmw-trace');
+      url.searchParams.delete('trace');history.replaceState(history.state,'',url.pathname+url.search+url.hash);
+    }
+  }catch{}
   const api=Object.assign(()=>{const rows=summary();console.table(rows);return rows;},{
     export:()=>JSON.stringify({clockOffset:clockOffset(),userAgent:navigator.userAgent,records},null,2),
     clear:()=>{records.length=0;offsets.length=0;},

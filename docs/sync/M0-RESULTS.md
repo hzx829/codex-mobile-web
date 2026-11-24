@@ -6,10 +6,10 @@
 
 打点已经在代码里，默认关闭。中继和连接器部署到包含打点的版本后：
 
-1. 手机浏览器打开网页，在地址栏输入 `javascript:cmwTrace.on()` 或在远程调试控制台运行 `cmwTrace.on()`，刷新页面。
+1. 手机浏览器打开 `https://<中继>/?trace=1`（`?trace=0` 关闭）。有远程调试时也可以在控制台运行 `cmwTrace.on()` 后刷新。
 2. 按下面“要在手机上测的”逐项操作。
-3. 控制台运行 `cmwTrace()` 看 p50、p95 表格；`copy(cmwTrace.export())` 复制原始记录。
-4. 测完运行 `cmwTrace.off()`。
+3. 控制台运行 `cmwTrace()` 看 p50、p95 表格；`copy(cmwTrace.export())` 复制原始记录。没有远程调试时，把手机接到电脑用 Safari 或 Chrome 的远程检查器打开控制台。
+4. 测完打开 `?trace=0`。
 
 记录里的字段：
 
