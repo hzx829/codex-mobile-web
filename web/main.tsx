@@ -48,6 +48,7 @@ import {ModelButton,ModelPicker} from './model-picker';
 import {defaultVoiceProvider,loadVoiceChoice,resolveVoiceProvider,voiceEngineKey,voiceProvider,voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {useVoiceInput} from './use-voice-input';
 import {useStableEvent} from './use-event';
+import {notifyHint,notifyLabel,notifyState,toggleNotify,useTurnNotice,watchWhileHidden,type NotifyState} from './turn-notify';
 import {TeamPanel,type TeamUser} from './team';
 import './style.css';
 import 'react-diff-view/style/index.css';
@@ -119,6 +120,9 @@ function App(){
   const [statusPanel,setStatusPanel]=useState<{machine:string;thread:string;point:MenuPoint}|null>(null);
   const [preferenceState,setPreferences]=useState<{machine:string;values:ThreadPreferences}>({machine:'',values:{}});
   const preferences=preferenceState.machine===machine?preferenceState.values:{};
+  const [notify,setNotify]=useState<NotifyState>(notifyState),[notifyMessage,setNotifyMessage]=useState('');
+  useEffect(()=>{if(sheet!=='home')setNotifyMessage('');else setNotify(notifyState());},[sheet]);
+  const notifyItem=<><MenuItem icon="bell" disabled={notify==='unsupported'} onClick={()=>void toggleNotify().then(next=>{setNotify(next);setNotifyMessage(notifyHint[next]);})}>完成通知<span className="menu-detail">{notifyLabel[notify]}</span></MenuItem>{notifyMessage&&<p className="muted" role="status">{notifyMessage}</p>}</>;
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
   const [previewState,setPreviewState]=useState<{tabs:PreviewTab[];activeId:number|null}>({tabs:[],activeId:null}),[filePath,setFilePath]=useState('');
   const preview=previewState.tabs.find(tab=>tab.id===previewState.activeId)?.target||null;
@@ -201,7 +205,7 @@ function App(){
     finally{if(olderRequest.current===request){olderRequest.current=null;setLoadingOlder(false);}}
   }
   // Change notices arrive already batched by the connector; only merge ones that land together.
-  function scheduleRefresh(){if(refreshTimer.current||document.visibilityState!=='visible')return;refreshTimer.current=setTimeout(()=>{refreshTimer.current=undefined;void refreshSession();},16);}
+  function scheduleRefresh(){if(refreshTimer.current||document.visibilityState!=='visible'&&!watchWhileHidden(viewRef.current?.running))return;refreshTimer.current=setTimeout(()=>{refreshTimer.current=undefined;void refreshSession();},16);}
   function receiveLive(frame:LiveFrame){
     // Hidden pages do not paint; the foreground refresh brings them up to date.
     if(document.visibilityState!=='visible'){liveFrames.current=[];return;}
@@ -321,7 +325,7 @@ function App(){
     if(!connected||!codexActive)return;
     // A safety net for missed notices: the open thread also renews its live watch here.
     let ticks=0;
-    const foreground=()=>{if(document.visibilityState!=='visible')return;if(current.current.selected)void refreshSession();else void list();};
+    const foreground=()=>{if(document.visibilityState!=='visible'&&!(current.current.selected&&watchWhileHidden(viewRef.current?.running)))return;if(current.current.selected)void refreshSession();else void list();};
     const timer=setInterval(()=>{if(current.current.selected&&++ticks%2)return;foreground();},5000);document.addEventListener('visibilitychange',foreground);
     return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',foreground);};
   },[connected,project,searchQuery,archived,codexActive]);
@@ -494,6 +498,11 @@ function App(){
       }
   }
   const markdownOpenFile=useStableEvent(openFile),markdownOpenPreview=useStableEvent((url:string)=>{if(isArtifactUrl(url)){const old=previewState.tabs.map(tab=>tab.target).find(target=>target.kind==='artifact'&&target.url===url);showPreview(old?.kind==='artifact'?old:{kind:'artifact',machineId:machine,url});}else void openBrowser(url);}),markdownFollowup=useStableEvent(insertFollowup);
+  const notifyView=codexActive&&!newChat&&view?.id===selected?view:null;
+  useTurnNotice(`codex:${machine}:${selected}`,notifyView?Boolean(notifyView.running):undefined,notifyView?.requests.length||0,()=>{
+    const turn=view?.turns.at(-1);
+    return {service:'Codex',title:view?.title,status:turn?.status,reply:turn?.items.filter(item=>item.role==='assistant').at(-1)?.text,error:turn?.error};
+  });
   const latestUserTurn=useMemo(()=>view?.turns.filter(turn=>turn.items.some(item=>item.role==='user')).at(-1)?.id,[view?.turns]);
   function fork(turn:TurnView){
     if(turn.status==='inProgress'){setNotice('请等这一轮结束后再分叉');return;}
@@ -638,6 +647,7 @@ function App(){
         {teamItems}
         <MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);refreshRemoteList(value=>value+1);}}>刷新项目与会话</MenuItem>
         <MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>
+        {notifyItem}
         <MenuItem icon="logout" onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem>
       </SheetPanel>}
       {sheet==='voice'&&<SheetPanel title={`语音输入 · ${serviceLabel(service)}`} close={()=>setSheet(null)}>{voiceOptions}</SheetPanel>}
@@ -704,7 +714,7 @@ function App(){
      {permissionPoint&&<PermissionPicker anchor={permissionButton.current} point={permissionPoint} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} title="许可" disabled={busy} onChange={setApproval} close={()=>setPermissionPoint(null)}/>}
      {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
      {sheet&&<SheetPanel title={sheet==='voice'?`语音输入 · ${serviceLabel(service)}`:({home:'选项',computer:'电脑',projects:'选择项目',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页','claude-project':'项目',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
-       {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>{teamItems}<MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem><MenuItem icon="logout" disabled={busy} onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem></>}
+       {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>{teamItems}<MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>{notifyItem}<MenuItem icon="logout" disabled={busy} onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem></>}
       {sheet==='computer'&&computerOptions}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>selectProject(p)}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div>
          {guest?<GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setProjects(old=>[...new Set([...old,path])]);selectProject(path);}}/>:

@@ -1,5 +1,5 @@
 import type {ReactNode} from 'react';
-export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'redo'|'crop'|'trash'|'diff'|'team';
+export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'redo'|'crop'|'trash'|'diff'|'team'|'bell';
 // One line-icon family: 24-unit grid, 1.75 stroke, round joins. Drawn at 20 px by default.
 const paths:Record<IconName,ReactNode>={
   back:<path d="M19 12H5m6-6.5L4.5 12l6.5 6.5"/>,
@@ -36,6 +36,7 @@ const paths:Record<IconName,ReactNode>={
   fork:<><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="7.5" r="2"/><path d="M6.5 7.5v9M17.5 9.5a5 5 0 0 1-5 5h-2a4 4 0 0 0-4 2"/></>,
   edit:<path d="M4.5 19.5h4l10.3-10.3a2.1 2.1 0 0 0-3-3L5.5 16.5Zm9.5-11.5 3 3"/>,
   diff:<><path d="M13.5 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9Z"/><path d="M12 9v5M9.5 11.5h5M9.5 17h5"/></>,
+  bell:<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15ZM10 20.5a2 2 0 0 0 4 0"/>,
   team:<><circle cx="9" cy="8.5" r="3.25"/><path d="M3.5 19.5a5.5 5.5 0 0 1 11 0"/><path d="M15.5 5.6a3.25 3.25 0 0 1 0 6.1M17.5 14.4a5.5 5.5 0 0 1 3 5.1"/></>,
 };
 export function Icon({name,size=20}:{name:IconName;size?:number}) {

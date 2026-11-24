@@ -18,6 +18,14 @@ self.addEventListener('activate',event=>{
   })());
 });
 // Pages ask after opening and whenever they come back to the screen.
+// Turn notifications shown through the worker (web/turn-notify.ts) bring the open page forward.
+self.addEventListener('notificationclick',event=>{
+  event.notification.close();
+  event.waitUntil((async()=>{
+    const [page]=await self.clients.matchAll({type:'window',includeUncontrolled:true});
+    if(page)await page.focus();else await self.clients.openWindow('/');
+  })());
+});
 self.addEventListener('message',event=>{
   if(event.data?.type==='check')event.waitUntil(refresh().then(announce));
 });

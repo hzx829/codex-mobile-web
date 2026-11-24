@@ -20,6 +20,7 @@ import {useStableEvent} from './use-event';
 import {operationId} from './client';
 import type {AntigravityBackgroundTask,ApprovalRequest,Json,QueuedMessage,RequestAction} from '../src/shared/types';
 import {SenderScope} from './senders';
+import {useTurnNotice,watchWhileHidden} from './turn-notify';
 
 const IMAGES_BLOCKED='请更新这台电脑上的连接器后再给 Antigravity 发送图片。';
 const MODEL_IMAGES_BLOCKED='当前所选模型不支持图片，请更换模型或移除图片。';
@@ -196,7 +197,8 @@ export function AntigravityPanel(props:Props){
     let active=true,inflight=false;
     let timer:ReturnType<typeof setTimeout>;
     async function watch(){
-      if(!active||inflight||document.visibilityState!=='visible')return;
+      // Hidden, it keeps watching only for a turn's end to notify.
+      if(!active||inflight||document.visibilityState!=='visible'&&!watchWhileHidden(view?.running))return;
       inflight=true;
       let retry=0;
       try{
@@ -351,6 +353,8 @@ export function AntigravityPanel(props:Props){
   }
   const issue=view?.issue;
   const requests:ApprovalRequest[]=view?.requests||[];
+  useTurnNotice(key,view?Boolean(view.running):undefined,requests.length,()=>({service:'Antigravity',title:view?.title,
+    reply:view?.messages?.filter((message:Json)=>message.role==='assistant'&&message.text).at(-1)?.text}));
   const antigravityStatus=(
     !connected?connectionLost:watchError||
     (pending&&busy?'正在等待电脑确认…':issue?antigravityIssueText(issue,view!.canSend):

@@ -25,6 +25,7 @@ import {uploadAttachments,type UploadProgress} from './file-upload';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import type {ApprovalRequest,Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
 import {SenderScope} from './senders';
+import {useTurnNotice,watchWhileHidden} from './turn-notify';
 import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
 
 type Props={
@@ -107,7 +108,8 @@ export function ClaudeCodePanel(props:Props){
     if(!connected||!view?.revision)return;
     let active=true,inflight=false,timer:ReturnType<typeof setTimeout>;
     async function watch(){
-      if(!active||inflight||document.visibilityState!=='visible')return;
+      // Hidden, it keeps watching only for a turn's end to notify.
+      if(!active||inflight||document.visibilityState!=='visible'&&!watchWhileHidden(view?.running))return;
       inflight=true;let retry=0;
       try{
         const sent=from.current,next=await request.current('claude.watch',{conversationId,revision:view!.revision,...windowFor()});
@@ -303,6 +305,10 @@ export function ClaudeCodePanel(props:Props){
   const followup=useStableEvent((text:string)=>{edit(draft.trim()?`${draft.trimEnd()}\n\n${text}`:text);composer.current?.focus();});
   const turns:TurnView[]=view?.turns||[];
   const requests:ApprovalRequest[]=view?.requests||[];
+  useTurnNotice(scope,view?Boolean(view.running):undefined,requests.length,()=>{
+    const turn=turns.at(-1);
+    return {service:'Claude Code',title:view?.title,status:turn?.status,reply:turn?.items.filter(item=>item.role==='assistant').at(-1)?.text,error:turn?.error};
+  });
   const status=!connected?connectionLost:watchError||(pending&&busy?'正在等待电脑确认…':'');
   const canWrite=connected&&!busy&&!pending&&(creating?(!guest||Boolean(startPath)):Boolean(view));
   // Photos are compressed into the message; other files are uploaded to the project when it is sent.
