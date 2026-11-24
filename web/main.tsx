@@ -21,10 +21,10 @@ import {knownSnapshot,restoreSnapshot} from './session-snapshot';
 import {applyLiveFrames,keepLiveText,type LiveFrame} from './live';
 import {OPTIMISTIC_ACCEPTED_MS,optimisticDelivered,optimisticMessage,type OptimisticMessage} from './optimistic';
 import {cachedList,cachedProjects,cachedView,clearCache,flushCache,loadCache,rememberList,rememberProjects,rememberView,type CachedView} from './session-cache';
-import {BrowserPreviewPanel,WebViewer,type PreviewSession} from './browser-preview';
-import {belongsToThread,defaultPreviewUrl,openThreadPreview,previewUrlKey} from './thread-preview';
+import {BrowserPreviewPanel,PageViewer,WebViewer,type PreviewSession} from './browser-preview';
+import {belongsToThread,defaultPreviewUrl,openThreadPreview,previewUrlKey,previewWidthKey,reachable} from './thread-preview';
 import {PreviewPane,useCompactPreview} from './preview-pane';
-import {fileReference,isArtifactUrl,samePreviewTarget,type PreviewTarget} from './preview-target';
+import {fileReference,isArtifactUrl,previewRoute,samePreviewTarget,type PreviewTarget} from './preview-target';
 import {ArtifactPanel} from './artifact-view';
 import {rememberPage,type PaneAction} from './artifact-pane';
 import {home,initialLocation,rememberLocation,parseLocation,type Route} from './route-state';
@@ -64,7 +64,10 @@ const load=(key:string,fallback:any)=>{try{return JSON.parse(localStorage.getIte
 const save=(key:string,value:any)=>{try{localStorage.setItem(key,JSON.stringify(value));}catch{}};
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const computerName=(machine:Machine)=>machine.name+(machine.guest?'（借用）':'');
-const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:target.kind==='artifact'?target.title||'claude.ai 页面':'网页预览';
+const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:target.kind==='artifact'?target.title||'claude.ai 页面':target.kind==='site'?siteName(target.url):'网页预览';
+const siteName=(url:string)=>{try{return new URL(url).host;}catch{return '网页预览';}};
+/** What the address form says about where a page will be loaded from. */
+const ROUTE_HINT={tunnel:'通过电脑打开：先在电脑或局域网里启动网页服务。',direct:'手机直接打开，不经过电脑。',external:'http 的公网地址不能嵌在这里，只能在浏览器里打开。',artifact:'claude.ai 页面，通过电脑打开。'} as const;
 // A team invite link (#invite=…) is kept like a Token until the relay exchanges it for this device's own token.
 function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const invite=params.get('invite'),token=params.get('token')||(invite?inviteCode('#invite='+invite):null);if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
 // Only the approval policy changes; the sandbox stays as configured on the computer.
@@ -129,7 +132,8 @@ function App(){
   const previewIds=useRef(0);
   const compactPreview=useCompactPreview();
   const fileSequence=useRef(0),browserSequence=useRef(0);
-  const [browserUrl,setBrowserUrl]=useState(defaultPreviewUrl),[browserRequest,setBrowserRequest]=useState<number|null>(null),[browserState,setBrowserSession]=useState<PreviewSession|null>(null);
+  const [browserUrl,setBrowserUrl]=useState(defaultPreviewUrl),[browserRequest,setBrowserRequest]=useState<number|null>(null),[browserState,setBrowserSession]=useState<PreviewSession|null>(null),[unreachable,setUnreachable]=useState('');
+  const browserRoute=previewRoute(browserUrl,location.protocol==='https:');
   const browserBusy=browserRequest!==null,browserSession=!browserState?.filePath&&belongsToThread(browserState,machine,previewThread)?browserState:null;
   const activeMachine=machines.find(m=>m.id===machine),guest=Boolean(activeMachine?.guest);
   const available=activeMachine?.services;
@@ -466,13 +470,28 @@ function App(){
     }
     catch(e){setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.target.kind==='file'&&samePreviewTarget(tab.target,next)&&tab.target.request===request?{...tab,target:{...next,error:(e as Error)?.message||'文件读取失败'}}:tab)}));}
   }
-  async function openBrowser(address:string|{filePath:string}=browserUrl,fileTarget?:Extract<PreviewTarget,{kind:'file'}>){
+  // An address goes by its own shape: claude.ai pages and the computer's side of the network through the computer, other pages straight from this device.
+  async function openBrowser(address:string|{filePath:string}=browserUrl,fileTarget?:Extract<PreviewTarget,{kind:'file'}>,unchecked=false){
     const thread=fileTarget?.threadId||previewThread,owner=fileTarget?.machineId||machine;
-    if(!connected||!thread)return;
+    if(!thread)return;
+    let direct=false;
+    if(typeof address==='string'){
+      address=address.trim();setBrowserUrl(address);setUnreachable('');
+      const way=previewRoute(address,location.protocol==='https:');
+      if(!way){setError('网页地址无效，需要以 http:// 或 https:// 开头');return;}
+      if(way==='external'){window.open(address,'_blank','noopener,noreferrer');return;}
+      if(way==='artifact'){if(!connected)return;const url=address,old=previewState.tabs.map(tab=>tab.target).find(target=>target.kind==='artifact'&&target.url===url);showPreview(old?.kind==='artifact'?old:{kind:'artifact',machineId:owner,url});return;}
+      direct=way==='direct';
+    }
+    if(!direct&&!connected)return;
     const request=++browserSequence.current;
-    if(typeof address==='string'){address=address.trim();setBrowserUrl(address);}
     const here=()=>previewOwner.current.machine===owner&&previewOwner.current.thread===previewThread&&request===browserSequence.current;
     setBrowserRequest(request);setError('');
+    if(direct){
+      const url=address as string,found=unchecked||await reachable(url);
+      if(here()){if(found){save(previewUrlKey(owner,thread),url);showPreview({kind:'site',machineId:owner,threadId:thread,url});}else setUnreachable(url);}
+      setBrowserRequest(old=>old===request?null:old);return;
+    }
     try{
       const result=await openThreadPreview(call,owner,thread,address,here);
       if(!result)return;
@@ -564,7 +583,7 @@ function App(){
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>通过自部署中继继续电脑上的对话。</p><form onSubmit={e=>{e.preventDefault();const value=inviteCode(tokenInput)||tokenInput.trim();save('connection',value);setToken(value);}}><label>中继地址<input readOnly value={location.origin}/></label><label>邀请链接或连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴团队邀请链接，或电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">登录信息无效或已失效。请重新输入，团队成员请向管理员要新的邀请链接。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
   const selectService=(next:Service)=>navigate(switchRoute(machine,route,next));
   const switcher=<ServiceSwitch active={service} available={available} disabled={busy||voiceBusy||imageLoading} select={selectService}/>;
-  const previewPane=preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:preview.kind==='artifact'?'经电脑中转，手机不直接访问 claude.ai':undefined}
+  const previewPane=preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:preview.kind==='site'?`${preview.url} · 手机直接访问`:preview.kind==='artifact'?'经电脑中转，手机不直接访问 claude.ai':undefined}
        tabs={previewState.tabs.map(tab=>({id:tab.id,title:previewTitle(tab.target)}))} activeTab={previewState.activeId}
        selectTab={id=>{const target=previewState.tabs.find(tab=>tab.id===id)?.target;if(target?.kind==='artifact')notePage(target.url);setPreviewState(old=>({...old,activeId:id}));}} closeTab={closePreviewTab}
        compact={compactPreview} covered={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint)} close={()=>{if(previewState.tabs.some(tab=>tab.target.kind==='artifact'))notePage('');closePreview();}}>
@@ -576,6 +595,7 @@ function App(){
            read={offset=>fileRequest('download',target.machineId,target.threadId,{path:target.file!.path,revision:target.file!.revision,offset})}/></Suspense>:<div className="preview-empty" role={target.error?'alert':'status'}><p>{target.error||'正在读取文件…'}</p>{target.error&&<button disabled={!connected} onClick={()=>void openFile(target.path+(target.line?`:${target.line}`:''),target.machineId,target.threadId)}>重试</button>}</div>)}
          {target.kind==='diff'&&<Suspense fallback={<p className="preview-notice">正在加载差异…</p>}><DiffViewer text={target.text} compact={compactPreview}/></Suspense>}
          {target.kind==='web'&&<WebViewer session={target.session} onEnd={closeBrowser}/>}
+         {target.kind==='site'&&<PageViewer src={target.url} address={target.url} widthKey={previewWidthKey(target.machineId,target.threadId)} onEnd={()=>closePreviewTab(id)} endLabel="关闭"/>}
          {target.kind==='artifact'&&<ArtifactPanel url={target.url} fresh={target.fresh} connected={connected&&target.machineId===machine} call={(action,payload)=>call(action,payload,target.machineId)}
            onTitle={title=>setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.id===id&&tab.target.kind==='artifact'?{...tab,target:{...tab.target,title}}:tab)}))}/>}
          {target.kind==='image'&&<div className="image-viewer"><img className="preview-image" src={target.url} alt={target.title}/></div>}
@@ -713,7 +733,7 @@ function App(){
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
      {permissionPoint&&<PermissionPicker anchor={permissionButton.current} point={permissionPoint} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} title="许可" disabled={busy} onChange={setApproval} close={()=>setPermissionPoint(null)}/>}
      {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
-     {sheet&&<SheetPanel title={sheet==='voice'?`语音输入 · ${serviceLabel(service)}`:({home:'选项',computer:'电脑',projects:'选择项目',add:'添加与选项',file:'查看项目文件',browser:'打开本机网页','claude-project':'项目',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);}setSheet(null);}}>
+     {sheet&&<SheetPanel title={sheet==='voice'?`语音输入 · ${serviceLabel(service)}`:({home:'选项',computer:'电脑',projects:'选择项目',add:'添加与选项',file:'查看项目文件',browser:'打开网页','claude-project':'项目',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);setUnreachable('');}setSheet(null);}}>
        {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>{teamItems}<MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>{notifyItem}<MenuItem icon="logout" disabled={busy} onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem></>}
       {sheet==='computer'&&computerOptions}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>selectProject(p)}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div>
@@ -725,7 +745,9 @@ function App(){
          voiceLabel={voiceLabel} chooseVoice={()=>setSheet('voice')} browse={selected?()=>setSheet('browser'):undefined}
          projectFiles={selected?()=>setSheet('file'):undefined} refresh={selected?()=>{setSheet(null);void refreshSession();}:undefined} chooseProject={newChat?()=>setSheet('projects'):undefined}/>}
        {sheet==='file'&&fileOptions}
-       {sheet==='browser'&&selected&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>电脑上的网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);save(previewUrlKey(machine,selected),e.target.value);}} placeholder="http://127.0.0.1:5173"/></label><p className="muted">地址仅用于当前聊天。先在电脑启动网页服务，再打开预览。</p>{error&&<p className="error" role="alert">{error}</p>}<button className="primary" disabled={browserBusy||!connected}>{browserBusy?'正在打开…':'打开预览'}</button></form>}
+       {sheet==='browser'&&selected&&<form onSubmit={e=>{e.preventDefault();void openBrowser();}}><label>网页地址<input autoFocus required type="url" value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);setUnreachable('');save(previewUrlKey(machine,selected),e.target.value);}} placeholder="http://127.0.0.1:5173"/></label><p className="muted">{browserRoute?ROUTE_HINT[browserRoute]:'本机和局域网地址通过电脑打开，其他 https 地址由手机直接打开。'}地址仅用于当前聊天。</p>{error&&<p className="error" role="alert">{error}</p>}
+         {unreachable&&unreachable===browserUrl.trim()&&<><p className="error" role="alert">手机没有连上这个地址，也可能是它不允许被探测。</p><div className="site-issue"><button type="button" onClick={()=>void openBrowser(unreachable,undefined,true)}>仍然打开</button><button type="button" onClick={()=>window.open(unreachable,'_blank','noopener,noreferrer')}>在浏览器打开 ↗</button></div></>}
+         <button className="primary" disabled={browserBusy||browserRoute!=='direct'&&browserRoute!=='external'&&!connected}>{browserBusy?'正在打开…':browserRoute==='external'?'在浏览器打开 ↗':'打开预览'}</button></form>}
      </SheetPanel>}
      {previewPane}
   </div></SenderRoot>;

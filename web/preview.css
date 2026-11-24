@@ -90,6 +90,15 @@
 .diff-code-edit { border-radius: 2px; }
 .web-viewer { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .web-viewer iframe { border: 0; flex: 1; width: 100%; min-height: 240px; background: #fff; }
+.web-stage { position: relative; flex: 1; min-height: 240px; overflow: hidden; background: #fff; }
+.web-stage iframe { position: absolute; top: 0; left: 0; height: 100%; min-height: 0; transform-origin: 0 0; }
+.web-viewer.immersive { position: fixed; inset: 0; z-index: 1000; background: var(--bg); }
+.web-viewer.immersive .viewer-toolbar, .web-viewer.immersive .preview-notice { display: none; }
+.web-viewer.immersive .web-stage { min-height: 0; }
+.web-exit { position: absolute; z-index: 1; right: max(10px, env(safe-area-inset-right)); bottom: max(10px, env(safe-area-inset-bottom)); padding: 8px 12px; border-radius: 18px; font-size: 12px; color: #fff; background: #000a; opacity: .6; }
+.web-exit:hover, .web-exit:focus-visible { opacity: 1; }
+.site-issue { display: flex; flex-wrap: wrap; gap: 8px; }
+.site-issue button { padding: 8px 12px; border-radius: 10px; background: var(--panel); font-size: 13px; }
 @media (min-width: 1001px) {
   .shell:has(.preview-pane) .home-panel { width: 230px; }
   .shell:has(.preview-pane) .thread-header { padding-inline: 14px; }

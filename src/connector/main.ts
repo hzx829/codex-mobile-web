@@ -54,7 +54,8 @@ mkdirSync(config.dataDir,{recursive:true});
 const ledger=new Ledger(join(config.dataDir,'operations.sqlite'));
 const control=new Control(ledger,undefined,guest?new NoDesktop():undefined);
 control.bundleHash=createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
-const browserPreview=new BrowserPreview();
+// A guest's connector runs on a borrowed computer: its private network is the host's, so only localhost is relayed.
+const browserPreview=new BrowserPreview({lan:!guest});
 const bridges:ServiceBridge[]=[];
 // Dictation streams through Claude Code's login or the local Antigravity Hub, routed by each stream's provider.
 let renewClaudeLogin=async()=>{};
@@ -159,7 +160,7 @@ function connect() {
     if(typeof m.action==='string'&&m.action.startsWith('voice.stream.')){void respond(handleVoiceStream(m.action,m.payload&&typeof m.payload==='object'?m.payload:{}));return;}
     try{
       // Operations started by this request record the team member the relay names as its sender.
-      const result=await requestActor.run(actorOf(m.actor),async()=>m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):browserPreview.start(m.payload?.url,m.payload?.threadId))
+      const result=await requestActor.run(actorOf(m.actor),async()=>m.action==='preview.start'?(m.payload?.filePath!==undefined?await browserPreview.startFile(m.payload.filePath,m.payload.threadId):await browserPreview.startAddress(m.payload?.url,m.payload?.threadId))
         :m.action==='preview.stop'?{stopped:browserPreview.stopForThread(m.payload?.sessionId,m.payload?.threadId)}
         :await services.handle({id:String(m.id),action:String(m.action) as BridgeRequest['action'],payload:m.payload&&typeof m.payload==='object'?m.payload:{}}));
       if(socket===ws)send({type:'response',id:m.id,result});

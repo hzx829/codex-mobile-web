@@ -30,9 +30,11 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
   const compressed=new Map<string,{mtimeMs:number;size:number;body:Buffer}>();
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
-    let frameOrigin="'none'";
-    try{const origin=new URL(`${req.headers['x-forwarded-proto']==='https'?'https':'http'}://${req.headers.host}`);origin.port=String((preview.server.address() as any)?.port||previewPort);frameOrigin=origin.origin;}catch{}
-    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; font-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-src ${frameOrigin}; frame-ancestors 'none'; object-src 'none'; base-uri 'none'`);
+    // Pages the phone reaches itself are framed directly and probed with one request first; an https page can only hold https ones.
+    const secure=req.headers['x-forwarded-proto']==='https',outside=secure?'https:':'http: https:';
+    let frameOrigin='';
+    try{const origin=new URL(`${secure?'https':'http'}://${req.headers.host}`);origin.port=String((preview.server.address() as any)?.port||previewPort);frameOrigin=origin.origin+' ';}catch{}
+    res.setHeader('Content-Security-Policy',`default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; font-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: ${outside}; img-src 'self' data: blob:; frame-src ${frameOrigin}${outside}; frame-ancestors 'none'; object-src 'none'; base-uri 'none'`);
     if(req.url==='/health'){res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');return;}
     try {
       const pathname=decodeURIComponent(new URL(req.url||'/', 'http://localhost').pathname);

@@ -198,7 +198,7 @@ test('preview tunnels HTTP and WebSocket only for its owner',async()=>{
     assert.equal((await httpRequest(`${proxy}/_bridge/enter?session=another&ticket=${session.ticket}`,{headers:{cookie},redirect:'manual'})).status,401);
     const restricted=await httpRequest(`${proxy}/no-frame`,{headers:{cookie}});assert.equal(restricted.headers.get('x-frame-options'),'DENY');assert.equal(restricted.headers.get('content-security-policy'),"frame-ancestors 'none'");
     const policy=(await httpRequest(`http://127.0.0.1:${(relay.server.address() as any).port}/health`)).headers.get('content-security-policy')!;
-    assert.ok(policy.includes(`frame-src ${proxy};`));assert.ok(policy.includes("script-src 'self' 'wasm-unsafe-eval';"));
+    assert.ok(policy.includes(`frame-src ${proxy} http: https:;`));assert.ok(policy.includes("connect-src 'self' ws: wss: http: https:;"));assert.ok(policy.includes("script-src 'self' 'wasm-unsafe-eval';"));
     assert.match(await (await httpRequest(proxy,{headers:{cookie}})).text(),/Local app/);
     assert.deepEqual(await (await httpRequest(`${proxy}/api`,{headers:{cookie}})).json(),{ok:true});
     assert.equal(await (await httpRequest(`${proxy}/echo`,{method:'POST',headers:{cookie},body:'hello'})).text(),'hello');

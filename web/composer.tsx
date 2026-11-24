@@ -110,7 +110,7 @@ export function AddOptions(props:AddProps){
     {props.imagesBlocked&&<p className="muted">{props.imagesBlocked}</p>}
     {props.error&&<p className="error" role="alert">{props.error}</p>}
     <MenuItem icon="mic" onClick={props.chooseVoice}>语音输入<span className="menu-detail">{props.voiceLabel}</span></MenuItem>
-    {props.browse&&<MenuItem icon="browser" disabled={!props.connected} onClick={props.browse}>打开本机网页</MenuItem>}
+    {props.browse&&<MenuItem icon="browser" disabled={!props.connected} onClick={props.browse}>打开网页</MenuItem>}
     {props.projectFiles&&<MenuItem icon="file" disabled={!props.connected} onClick={props.projectFiles}>查看项目文件</MenuItem>}
     {props.refresh&&<MenuItem icon="refresh" disabled={!props.connected} onClick={props.refresh}>刷新会话</MenuItem>}
     {props.chooseProject&&<MenuItem icon="folder" disabled={props.disabled} onClick={props.chooseProject}>选择项目</MenuItem>}

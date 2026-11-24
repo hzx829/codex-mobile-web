@@ -61,7 +61,7 @@ test('the shared composer, "+" sheet, pickers and queue show what each runtime s
     await render(h(Probe,{draft:'',add:options({})}));
     assert.deepEqual(menu(),[['添加图片大图自动压缩',false],['添加文件PDF、Word 等',false],['语音输入系统键盘',false]]);
     await render(h(Probe,{draft:'',add:options({imagesBlocked:'当前模型未确认图片能力',browse:noop,projectFiles:noop,refresh:noop,chooseProject:noop})}));
-    assert.deepEqual(menu(),[['添加图片大图自动压缩',true],['添加文件PDF、Word 等',false],['语音输入系统键盘',false],['打开本机网页',false],['查看项目文件',false],['刷新会话',false],['选择项目',false]]);
+    assert.deepEqual(menu(),[['添加图片大图自动压缩',true],['添加文件PDF、Word 等',false],['语音输入系统键盘',false],['打开网页',false],['查看项目文件',false],['刷新会话',false],['选择项目',false]]);
     assert.ok(Array.from(document.querySelectorAll('.muted')).some(note=>note.textContent==='当前模型未确认图片能力'));
 
     // Permission picker: each level with what it means, the one in use checked; choosing closes it.

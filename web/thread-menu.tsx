@@ -35,7 +35,7 @@ export function ThreadMenu({thread,point,preference,sections,archived,connected,
   return <Popover point={point} title={thread.title} label="会话操作" close={close} className={compact?'thread-menu-compact':''} focusSelector={mode==='menu'?'.menu-item:not(:disabled)':'input'}>
       {error&&<p role="alert" className="error">{error}</p>}
       {mode==='menu'?<>
-        {compact&&openPreview&&item('browser','打开本机网页',()=>{close();openPreview();},!connected)}
+        {compact&&openPreview&&item('browser','打开网页',()=>{close();openPreview();},!connected)}
         {change&&item('pin',preference.pinned?'取消置顶':'置顶',()=>choose({pinned:!preference.pinned}))}
         {!compact&&item('folder','移至分区',()=>setMode('sections'))}
         {!compact&&item('unread',preference.unread?'标为已读':'标为未读',()=>choose({unread:!preference.unread}))}

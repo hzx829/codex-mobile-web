@@ -6,16 +6,38 @@ export type PreviewTarget =
   | {kind:'diff'; threadId:string; turnId:string; text:string}
   | {kind:'image'; url:string; title:string}
   | {kind:'web'; session:PreviewSession}
+  | {kind:'site'; machineId:string; threadId:string; url:string}
   | {kind:'artifact'; machineId:string; url:string; title?:string; fresh?:string};
 
 /** claude.ai Artifact pages, which the computer renders and relays; the phone never opens claude.ai itself. */
 export function isArtifactUrl(value:string){return /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]{8,64}\/?(?:[?#].*)?$/.test(value);}
+
+/** How a page reaches the phone: rendered on the computer, tunnelled through it, loaded by the phone itself, or not embeddable at all. */
+export type PreviewRoute='artifact'|'tunnel'|'direct'|'external';
+/** A host on the computer's side of the network, going by its spelling alone; the connector decides what it really relays. */
+export function lanHost(hostname:string):boolean {
+  const host=hostname.toLowerCase().replace(/\.$/,'');
+  if(host.startsWith('['))return /^\[(?:::1\]|f[cd][0-9a-f]{2}:)/.test(host);
+  const v4=host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if(v4){const a=Number(v4[1]),b=Number(v4[2]);return a===10||a===127||a===192&&b===168||a===172&&b>=16&&b<=31;}
+  return host==='localhost'||host.endsWith('.local')||!host.includes('.');
+}
+/** `securePage`: this app is served over https, where a plain http page cannot be framed. */
+export function previewRoute(address:string,securePage=true):PreviewRoute|null {
+  const value=address.trim();
+  let url:URL;try{url=new URL(value);}catch{return null;}
+  if(url.protocol!=='http:'&&url.protocol!=='https:'||url.username||url.password||!url.hostname)return null;
+  if(isArtifactUrl(value))return 'artifact';
+  if(lanHost(url.hostname))return 'tunnel';
+  return url.protocol==='https:'||!securePage?'direct':'external';
+}
 
 export function samePreviewTarget(a:PreviewTarget,b:PreviewTarget):boolean{
   if(a.kind!==b.kind)return false;
   if(a.kind==='file'&&b.kind==='file')return a.machineId===b.machineId&&a.threadId===b.threadId&&a.path===b.path;
   if(a.kind==='diff'&&b.kind==='diff')return a.threadId===b.threadId&&a.turnId===b.turnId;
   if(a.kind==='image'&&b.kind==='image')return a.url===b.url;
+  if(a.kind==='site'&&b.kind==='site')return a.machineId===b.machineId&&a.threadId===b.threadId&&a.url===b.url;
   if(a.kind==='artifact'&&b.kind==='artifact')return a.machineId===b.machineId&&a.url===b.url;
   return a.kind==='web'&&b.kind==='web'&&a.session.sessionId===b.session.sessionId;
 }

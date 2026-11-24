@@ -2,7 +2,7 @@ import {Fragment,memo,useState} from 'react';
 import Markdown, {defaultUrlTransform} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type {Json} from '../src/shared/types';
-import {isArtifactUrl,markdownFileUrl} from './preview-target';
+import {isArtifactUrl,lanHost,markdownFileUrl} from './preview-target';
 import {splitFollowups} from './followup';
 import {remarkFileCitations} from './file-citations';
 import {markdownBlocks} from './markdown-blocks';
@@ -21,11 +21,12 @@ function localMediaPath(value:string|undefined) {
   let decoded=value;try{decoded=decodeURIComponent(value);}catch{}
   return !decoded.startsWith('#')&&!/^[\\/]{2}/.test(decoded)&&(!/^[a-z][a-z\d+.-]*:/i.test(decoded)||/^[a-z]:[\\/]/i.test(decoded));
 }
+/** A link to a page on the computer or its private network, which the computer can relay. */
 function localPreviewLink(value:string) {
   const address=value.replace(/^(https?:\/\/)%5b::1%5d(?=[:/?#]|$)/i,'$1[::1]');
   try {
     const url=new URL(address);
-    return (url.protocol==='http:'||url.protocol==='https:')&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)&&!url.username&&!url.password?address:null;
+    return (url.protocol==='http:'||url.protocol==='https:')&&lanHost(url.hostname)&&!url.username&&!url.password?address:null;
   }catch{return null;}
 }
 type MarkdownProps={text:string;openFile:(path:string)=>void;openPreview:(url:string)=>void;allowFileUrls:boolean};

@@ -103,7 +103,8 @@ export class PreviewTunnel {
     if(typeof headers.location==='string'){
       try{const local=new URL(targetUrl);const next=new URL(headers.location,local);if(next.origin===local.origin)headers.location=origin+next.pathname+next.search+next.hash;}catch{}
     }
-    if(headers['set-cookie'])headers['set-cookie']=(Array.isArray(headers['set-cookie'])?headers['set-cookie']:[headers['set-cookie']]).map((v:string)=>v.replace(/;\s*Domain=(?:localhost|127\.0\.0\.1)/ig,''));
+    // The page runs under the preview origin, so a cookie tied to the computer's own host name would be dropped.
+    if(headers['set-cookie'])headers['set-cookie']=(Array.isArray(headers['set-cookie'])?headers['set-cookie']:[headers['set-cookie']]).map((v:string)=>v.replace(/;\s*Domain=[^;]*/ig,''));
     return headers;
   }
   private async http(req:IncomingMessage,res:ServerResponse){
