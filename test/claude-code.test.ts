@@ -197,6 +197,10 @@ test('connector forks, copies, renames and archives Claude Code sessions with th
     assert.equal(branch.title, '修复登录 bug（分叉）');
     assert.equal(branch.turns.length, 1);
     assert.deepEqual(branch.turns[0].items.map((item: any) => item.text), view.turns[0].items.map((item: any) => item.text));
+    // The connector wrote the new transcript itself just now; no terminal is running it.
+    assert.equal(branch.external, false);assert.equal(branch.running, false);
+    assert.notEqual(branch.turns.at(-1).status, 'inProgress');
+    assert.equal((await bridge.handle('claude.list', {refresh: true})).data.find((item: any) => item.id === forked.conversationId).running, false);
 
     const copy = await run('claude.fork', {});
     assert.equal((await bridge.handle('claude.read', {conversationId: copy.conversationId})).turns.length, 3);
@@ -204,7 +208,9 @@ test('connector forks, copies, renames and archives Claude Code sessions with th
     assert.equal(missing.state, 'failed');
 
     await run('claude.rename', {title: '登录问题'});
-    assert.equal((await bridge.handle('claude.read', {conversationId: sid})).title, '登录问题');
+    const renamed = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(renamed.title, '登录问题');assert.equal(renamed.external, false);assert.equal(renamed.running, false);
+    assert.equal((await bridge.handle('claude.list', {refresh: true})).data.find((item: any) => item.id === sid).running, false);
     await run('claude.archive', {});
     const list = await bridge.handle('claude.list', {refresh: true});
     assert.equal(list.data.some((item: any) => item.id === sid), false);
@@ -515,7 +521,9 @@ test('what a released session’s own process saves as it exits does not look li
     assert.notEqual(view.turns.at(-1).status, 'inProgress');
     assert.equal((await bridge.handle('claude.list', {refresh: true})).data[0].running, false);
 
-    // A terminal that takes the session up afterwards still shows.
+    // A terminal that takes the session up afterwards, with a new prompt, still shows.
+    await writeFile(file, transcript(cwd) + JSON.stringify({type: 'user', sessionId: sid, cwd, uuid: '00000000-0000-4000-8000-999999999998',
+      parentUuid: '00000000-0000-4000-8000-000000000013', timestamp: new Date().toISOString(), message: {role: 'user', content: '再看看'}}) + '\n');
     const later = new Date(Date.now() + 10_000);await utimes(file, later, later);
     const resumed = await bridge.handle('claude.read', {conversationId: sid});
     assert.equal(resumed.external, true);assert.equal(resumed.running, true);

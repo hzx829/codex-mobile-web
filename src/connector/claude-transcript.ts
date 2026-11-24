@@ -1,3 +1,4 @@
+import {open} from 'node:fs/promises';
 import {isAbsolute, relative} from 'node:path';
 import type {MessageItem, PlanStep, TurnView} from '../shared/types.js';
 import {applyPlan, isNextStepTool, isPlanTool, nextStep} from './claude-progress.js';
@@ -369,4 +370,59 @@ export function claudeTurns(messages: ClaudeMessage[], running = false, patches?
       }
     });
   }
+}
+
+/** Where a transcript's conversation stands, read from its end; see {@link lastExchange}. */
+export type Exchange = {open: boolean; at: number};
+const CLOSING_STOPS = new Set(['end_turn', 'stop_sequence', 'max_tokens', 'refusal', 'model_context_window_exceeded']);
+const INTERRUPTED = /^\[(?:Request interrupted|Agent call interrupted|Tool call did not complete)/;
+/** A prompt that never reaches Claude: a slash command, its output, a `!` shell line (as Claude Code's own history tells). */
+const LOCAL = /^\s*<[a-z][\w-]*[\s>]/;
+
+/** Whether an entry is a step of the conversation, and if so whether a turn is still open after it. */
+export function exchangeStep(entry: any): boolean | undefined {
+  if (!entry || entry.isSidechain || entry.isMeta || entry.isCompactSummary) return undefined;
+  if (entry.type === 'assistant') return !CLOSING_STOPS.has(entry.message?.stop_reason);
+  if (entry.type !== 'user') return undefined;
+  const content = entry.message?.content;
+  const texts: string[] = typeof content === 'string' ? [content]
+    : Array.isArray(content) && !content.some(block => block?.type === 'tool_result') ? content.filter(block => block?.type === 'text').map(block => String(block.text)) : [];
+  if (texts.some(text => INTERRUPTED.test(text.trim()))) return false;
+  if (texts.length && texts.every(text => LOCAL.test(text))) return undefined;
+  return true; // A prompt or a tool's result: Claude answers next.
+}
+
+/**
+ * The newest conversation step of a transcript and when anything was last logged at or after it, read backwards from the end.
+ * Titles, modes, costs, renames and other bookkeeping, whoever writes them, never open a turn; while one is open,
+ * progress logged by a long tool call still counts as activity. Undefined: no step at all; null: none within `limit` bytes.
+ */
+export async function lastExchange(path: string, limit = 16 << 20, chunkSize = 64 << 10): Promise<Exchange | undefined | null> {
+  const handle = await open(path, 'r');
+  try {
+    const {size} = await handle.stat();
+    let end = size, rest = Buffer.alloc(0), at = 0;
+    while (end > 0) {
+      if (size - end >= limit) return null;
+      const start = Math.max(0, end - chunkSize), chunk = Buffer.alloc(end - start);
+      await handle.read(chunk, 0, chunk.length, start);
+      const buffer = Buffer.concat([chunk, rest]);
+      end = start;
+      let cut = buffer.length;
+      for (;;) {
+        const newline = cut > 0 ? buffer.lastIndexOf(10, cut - 1) : -1;
+        if (newline < 0 && end > 0) break; // The line starts in an earlier chunk.
+        let entry: any;
+        try {entry = JSON.parse(buffer.subarray(newline + 1, cut).toString('utf8'));} catch {entry = undefined;}
+        const time = entry ? Date.parse(entry.timestamp) : NaN;
+        if (Number.isFinite(time)) at = Math.max(at, time);
+        const step = exchangeStep(entry);
+        if (step !== undefined) return {open: step, at};
+        if (newline < 0) break;
+        cut = newline;
+      }
+      rest = buffer.subarray(0, cut);
+    }
+    return undefined;
+  } finally {await handle.close();}
 }

@@ -10,7 +10,7 @@ import type {Ledger} from './ledger.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
 import {CLAUDE_EFFORTS, ClaudeRuntime, PERMISSION_MODES, type ClaudeEffort, type ClaudeResponse, type LiveSession, type PermissionMode, type QueryFn} from './claude-runtime.js';
-import {claudeArtifactTitles, claudeEarlierMessages, claudePatches, claudeRecordedSettings, claudeTranscriptCwd, claudeTurns, type ClaudeMessage} from './claude-transcript.js';
+import {claudeArtifactTitles, claudeEarlierMessages, claudePatches, claudeRecordedSettings, claudeTranscriptCwd, claudeTurns, lastExchange, type ClaudeMessage, type Exchange} from './claude-transcript.js';
 import type {ArtifactViewer} from './claude-artifacts.js';
 import {entryTimestamp, holderName, readPeerStatuses, type PeerStatus} from './claude-progress.js';
 import {instructionsInput, mcpServersInput, projectKey, readProjectSettings, saveProjectSettings} from './claude-projects.js';
@@ -39,7 +39,7 @@ function readWindow(p: Json): ReadWindow {
 }
 /** A transcript written to this recently is treated as an active terminal or IDE session. */
 const ACTIVE_MS = 20_000;
-/** The file system's clock and this process's can differ a little; a write this soon after a release is still the released process's. */
+/** The file system's clock and this process's can differ a little; a write this soon after the connector's own is still its own. */
 const RELEASE_SLACK_MS = 1000;
 
 type SessionInfo = {sessionId: string; summary: string; customTitle?: string; lastModified: number; fileSize?: number; cwd?: string; archived?: boolean};
@@ -116,10 +116,13 @@ export class ClaudeCodeBridge {
   private queueVersions = new Map<string, number>();
   private queueTimer: NodeJS.Timeout;
   private closed = false;
-  /** Transcript versions this connector wrote itself (a rename), which must not look like a terminal at work. */
-  private ownWrites = new Map<string, bigint>();
-  /** When this connector's own process let each session go. It saves the session's closing entries as it exits. */
-  private released = new Map<string, number>();
+  /**
+   * When this connector last wrote each session's transcript itself, with no process left holding it: a fork it just made,
+   * or a session its own process let go, which saves the session's closing entries as it exits.
+   */
+  private ownUntil = new Map<string, number>();
+  /** Where each recently written transcript's conversation stands, by file version. */
+  private exchanges = new Map<string, {version: string; value: Promise<Exchange | undefined | null>}>();
   private peers?: {at: number; value: Promise<Map<string, PeerStatus>>};
   /** Claude Code's guess at the next prompt, by session, with the turn it follows; it outlives the released process. */
   private suggestions = new Map<string, {text: string; turn: string}>();
@@ -132,7 +135,7 @@ export class ClaudeCodeBridge {
     private now = Date.now, runtime?: ClaudeRuntime) {
     this.runtime = runtime || new ClaudeRuntime(sdkQuery);
     this.runtime.on('change', (id: string) => {this.catalog = undefined;if (id) setImmediate(() => this.drainSoon(id));});
-    this.runtime.on('closed', (id: string) => {if (id) this.released.set(id, this.now());});
+    this.runtime.on('closed', (id: string) => {if (id) this.ownUntil.set(id, this.now());});
     // Also picks up messages left queued across a connector restart, or behind a session that was busy elsewhere.
     this.queueTimer = setInterval(() => {
       try {if (!this.closed) for (const id of new Set(this.queue?.queued().map(message => message.threadId))) this.drainSoon(id);} catch {}
@@ -224,24 +227,45 @@ export class ClaudeCodeBridge {
     if (!info && !live) throw new BridgeError('missing', 'Claude Code 会话已移动或删除，请刷新列表');
     const elsewhere = !guestWorkspace() && !live && info !== null;
     // The process holding it (the desktop app, a terminal) reports whether a turn is under way, however long a call takes;
-    // without that report, recent transcript writes are the only sign.
+    // without that report, a turn left open in the transcript and logged to just now is the only sign.
     // Another program with the session open, even idle: it keeps its own copy of the conversation and never sees what
     // this connector's processes add, so the phone is told.
     const holder = !guestWorkspace() && info !== null ? (await this.peerStatuses()).get(id) : undefined;
     const peer = elsewhere ? holder : undefined;
-    const external = elsewhere && (peer ? peer.status !== 'idle' : this.writtenElsewhere(id, Number(info!.mtimeMs)) && this.ownWrites.get(id) !== info!.mtimeNs);
+    const external = elsewhere && (peer ? peer.status !== 'idle' : await this.writtenElsewhere(id, path, info!));
     const marker = live ? live.version : external ? peer?.status || 'external' : '-';
     return {revision: `${info?.mtimeNs ?? ''}:${info?.size ?? ''}:${marker}:${this.queueVersions.get(id) || 0}:${holder?.pid ?? ''}`, external,
       peer: external ? peer : undefined, holder, exists: Boolean(info)};
   }
 
   /**
-   * A transcript written to just now, by something other than this connector's own process on its way out: the only
-   * sign of a terminal or IDE at work when no process reports holding the session.
+   * The only sign of a terminal or IDE at work when no process reports holding the session: its transcript shows a turn
+   * left open and logged to just now. A write alone is not enough: titles, modes, costs, renames and archiving are written
+   * by many hands, a turn's end among them; and nothing this connector wrote itself (a fork, what its own process saves
+   * on its way out) counts.
    */
-  private writtenElsewhere(id: string, mtimeMs: number, now = this.now()) {
-    const released = this.released.get(id);
-    return now - mtimeMs < ACTIVE_MS && (released === undefined || mtimeMs > released + RELEASE_SLACK_MS);
+  private async writtenElsewhere(id: string, path: string, file: {mtimeMs: bigint | number; mtimeNs?: bigint; size: bigint | number}) {
+    const now = this.now(), mtimeMs = Number(file.mtimeMs), own = this.ownUntil.get(id);
+    if (now - mtimeMs >= ACTIVE_MS || (own !== undefined && mtimeMs <= own + RELEASE_SLACK_MS)) return false;
+    const version = `${file.mtimeNs ?? mtimeMs}:${file.size}`;
+    let cached = this.exchanges.get(path);
+    if (cached?.version !== version) {
+      cached = {version, value: lastExchange(path).catch(() => null)};
+      this.exchanges.delete(path);this.exchanges.set(path, cached);
+      if (this.exchanges.size > 64) this.exchanges.delete(this.exchanges.keys().next().value!);
+    }
+    const last = await cached.value;
+    // Unreadable, or no step near the end: the write is the only sign left.
+    if (last === null) return true;
+    return last !== undefined && last.open && now - last.at < ACTIVE_MS;
+  }
+
+  /** As in {@link writtenElsewhere}, for a session listed by its last-modified time. */
+  private async listedElsewhere(info: SessionInfo) {
+    if (this.now() - info.lastModified >= ACTIVE_MS) return false;
+    const path = await this.transcript(info.sessionId).catch(() => '');
+    const file = path ? await stat(path, {bigint: true}).catch(() => null) : null;
+    return file ? this.writtenElsewhere(info.sessionId, path, file) : false;
   }
 
   /** Claude Code's own reports of the sessions its processes hold, read at most twice a second. */
@@ -422,10 +446,11 @@ export class ClaudeCodeBridge {
       const projects = !offset && !search
         ? guestWorkspace() ? (await workspaceProjects(paths)).map(item => ({...item, id: item.path})) : paths.map(path => ({id: path, path}))
         : undefined;
-      const now = this.now(), peers = guestWorkspace() ? new Map<string, PeerStatus>() : await this.peerStatuses();
-      const elsewhere = (info: SessionInfo) => {const peer = peers.get(info.sessionId);return peer ? peer.status !== 'idle' : !guestWorkspace() && this.writtenElsewhere(info.sessionId, info.lastModified, now);};
-      return {data: page.map(info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,
-        running: this.runtime.get(info.sessionId)?.running ?? elsewhere(info)})), hasMore: matches.length > offset + PAGE, projects,
+      const peers = guestWorkspace() ? new Map<string, PeerStatus>() : await this.peerStatuses();
+      const elsewhere = async (info: SessionInfo) => {const peer = peers.get(info.sessionId);return peer ? peer.status !== 'idle' : !guestWorkspace() && await this.listedElsewhere(info);};
+      const data = await Promise.all(page.map(async info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,
+        running: this.runtime.get(info.sessionId)?.running ?? await elsewhere(info)})));
+      return {data, hasMore: matches.length > offset + PAGE, projects,
         defaultPermissionMode: this.runtime.defaultMode};
     }
     if (action === 'claude.operation') {
@@ -596,6 +621,8 @@ export class ClaudeCodeBridge {
         if (!upTo && (this.runtime.get(id)?.running || (await this.revision(id)).external))
           throw new BridgeError('active', '这条会话正在运行，请等它结束后再复制，或从已完成的一轮分叉');
         const {sessionId: forked} = await sessions.forkSession(id, {upToMessageId: upTo, title: `${title(info)}（${upTo ? '分叉' : '副本'}）`.slice(0, 200)});
+        // The new transcript was just written here, not by a terminal running it.
+        this.ownUntil.set(forked, this.now());
         this.catalog = undefined;
         return {conversationId: forked};
       });
@@ -604,13 +631,8 @@ export class ClaudeCodeBridge {
       const name = textRequired(p.title, '会话名称', 200);
       return this.mutate(p, {action, id, name}, async () => {
         await this.info(id);
-        const before = await this.revision(id);
         await (await this.sessions()).renameSession(id, name);
         this.catalog = undefined;
-        if (!before.external) {
-          const info = await stat(await this.transcript(id), {bigint: true}).catch(() => null);
-          if (info) this.ownWrites.set(id, info.mtimeNs);
-        }
         return {title: name};
       });
     }
