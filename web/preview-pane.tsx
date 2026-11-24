@@ -1,4 +1,5 @@
-import {useEffect,useRef,useState,type CSSProperties,type ReactNode} from 'react';
+import {createContext,useContext,useEffect,useRef,useState,type CSSProperties,type ReactNode} from 'react';
+import {createPortal} from 'react-dom';
 import {Icon} from './icons';
 
 export const PREVIEW_BREAKPOINT='(max-width: 1000px)';
@@ -8,8 +9,15 @@ export function useCompactPreview(){
   return compact;
 }
 
+const ActionSlot=createContext<HTMLElement|null>(null);
+/** Puts a viewer's own controls (refresh, time of copy) into the pane header, so they take no row of their own. Only the shown tab passes `active`. */
+export function PreviewActions({active,children}:{active:boolean;children:ReactNode}){
+  const slot=useContext(ActionSlot);
+  return active&&slot?createPortal(children,slot):null;
+}
+
 export function PreviewPane({title,subtitle,tabs,activeTab,selectTab,closeTab,compact,covered,close,children}:{title:string;subtitle?:string;tabs:{id:number;title:string}[];activeTab:number|null;selectTab:(id:number)=>void;closeTab:(id:number)=>void;compact:boolean;covered:boolean;close:()=>void;children:ReactNode}){
-  const [expanded,setExpanded]=useState(false),[width,setWidth]=useState(520);
+  const [expanded,setExpanded]=useState(false),[width,setWidth]=useState(520),[slot,setSlot]=useState<HTMLElement|null>(null);
   const panel=useRef<HTMLElement>(null),onClose=useRef(close),start=useRef({x:0,y:0,width:0}),dragged=useRef(false);
   const maxWidth=Math.max(320,window.innerWidth-550);
   onClose.current=close;
@@ -40,16 +48,17 @@ export function PreviewPane({title,subtitle,tabs,activeTab,selectTab,closeTab,co
         onPointerDown={e=>{dragged.current=false;start.current={x:0,y:e.clientY,width:0};e.currentTarget.setPointerCapture(e.pointerId);}}
         onPointerUp={e=>{const delta=e.clientY-start.current.y;if(Math.abs(delta)<35)return;dragged.current=true;if(delta<0)setExpanded(true);else if(expanded)setExpanded(false);else close();}}
       ><span/></button>}
-      <header className="preview-header"><div><h2>{title}</h2>{subtitle&&<small title={subtitle}>{subtitle}</small>}</div>
-        {compact&&<button onClick={()=>setExpanded(v=>!v)}>{expanded?'收起':'全屏'}</button>}
-        <button className="icon-button" aria-label="关闭预览" onClick={close}><Icon name="close"/></button>
+      <header className="preview-header"><div className="preview-heading"><h2>{title}</h2>{subtitle&&<small title={subtitle}>{subtitle}</small>}</div>
+        <div className="preview-actions" ref={setSlot}/>
+        {compact&&<button className="icon-button preview-expand" aria-label={expanded?'收起':'全屏'} title={expanded?'收起':'全屏'} onClick={()=>setExpanded(v=>!v)}><Icon name={expanded?'collapse':'expand'} size={18}/></button>}
+        <button className="icon-button" aria-label="关闭预览" title="关闭" onClick={close}><Icon name="close" size={18}/></button>
       </header>
-      <div className="preview-tabs" role="tablist" aria-label="预览内容">{tabs.map((tab,index)=><div className={`preview-tab${tab.id===activeTab?' active':''}`} key={tab.id}>
+      {tabs.length>1&&<div className="preview-tabs" role="tablist" aria-label="预览内容">{tabs.map((tab,index)=><div className={`preview-tab${tab.id===activeTab?' active':''}`} key={tab.id}>
         <button type="button" id={`preview-tab-${tab.id}`} role="tab" aria-controls={`preview-panel-${tab.id}`} aria-selected={tab.id===activeTab} tabIndex={tab.id===activeTab?0:-1} title={tab.title} onClick={()=>selectTab(tab.id)}
           onKeyDown={event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowLeft'?-1:1)+tabs.length)%tabs.length;selectTab(tabs[next].id);panel.current?.querySelector<HTMLElement>(`#preview-tab-${tabs[next].id}`)?.focus();}}>{tab.title}</button>
         <button type="button" className="preview-tab-close" aria-label={`关闭 ${tab.title}`} onClick={()=>closeTab(tab.id)}><Icon name="close" size={12}/></button>
-      </div>)}</div>
-      <div className="preview-body">{children}</div>
+      </div>)}</div>}
+      <div className="preview-body"><ActionSlot.Provider value={slot}>{children}</ActionSlot.Provider></div>
     </section>
   </>;
 }

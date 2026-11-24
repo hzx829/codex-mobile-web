@@ -168,8 +168,10 @@ export type Snapshot = {state: 'ready'; slug: string; title: string; at: number;
  * Serializer evaluated inside each frame (in an isolated world, so the page's scripts cannot see it).
  * Returns the frame's DOM as static HTML. Resource URLs become `cmw-resource:N` placeholders that the
  * connector fills from the browser's cache; child frames become `<iframe data-cmw-frame=N>` filled the same way.
+ * In the Artifact's own frame (`top`), claude.ai's toolbar ("Updated 5 days ago" and its buttons) is left out:
+ * its buttons do nothing in a copy and it takes a row of the phone's height.
  */
-const SERIALIZER = String.raw`(async () => {
+const serializer = (top: boolean) => String.raw`(async (top) => {
   const resources = [], frames = [], index = new Map();
   const resource = (value, base) => {
     if (!value || /^(data|blob|about|javascript):/i.test(value.trim())) return /^data:/i.test(value.trim()) ? value : '';
@@ -201,6 +203,7 @@ const SERIALIZER = String.raw`(async () => {
     if (n.nodeType !== 1) return '';
     const tag = n.localName, name = n.tagName.toLowerCase().includes(':') ? n.tagName : tag;
     if (drop.has(tag)) return '';
+    if (top && tag === 'header' && n.classList.contains('tb-root') && n.hasAttribute('data-uncommentable')) return '';
     if (tag === 'link') {
       if (!/(^|\s)stylesheet(\s|$)/i.test(n.rel) || !n.sheet) return n.sheet === null && /(^|\s)stylesheet(\s|$)/i.test(n.rel) && n.href ? '<style data-cmw-sheet="' + resource(n.href) + '"></style>' : '';
       const text = rules(n.sheet);
@@ -252,8 +255,10 @@ const SERIALIZER = String.raw`(async () => {
   const head = adopted(document);
   if (head) html = html.replace(/<head([^>]*)>/i, m => m + head);
   return {html, resources, frames, title: document.title};
-})()`;
+})(${top})`;
 
+/** Raised when the copy itself changes (2: without claude.ai's toolbar); older saved copies are made again. */
+const SNAPSHOT_FORMAT = 2;
 const CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; media-src data:";
 const mimeOf = (url: string, type = '') => {
   const known: Record<string, string> = {Image: 'image/png', Font: 'font/woff2', Stylesheet: 'text/css'};
@@ -367,7 +372,7 @@ export class ArtifactViewer {
     const meta = join(dir, `${variant}.json`);
     if (p.refresh !== true && !this.jobs.has(variant + slug)) {
       const saved = await readFile(meta, 'utf8').then(text => JSON.parse(text), () => null);
-      if (saved && existsSync(file)) return {state: 'ready', slug, title: saved.title, at: saved.at, file: await readProjectFile(dir, file).then(({text, ...info}) => info)};
+      if (saved && saved.format === SNAPSHOT_FORMAT && existsSync(file)) return {state: 'ready', slug, title: saved.title, at: saved.at, file: await readProjectFile(dir, file).then(({text, ...info}) => info)};
     }
     let job = this.jobs.get(variant + slug);
     if (!job) {
@@ -377,7 +382,7 @@ export class ArtifactViewer {
           await mkdir(dir, {recursive: true});
           await writeFile(file, result.html);
           const at = this.now();
-          await writeFile(meta, JSON.stringify({title: result.title, at}));
+          await writeFile(meta, JSON.stringify({title: result.title, at, format: SNAPSHOT_FORMAT}));
           const {text, ...info} = await readProjectFile(dir, file);
           return {state: 'ready', slug, title: result.title, at, file: info} as Snapshot;
         }
@@ -506,7 +511,7 @@ export class ArtifactViewer {
   }
 
   private async serializeFrame(cdp: Cdp, frame: Frame, tree: Json, children: Map<string, {sessionId: string; url: string}>, depth: number, budget: {total: number}): Promise<string> {
-    const result: Serialized & {title: string} = await this.evaluate(cdp, frame.sessionId, SERIALIZER, await this.world(cdp, frame.sessionId, frame.frameId));
+    const result: Serialized & {title: string} = await this.evaluate(cdp, frame.sessionId, serializer(depth === 0), await this.world(cdp, frame.sessionId, frame.frameId));
     let html = result.html;
     const types = new Map<string, string>();
     try {

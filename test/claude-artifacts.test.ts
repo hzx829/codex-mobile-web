@@ -35,8 +35,8 @@ test('a rendered Artifact frame becomes a static page without scripts', {skip: !
     const send = (type: string, body: string | Buffer) => {response.writeHead(200, {'content-type': type.startsWith('text/') ? type + '; charset=utf-8' : type});response.end(body);};
     if (path === '/artifact/FR2QT5upk4yhRE2SLNe2oM') return send('text/html', `<title>持仓决策看板 – Claude</title><h1>shell</h1><iframe src="http://127.0.0.1:${port}/frame" style="width:100%;height:600px"></iframe>`);
     if (path === '/frame') return send('text/html', `<!doctype html><html data-theme="x"><head><link rel="stylesheet" href="/style.css"><style>.dyn{color:rgb(1,2,3)}</style></head>
-      <body><div id="root">loading</div><canvas id="c" width="20" height="10"></canvas><input id="q"><my-card></my-card><img src="/dot.png" alt="dot">
-      <iframe srcdoc="<p id=inner>nested frame</p>" style="height:40px"></iframe>
+      <body><header class="tb-root" data-uncommentable>Updated 5 days ago</header><div id="root">loading</div><canvas id="c" width="20" height="10"></canvas><input id="q"><my-card></my-card><img src="/dot.png" alt="dot">
+      <iframe srcdoc="<header class='tb-root' data-uncommentable>page header</header><p id=inner>nested frame</p>" style="height:40px"></iframe>
       <a href="/elsewhere" onclick="alert(1)">link</a>
       <script>
         setTimeout(() => {
@@ -78,6 +78,9 @@ test('a rendered Artifact frame becomes a static page without scripts', {skip: !
     assert.match(html, /href="http:\/\/127\.0\.0\.1:\d+\/elsewhere" target="_blank"/);
     assert.match(html, /Content-Security-Policy/);
     assert.doesNotMatch(html, /<script|onclick|shell/i);
+    // claude.ai's toolbar is left out of the Artifact's frame; a page's own header in a nested frame stays.
+    assert.doesNotMatch(html, /Updated 5 days ago/);
+    assert.match(html, /page header/);
     // A second request reuses the saved copy.
     const again = await viewer.snapshot({url: 'https://claude.ai/artifact/FR2QT5upk4yhRE2SLNe2oM', width: 400}, 100);
     assert.equal(again.state, 'ready');

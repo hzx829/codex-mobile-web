@@ -1,5 +1,7 @@
 import {useEffect,useRef,useState,type PointerEvent} from 'react';
 import {receiveFile} from './file-download';
+import {Icon} from './icons';
+import {PreviewActions} from './preview-pane';
 import type {FilePreview,Json,RequestAction} from '../src/shared/types';
 
 type Call=(action:RequestAction,payload?:Json)=>Promise<any>;
@@ -13,7 +15,7 @@ const snapWidth=(width:number)=>Math.max(320,Math.min(1600,Math.floor(width/40)*
  * The phone never contacts claude.ai: the connector's own browser opens the page and sends the result over the relay.
  * `fresh` names the page's latest change; a new value means the saved copy is out of date and is made again.
  */
-export function ArtifactPanel({url,connected,call,onTitle,fresh}:{url:string;connected:boolean;call:Call;onTitle?:(title:string)=>void;fresh?:string}){
+export function ArtifactPanel({url,connected,call,onTitle,fresh,active=true}:{url:string;connected:boolean;call:Call;onTitle?:(title:string)=>void;fresh?:string;active?:boolean}){
   const [state,setState]=useState<'loading'|'rendering'|'login'|'challenge'|'ready'|'error'>('loading');
   const [page,setPage]=useState<Ready|null>(null),[error,setError]=useState(''),[progress,setProgress]=useState(0);
   const box=useRef<HTMLDivElement>(null),run=useRef(0),request=useRef(call),loaded=useRef<string|undefined>(undefined);request.current=call;
@@ -42,10 +44,10 @@ export function ArtifactPanel({url,connected,call,onTitle,fresh}:{url:string;con
   }
   useEffect(()=>{if(connected){const renew=fresh!==undefined&&fresh!==loaded.current;loaded.current=fresh;void load(renew);}return()=>{run.current++;};},[url,connected,fresh]);
   return <div className="web-viewer artifact-viewer" ref={box}>
-    <div className="viewer-toolbar">
-      <button disabled={!connected||state==='loading'||state==='rendering'} onClick={()=>void load(true)}>刷新</button>
-      {page&&<small>电脑于 {time(page.at)} 生成的静态副本</small>}
-    </div>
+    <PreviewActions active={active}>
+      {page&&<small className="preview-stamp" title={`电脑于 ${time(page.at)} 生成的副本`}>{time(page.at)}</small>}
+      <button className="icon-button" aria-label="刷新" title="刷新" disabled={!connected||state==='loading'||state==='rendering'} onClick={()=>void load(true)}><Icon name="refresh" size={18}/></button>
+    </PreviewActions>
     {error&&<p className="preview-notice error" role="alert">{error}</p>}
     {state==='ready'&&page?<iframe title={page.title} srcDoc={page.html} sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer"/>:
       state==='login'||state==='challenge'?<ArtifactSignIn key={state} call={call} connected={connected} challenge={state==='challenge'} done={()=>void load(true)}/>:
