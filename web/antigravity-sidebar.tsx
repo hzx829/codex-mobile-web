@@ -6,6 +6,7 @@ import {relativeTime,ThreadMenu,ThreadRow} from './thread-menu';
 import {groupThreads,rememberThreads,visibleThreads,type ThreadPreference,type ThreadPreferences} from './thread-preferences';
 import type {MenuPoint} from './popover';
 import {SessionListLoader} from './session-list-loader';
+import {cachedList,listKey,rememberList} from './session-cache';
 import {useStableEvent} from './use-event';
 import type {Json,RequestAction} from '../src/shared/types';
 
@@ -42,7 +43,9 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
     savePreferences(storage,values);setPreferences({key:storage,values});
   }
   const key=JSON.stringify([project,query]),current=page?.key===key?page:null;
-  const items=current?.items||[];
+  // The last list read on this computer shows until the fresh one arrives; searches are not kept.
+  const listCache=listKey(listAction,machine,project),projectsCache=listKey(listAction,machine,'*projects');
+  const items=current?.items||(query?null:cachedList(listCache) as Thread[]|null)||[];
   const matching=query?items.filter(item=>item.title.toLowerCase().includes(query.toLowerCase())):items;
   const shown=visibleThreads(matching,preferences,project,false,query) as Thread[];
   const visible=filter?filter(shown) as Thread[]:shown;
@@ -52,7 +55,8 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
     void loader.current.load(key,():Promise<Page>=>call(listAction,{project,search:query,offset}),{
       start:()=>{setBusy(true);setError('');setNotice('');},
       result:result=>{
-        if(result.projects)setProjects(result.projects);
+        if(result.projects){setProjects(result.projects);rememberList(projectsCache,result.projects);}
+        if(!offset&&!query)rememberList(listCache,result.data);
         setPreferences(old=>{const base=old.key===storage?old.values:loadPreferences(storage),values=rememberThreads(base,result.data,false);if(values!==base)savePreferences(storage,values);return {key:storage,values};});
         setNotice(result.notice||'');
         setPage({key,items:offset?[...new Map([...items,...result.data].map(item=>[item.id,item])).values()]:result.data,
@@ -69,7 +73,8 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
     return()=>activeLoader.invalidate();
   },[connected,key,revision,load]);
   const heading=query?'搜索结果':project?'聊天':'最近';
-  const currentProject=projects.find(item=>item.id===project);
+  const shownProjects=projects.length?projects:cachedList(projectsCache) as Project[]|null||[];
+  const currentProject=shownProjects.find(item=>item.id===project);
   const projectLabel=currentProject?.path;
   return <aside className="home-panel" inert={inert}>
     <HomeHeader project={project?currentProject?.name||(projectLabel?workspaceName(projectLabel):'项目'):''} machineName={machineName} connected={connected} relayOnline={relayOnline}
@@ -77,7 +82,7 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
     {!project&&!query&&switcher}
     <div className="home-content">
       {action}
-      {!project&&!query&&projects.length>0&&<section className="project-section"><h2>项目</h2>{projects.map(item=>
+      {!project&&!query&&shownProjects.length>0&&<section className="project-section"><h2>项目</h2>{shownProjects.map(item=>
         <button className="project-row" key={item.id} title={item.path} onClick={()=>chooseProject(item.id)}><Icon name="folder"/><span>{item.name||workspaceName(item.path)}</span></button>)}</section>}
       <section className="recent-section">{!visible.length&&<h2>{heading}</h2>}
         {groupThreads(visible,preferences,heading).map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(item=>{

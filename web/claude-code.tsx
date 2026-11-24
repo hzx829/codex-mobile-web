@@ -27,6 +27,7 @@ import type {ApprovalRequest,Json,QueuedMessage,RequestAction,SessionView,TurnVi
 import {SenderScope} from './senders';
 import {useTurnNotice,watchWhileHidden} from './turn-notify';
 import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
+import {cachedView,rememberView,threadKey} from './session-cache';
 
 type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;guest?:boolean;
@@ -73,7 +74,9 @@ export function ClaudeCodePanel(props:Props){
   const {machine,machineName,connected,conversationId,newCwd,inert,previewError,guest,call,go,openFile,openPreview,showFiles,showImage,copyText,clearPreviewError}=props;
   const creating=!conversationId;
   const scope=`claude:${machine}:${conversationId||'new'}`;
-  const [view,setView]=useState<Json|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
+  // A session opened before shows what it last held at once, marked `cached` until the read below replaces it.
+  const cacheKey=threadKey('claude',machine,conversationId);
+  const [view,setView]=useState<Json|null>(()=>creating?null:cachedView<Json>(cacheKey)),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
   const [draft,setDraft]=useState(()=>load(`${scope}:draft`)),[pending,setPending]=useState(()=>load(`${scope}:pending`));
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   // A saved session keeps its own model and effort until changed here; the last choice only seeds new sessions.
@@ -100,6 +103,8 @@ export function ClaudeCodePanel(props:Props){
     finally{if(alive.current)setBusy(false);}
   });
   useEffect(()=>{void refresh();},[connected,conversationId,refresh]);
+  useEffect(()=>{if(view&&!view.cached&&!creating)rememberView(cacheKey,view);},[view]);
+  const cached=Boolean(view?.cached);
   useEffect(()=>{
     if(!creating||!connected)return;
     request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setDefaultMode(page.defaultPermissionMode||'');setTarget(old=>old||list[0]?.id||(guest?'':OTHER));}).catch(failed);
@@ -147,7 +152,8 @@ export function ClaudeCodePanel(props:Props){
   // claude.ai pages follow Claude's own app: the conversation's page comes back with it, and a publish or an open call brings a page up.
   const pagesSeen=useRef<Map<string,string>|null>(null),showPage=useStableEvent(props.showPage);
   useEffect(()=>{
-    if(!view?.turns||!conversationId)return;
+    // The first fresh read decides which pages are already known; a cached view may be older than it.
+    if(!view?.turns||!conversationId||view.cached)return;
     if(!pagesSeen.current){
       paneActions(view.turns,pagesSeen.current=new Map(),true);
       const page=pageToRestore(view.turns,savedPage(machine,conversationId));
@@ -168,7 +174,8 @@ export function ClaudeCodePanel(props:Props){
 
   /** `prepare` runs once the panel is locked, before the operation is recorded: uploads go there. */
   async function mutate(action:'claude.create'|'claude.send'|'claude.stop'|'claude.respond'|'claude.fork'|'claude.edit'|'claude.steerQueued'|'claude.withdrawQueued'|'claude.cancelQueued',payload:Json,onAccepted?:(result:Json)=>void,prepare?:()=>Promise<Json>){
-    if(lock.current||pending||!connected)return false;
+    // A cached view's turns and running state may be outdated; nothing is sent from it.
+    if(lock.current||pending||!connected||cached)return false;
     lock.current=true;setBusy(true);setError('');
     if(prepare)try{payload={...payload,...await prepare()};}
     catch(e){failed(e);lock.current=false;if(alive.current){setBusy(false);setUploadProgress(null);}return false;}
@@ -305,12 +312,12 @@ export function ClaudeCodePanel(props:Props){
   const followup=useStableEvent((text:string)=>{edit(draft.trim()?`${draft.trimEnd()}\n\n${text}`:text);composer.current?.focus();});
   const turns:TurnView[]=view?.turns||[];
   const requests:ApprovalRequest[]=view?.requests||[];
-  useTurnNotice(scope,view?Boolean(view.running):undefined,requests.length,()=>{
+  useTurnNotice(scope,view&&!cached?Boolean(view.running):undefined,requests.length,()=>{
     const turn=turns.at(-1);
     return {service:'Claude Code',title:view?.title,status:turn?.status,reply:turn?.items.filter(item=>item.role==='assistant').at(-1)?.text,error:turn?.error};
   });
-  const status=!connected?connectionLost:watchError||(pending&&busy?'正在等待电脑确认…':'');
-  const canWrite=connected&&!busy&&!pending&&(creating?(!guest||Boolean(startPath)):Boolean(view));
+  const status=!connected?(cached?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost):watchError||(pending&&busy?'正在等待电脑确认…':cached?'正在同步最新内容…':'');
+  const canWrite=connected&&!busy&&!pending&&(creating?(!guest||Boolean(startPath)):Boolean(view)&&!cached);
   // Photos are compressed into the message; other files are uploaded to the project when it is sent.
   const attachments=useComposerAttachments({disabled:!canWrite,notify:setError,added:()=>setAdding(false)});
   const {images,files,setImages,setFiles}=attachments,canSend=canWrite&&!attachments.loading&&!voiceBusy;

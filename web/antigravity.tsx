@@ -8,6 +8,7 @@ import {ApprovalCard} from './approval-card';
 import {SheetPanel} from './sheet';
 import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {uploadAttachments,type UploadProgress} from './file-upload';
+import {cachedView,rememberView,threadKey} from './session-cache';
 import {MAX_ATTACHMENTS} from '../src/shared/attachments';
 import {MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import {AntigravityMessages,antigravityIssueText} from './antigravity-messages';
@@ -109,7 +110,11 @@ export function AntigravityPanel(props:Props){
   const creating=!conversationId;
   const key=`antigravity:${machine}:${conversationId||'new'}`;
   const [projects,setProjects]=useState<{id:string;path:string;name?:string}[]|null>(null),[target,setTarget]=useState(props.newProject||'');
-  const [view,setView]=useState<Json|null>(null);
+  // A conversation opened before shows what it last held at once, marked `cached` until the read below replaces it.
+  const cacheKey=threadKey('antigravity',machine,conversationId);
+  const [view,setView]=useState<Json|null>(()=>creating?null:cachedView<Json>(cacheKey));
+  const cached=Boolean(view?.cached);
+  useEffect(()=>{if(view&&!view.cached&&!creating)rememberView(cacheKey,view);},[view]);
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[submitting,setSubmitting]=useState(false);
   const [draft,setDraft]=useState(()=>saved(`${key}:draft`)),[pending,setPending]=useState(()=>saved(`${key}:pending`));
   const [watchError,setWatchError]=useState('');
@@ -279,7 +284,7 @@ export function AntigravityPanel(props:Props){
   async function mutate(action:'send'|'stop',options?:{killBackgroundTasks?:boolean}){
     if(action==='send'&&(attachments.loading||voiceBusy))return;
     if(creating){if(action==='send')void start();return;}
-    if(lock.current||pending||!connected)return;
+    if(lock.current||pending||!connected||cached)return;
     if(action==='send'&&(!draft.trim()&&!files.length||!(supportsQueue?Boolean(view):Boolean(view?.canSend))))return;
     const killBackgroundTasks=action==='stop'&&Boolean(options?.killBackgroundTasks);
     if(action==='stop'&&!view?.running&&!(killBackgroundTasks&&hasBackgroundTasks))return;
@@ -313,7 +318,7 @@ export function AntigravityPanel(props:Props){
     void refresh(true);
   }
   async function queueAction(action:'antigravity.steerQueued'|'antigravity.withdrawQueued'|'antigravity.cancelQueued',payload:Json,onAccepted:(result:Json)=>void){
-    if(lock.current||pending||!connected||creating)return;
+    if(lock.current||pending||!connected||creating||cached)return;
     lock.current=true;setBusy(true);setError('');
     const opId=operationId();remember(opId);
     try{
@@ -338,7 +343,7 @@ export function AntigravityPanel(props:Props){
     });
   }
   async function respondRequest(requestId:string,decision:'allow'|'allowSession'|'deny',answers?:Record<string,string>){
-    if(lock.current||pending||!connected||creating)return;
+    if(lock.current||pending||!connected||creating||cached)return;
     lock.current=true;setBusy(true);setError('');
     const opId=operationId();remember(opId);
     try{
@@ -353,18 +358,19 @@ export function AntigravityPanel(props:Props){
   }
   const issue=view?.issue;
   const requests:ApprovalRequest[]=view?.requests||[];
-  useTurnNotice(key,view?Boolean(view.running):undefined,requests.length,()=>({service:'Antigravity',title:view?.title,
+  useTurnNotice(key,view&&!cached?Boolean(view.running):undefined,requests.length,()=>({service:'Antigravity',title:view?.title,
     reply:view?.messages?.filter((message:Json)=>message.role==='assistant'&&message.text).at(-1)?.text}));
   const antigravityStatus=(
-    !connected?connectionLost:watchError||
-    (pending&&busy?'正在等待电脑确认…':issue?antigravityIssueText(issue,view!.canSend):
+    !connected?(cached?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost):watchError||
+    (pending&&busy?'正在等待电脑确认…':cached?'正在同步最新内容…':issue?antigravityIssueText(issue,view!.canSend):
       view&&!view.running&&!view.canSend&&!requests.length?'正在等待 Antigravity…':'')
   );
   useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,antigravityStatus]);
   const trackScroll=()=>{const element=scroll.current!;stick.current=element.scrollHeight-element.scrollTop-element.clientHeight<80;};
   const checkPending=<><button disabled={!connected||busy} onClick={()=>void check()}>核实操作结果</button><button disabled={busy} onClick={()=>{if(window.confirm('请先在聊天和电脑页面确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></>;
   const feedback=error||previewError,sending=Boolean(pending&&busy&&submitting);
-  const canOperate=connected&&!busy&&!pending;
+  // A cached view's state may be outdated; nothing is sent from it.
+  const canOperate=connected&&!busy&&!pending&&!cached;
   const queueNext=!creating&&supportsQueue&&Boolean(view&&(view.running||!view.canSend||queued.length>0||requests.length>0));
   const canSendNow=creating?Boolean(target):(supportsQueue?Boolean(view):Boolean(view?.canSend));
   const effectiveMode=view?.permissionMode||view?.defaultPermissionMode||defaultMode||'AGENT_PERMISSION_PRESET_DEFAULT';
