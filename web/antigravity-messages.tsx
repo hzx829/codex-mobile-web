@@ -8,10 +8,18 @@ import {SenderLabel} from './senders';
 
 export function antigravityIssueText(issue: AntigravityIssue, canSend: boolean) {
   if (issue.kind === 'interrupted') return 'Antigravity 的回复中断了，可以发送消息继续。';
-  if (issue.kind === 'error') return 'Antigravity 处理消息时出错。';
+  if (issue.kind === 'error') return issue.message ? `Antigravity 出错：${issue.message}` : 'Antigravity 处理消息时出错。';
   const reason = issue.connection ? 'Antigravity 连接中断' : 'Antigravity 请求出错';
   if (canSend) return `${reason}，本轮已结束。`;
   return `${reason}，正在${issue.connection ? '重连' : '重试'}（第 ${issue.attempt} 次请求失败）…`;
+}
+
+export function AntigravityErrorNotice({issue}: {issue: Extract<AntigravityIssue, {kind: 'error'}>}) {
+  return <div className="antigravity-error" role="alert">
+    <p className="antigravity-error-title">{antigravityIssueText(issue, true)}</p>
+    {issue.detail && <p className="antigravity-error-detail">{issue.detail}</p>}
+    {issue.errorId && <p className="antigravity-error-id">Error ID: {issue.errorId}</p>}
+  </div>;
 }
 
 export function groupAntigravityMessages(messages: AntigravityMessage[]) {

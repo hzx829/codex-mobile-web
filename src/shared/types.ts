@@ -9,7 +9,7 @@ export type ApprovalQuestion = {question:string; header:string; multiSelect:bool
 export type ApprovalRequest = {id:string; kind:'permission'|'question'|'plan'|'notice'; tool:string; title:string; detail:string; canRemember:boolean; rememberScope?:'session'|'project'|'user'; implementModes?:string[]; questions?:ApprovalQuestion[]};
 export type AntigravityMessage = {id:string; role:'user'|'assistant'|'tool'; text:string; sender?:TeamMember};
 export type AntigravityBackgroundTask = {id:string; stepIndex:number; title:string; command?:string; cwd?:string; output?:string; startedAt?:string};
-export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'};
+export type AntigravityIssue = {kind:'retry'; attempt:number; connection:boolean} | {kind:'interrupted'} | {kind:'error'; message?:string; detail?:string; errorId?:string};
 export const bridgeServices = ['codex', 'antigravity', 'claude'] as const;
 export type BridgeService = typeof bridgeServices[number];
 /** `protocol` and `features`: what the computer's connector reported (src/shared/protocol.ts); older connectors and relays leave them out. */

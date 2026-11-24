@@ -33,6 +33,9 @@ const active = 'CASCADE_RUN_STATUS_RUNNING';
 const canceling = 'CASCADE_RUN_STATUS_CANCELING';
 const waitingStep = 'CORTEX_STEP_STATUS_WAITING';
 const runningStep = 'CORTEX_STEP_STATUS_RUNNING';
+const ERROR_STEP = 'CORTEX_STEP_TYPE_ERROR_MESSAGE';
+const USER_INPUT_STEP = 'CORTEX_STEP_TYPE_USER_INPUT';
+const PLANNER_RESPONSE_STEP = 'CORTEX_STEP_TYPE_PLANNER_RESPONSE';
 const NEXT_INVOCATION = 'MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION';
 const SEND_MODES = ['queue', 'steer', 'now'] as const;
 type SendMode = typeof SEND_MODES[number];
@@ -51,6 +54,8 @@ const workspaceEntries = "json_each(CASE WHEN json_valid(workspace_uris) THEN wo
 const turnKey = (summary: Summary) => JSON.stringify([summary.userStep, summary.userTime]);
 // `not_fully_idle` also stays set while a background command is running after the turn ended; desktop still accepts messages then.
 const canSend = (summary: Summary) => summary.status === idle;
+const hasConfiguredModel = (config: Json | null | undefined): boolean =>
+  Boolean(config?.plannerConfig && (config.plannerConfig.planModel || config.plannerConfig.requestedModel));
 
 const PERMISSION_PRESET_SET = new Set<string>(ANTIGRAVITY_PERMISSION_MODES);
 const isPermissionPreset = (value: unknown): value is AntigravityPermissionMode =>
@@ -589,12 +594,86 @@ function readIssue(step: Json): AntigravityIssue {
   return {kind: 'error'};
 }
 
-async function transcript(path: string): Promise<{messages: AntigravityMessage[]; issue: AntigravityIssue | null}> {
+function cleanIssueText(value: unknown, limit: number): string {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return trimmed.length > limit ? trimmed.slice(0, limit - 1) + '…' : trimmed;
+}
+
+function readHubIssue(step: Json): AntigravityIssue {
+  const errorMessage = step?.errorMessage && typeof step.errorMessage === 'object' ? step.errorMessage : null;
+  const err = errorMessage?.error && typeof errorMessage.error === 'object' ? errorMessage.error : null;
+  const shortError = typeof err?.shortError === 'string' ? err.shortError : '';
+  const userMessage = typeof err?.userErrorMessage === 'string' ? err.userErrorMessage : '';
+  const raw = shortError || userMessage;
+  if (raw) {
+    const parsed = readIssue({error: raw});
+    if (parsed.kind !== 'error') return parsed;
+  }
+  if (errorMessage?.shouldShowUser !== true) return {kind: 'error'};
+  const message = cleanIssueText(userMessage, 500);
+  const firstLine = cleanIssueText(shortError.split(/\r?\n/, 1)[0], 300);
+  const safeDetail = firstLine && !/https?:\/\/|127\.0\.0\.1|localhost:\d/i.test(firstLine)
+    && (!message || (firstLine !== message && !firstLine.includes(message)))
+    ? firstLine
+    : '';
+  const errorId = cleanIssueText(err?.errorId, 100);
+  return {
+    kind: 'error',
+    ...(message ? {message} : {}),
+    ...(safeDetail ? {detail: safeDetail} : {}),
+    ...(errorId ? {errorId} : {}),
+  };
+}
+
+export type HubIssueState = {
+  issue: AntigravityIssue | null;
+  issueStep: number;
+  clearStep: number;
+};
+
+const EMPTY_HUB_ISSUE: HubIssueState = {issue: null, issueStep: -1, clearStep: -1};
+
+/** Extracts the active error/retry issue from Antigravity trajectory tail steps (including errors omitted from transcript files). */
+export function extractAntigravityIssue(steps: Json[], stepOffset: number): HubIssueState {
+  let issue: AntigravityIssue | null = null;
+  let issueStep = -1;
+  let clearStep = -1;
+  for (let index = 0; index < steps.length; index++) {
+    const step = steps[index];
+    if (!step || typeof step !== 'object') continue;
+    const stepIndex = stepIndexOf(step, stepOffset + index);
+    if (step.type === USER_INPUT_STEP || step.type === PLANNER_RESPONSE_STEP) {
+      issue = null;
+      issueStep = -1;
+      if (stepIndex > clearStep) clearStep = stepIndex;
+    } else if (step.type === ERROR_STEP) {
+      issue = readHubIssue(step);
+      issueStep = stepIndex;
+    }
+  }
+  return {issue, issueStep, clearStep};
+}
+
+function mergeAntigravityIssue(
+  transcriptState: {issue: AntigravityIssue | null; issueStep: number; clearStep: number},
+  hubState: HubIssueState,
+): AntigravityIssue | null {
+  const hubValid = hubState.issue && hubState.issueStep > transcriptState.clearStep ? hubState : null;
+  const txValid = transcriptState.issue && transcriptState.issueStep > hubState.clearStep ? transcriptState : null;
+  if (hubValid && txValid) return hubValid.issueStep >= txValid.issueStep ? hubValid.issue : txValid.issue;
+  if (hubValid) return hubValid.issue;
+  if (txValid) return txValid.issue;
+  return null;
+}
+
+async function transcript(path: string): Promise<{messages: AntigravityMessage[]; issue: AntigravityIssue | null; issueStep: number; clearStep: number}> {
   const file = await open(path, 'r').catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') throw error;
     return null;
   });
-  if (!file) return {messages: [], issue: null};
+  if (!file) return {messages: [], issue: null, issueStep: -1, clearStep: -1};
   try {
     const {size} = await file.stat();
     const start = Math.max(0, size - tailSize);
@@ -604,6 +683,8 @@ async function transcript(path: string): Promise<{messages: AntigravityMessage[]
     if (start) lines.shift(); // The first line may start in the middle of a UTF-8 character.
     const result = new Map<string, AntigravityMessage>();
     let issue: AntigravityIssue | null = null;
+    let issueStep = -1;
+    let clearStep = -1;
     for (const line of lines) {
       let step;
       try { step = JSON.parse(line); } catch { continue; }
@@ -611,18 +692,23 @@ async function transcript(path: string): Promise<{messages: AntigravityMessage[]
       const id = String(step.step_index);
       if (step.type === 'USER_INPUT' && typeof step.content === 'string') {
         issue = null;
+        issueStep = -1;
+        if (step.step_index > clearStep) clearStep = step.step_index;
         const text = /^\s*<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>(?:\s*<ADDITIONAL_METADATA>|\s*$)/.exec(step.content)?.[1] ?? step.content;
         result.set(id, {id, role: 'user', text: text.trim()});
       } else if (step.type === 'PLANNER_RESPONSE') {
         issue = null;
+        issueStep = -1;
+        if (step.step_index > clearStep) clearStep = step.step_index;
         if (typeof step.content === 'string' && step.content.trim()) result.set(id, {id, role: 'assistant', text: step.content});
         const tools = Array.isArray(step.tool_calls) ? step.tool_calls.map((tool: Json) => tool?.name).filter((n: unknown) => typeof n === 'string') : [];
         if (tools.length) result.set(id + '-tools', {id: id + '-tools', role: 'tool', text: tools.join('、')});
       } else if (step.type === 'ERROR_MESSAGE') {
         issue = readIssue(step);
+        issueStep = step.step_index;
       }
     }
-    return {messages: [...result.values()].slice(-100), issue};
+    return {messages: [...result.values()].slice(-100), issue, issueStep, clearStep};
   } finally { await file.close(); }
 }
 
@@ -635,6 +721,7 @@ type LiveState = {
   requests: ApprovalRequest[];
   backgroundTasks: AntigravityBackgroundTask[];
   taskLogPaths: string[];
+  hubIssue: HubIssueState;
 };
 
 type QueuedAntigravityPayload = {
@@ -738,15 +825,21 @@ export class AntigravityBridge {
       clientMessageId: opId.split(':')[1],
       ...(opts?.deliveryStrategy ? {deliveryStrategy: opts.deliveryStrategy} : {}),
     };
-    if (payload.model || payload.permissionMode) {
-      const base = await this.turnConfig(summary);
-      const withModel = await this.withModel(base, payload.model);
-      message.cascadeConfig = this.withPermission(withModel, payload.permissionMode);
-      if (opts?.expectedTurn !== undefined) {
-        const latest = this.summary(id);
-        if (turnKey(latest) !== opts.expectedTurn || !canSend(latest)) {
-          throw new BridgeError('changed', '会话状态已变化，请刷新后再发送');
-        }
+    const explicitConfig = Boolean(payload.model || payload.permissionMode);
+    let base = await this.conversationConfig(summary, explicitConfig);
+    if (payload.model) {
+      base = await this.withModel(base, payload.model);
+    } else if (!hasConfiguredModel(base)) {
+      base = await this.withDefaultModel(base);
+    }
+    const cascadeConfig = payload.permissionMode ? this.withPermission(base, payload.permissionMode) : base;
+    if (cascadeConfig && Object.keys(cascadeConfig).length) {
+      message.cascadeConfig = cascadeConfig;
+    }
+    if (opts?.expectedTurn !== undefined) {
+      const latest = this.summary(id);
+      if (turnKey(latest) !== opts.expectedTurn || !canSend(latest)) {
+        throw new BridgeError('changed', '会话状态已变化，请刷新后再发送');
       }
     }
     if (payload.permissionMode) {
@@ -842,12 +935,86 @@ export class AntigravityBridge {
     const rows = this.index(db => db.prepare(`SELECT ${columns} FROM conversation_summaries WHERE step_count > 0
       ORDER BY last_modified_time DESC LIMIT 20`).all()) as Summary[];
     rows.sort((a, b) => Number(sameFolder(singleWorkspace(b.workspaces), path)) - Number(sameFolder(singleWorkspace(a.workspaces), path)));
-    for (const row of rows.slice(0, 4)) {
+    for (const row of rows.slice(0, 8)) {
       // Some desktop conversations keep the user step at -1 although their first step is the user's message.
       const config = await this.turnConfig({...row, userStep: row.userStep != null && row.userStep >= 0 ? row.userStep : 0}).catch(() => null);
-      if (config?.plannerConfig) return config;
+      if (hasConfiguredModel(config)) return config;
     }
     return null;
+  }
+
+  private async recentUserStepIndices(id: string, exclude: number | null): Promise<number[]> {
+    const logs = join(this.root, 'brain', id, '.system_generated', 'logs');
+    let raw = '';
+    for (const name of ['transcript.jsonl', 'transcript_full.jsonl']) {
+      const file = await open(join(logs, name), 'r').catch(() => null);
+      if (!file) continue;
+      try {
+        const {size} = await file.stat();
+        const start = Math.max(0, size - tailSize);
+        const data = Buffer.alloc(size - start);
+        const {bytesRead} = await file.read(data, 0, data.length, start);
+        raw = data.toString('utf8', 0, bytesRead);
+        if (start) raw = raw.slice(raw.indexOf('\n') + 1);
+        break;
+      } finally { await file.close(); }
+    }
+    const found: number[] = [];
+    const seen = new Set<number>();
+    if (exclude != null) seen.add(exclude);
+    for (const line of raw.split('\n')) {
+      if (!line.includes('"USER_INPUT"')) continue;
+      try {
+        const step = JSON.parse(line);
+        if (step?.type === 'USER_INPUT' && Number.isSafeInteger(step.step_index) && step.step_index >= 0 && !seen.has(step.step_index)) {
+          seen.add(step.step_index);
+          found.push(step.step_index);
+        }
+      } catch {}
+    }
+    const recent = found.slice(-10);
+    if (!seen.has(0)) recent.unshift(0);
+    return recent;
+  }
+
+  private async earlierTurnConfig(summary: Summary): Promise<Json | null> {
+    const candidates = await this.recentUserStepIndices(summary.id, summary.userStep);
+    if (!candidates.length) return null;
+    const result = await this.hub(this.daemonDir(), 'GetTrajectoryTurns', {cascadeId: summary.id, stepIndices: candidates}).catch(() => null);
+    const turns: Json[] = Array.isArray(result?.turns) ? result.turns : [];
+    const sorted = [...turns].sort((a, b) => (Number(b?.startStepIndex) || 0) - (Number(a?.startStepIndex) || 0));
+    for (const turn of sorted) {
+      const config = turn?.firstStep?.userInput?.userConfig;
+      if (hasConfiguredModel(config)) return config;
+    }
+    return null;
+  }
+
+  /**
+   * Resolves the conversation's `cascadeConfig` so every message carries a valid `planModel` (otherwise later
+   * background-task wakeups fail with `plan model not specified`). Falls back to earlier turns or project config if
+   * the latest user step had no `userConfig`.
+   */
+  private async conversationConfig(summary: Summary, strict = false): Promise<Json | null> {
+    let primary: Json | null = null;
+    if (strict) primary = await this.turnConfig(summary);
+    else primary = await this.turnConfig(summary).catch(() => null);
+    if (hasConfiguredModel(primary)) return primary;
+    const earlier = await this.earlierTurnConfig(summary);
+    if (earlier) return earlier;
+    const fallback = await this.latestConfig(singleWorkspace(summary.workspaces)).catch(() => null);
+    if (fallback) return fallback;
+    return primary && Object.keys(primary).length ? primary : null;
+  }
+
+  private async withDefaultModel(config: Json | null): Promise<Json | null> {
+    const catalog = await this.modelCatalog().catch(() => null);
+    const fallbackModel = catalog?.defaultModel || catalog?.models[0]?.id;
+    if (!fallbackModel) return config;
+    const plannerConfig = {...config?.plannerConfig, planModel: fallbackModel};
+    delete plannerConfig.requestedModel;
+    delete plannerConfig.modelName;
+    return {...config, plannerConfig};
   }
 
   private async withModel(config: Json | null, model: string | undefined): Promise<Json | null> {
@@ -911,10 +1078,15 @@ export class AntigravityBridge {
     id: string,
     summary: Summary,
     opts?: {scanOlder?: boolean; previousBackgroundTasks?: AntigravityBackgroundTask[]; previousLogPaths?: string[]},
-  ): Promise<{requests: ApprovalRequest[]; backgroundTasks: AntigravityBackgroundTask[]; taskLogPaths: string[]}> {
+  ): Promise<{requests: ApprovalRequest[]; backgroundTasks: AntigravityBackgroundTask[]; taskLogPaths: string[]; hubIssue: HubIssueState}> {
+    const activeOrWaiting = summary.status === active || Boolean(summary.notIdle);
     const conversationRunning = summary.status === active;
     const tailOffset = Math.max(0, summary.steps - WAITING_STEP_WINDOW);
     const tail = await this.fetchSteps(id, tailOffset);
+    const hubIssue = extractAntigravityIssue(tail, tailOffset);
+    if (!activeOrWaiting) {
+      return {requests: [], backgroundTasks: [], taskLogPaths: [], hubIssue};
+    }
     let requests = extractAntigravityRequests(tail, tailOffset);
     let backgroundTasks = extractAntigravityBackgroundTasks(tail, tailOffset, conversationRunning);
     let logPathMap = extractTaskLogPaths(tail, conversationRunning);
@@ -952,7 +1124,7 @@ export class AntigravityBridge {
       return task;
     }));
 
-    return {requests, backgroundTasks, taskLogPaths: [...taskLogPaths]};
+    return {requests, backgroundTasks, taskLogPaths: [...taskLogPaths], hubIssue};
   }
 
   private async create(p: Json): Promise<Json> {
@@ -971,7 +1143,8 @@ export class AntigravityBridge {
     }, async () => {
       const prompt = await withAttachmentLinks(this.ledger, newScope(path), text, files);
       const desktop = (await this.desktopProjects()).find(item => sameFolder(item.path, path));
-      const baseConfig = await this.withModel(await this.latestConfig(path), model);
+      let baseConfig = await this.withModel(await this.latestConfig(path), model);
+      if (!hasConfiguredModel(baseConfig)) baseConfig = await this.withDefaultModel(baseConfig);
       const config = this.withPermission(baseConfig, permissionMode);
       const directory = this.daemonDir();
       const started = await this.hub(directory, 'StartCascade', {workspaceUris: [project], source: 'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT',
@@ -1082,7 +1255,9 @@ export class AntigravityBridge {
       const [meta, globalPreset, stepState] = await Promise.all([
         this.trajectoryMeta(id),
         this.defaultPermissionMode(),
-        activeOrWaiting ? this.liveSteps(id, summary, opts) : Promise.resolve({requests: [], backgroundTasks: [], taskLogPaths: []}),
+        activeOrWaiting || summary.steps > 0
+          ? this.liveSteps(id, summary, opts)
+          : Promise.resolve({requests: [], backgroundTasks: [], taskLogPaths: [], hubIssue: EMPTY_HUB_ISSUE}),
       ]);
       resolved = {
         permissionMode: meta.permissionMode,
@@ -1090,20 +1265,22 @@ export class AntigravityBridge {
         requests: stepState.requests,
         backgroundTasks: stepState.backgroundTasks,
         taskLogPaths: stepState.taskLogPaths,
+        hubIssue: stepState.hubIssue,
       };
     }
-    const {permissionMode, defaultPermissionMode, requests, backgroundTasks, taskLogPaths} = resolved;
+    const {permissionMode, defaultPermissionMode, requests, backgroundTasks, taskLogPaths, hubIssue} = resolved;
     const queuedMessages = this.queuedViews(id);
     const queueVersion = this.queueVersions.get(id) || 0;
     const queueFingerprint = queuedMessages.map(item => `${item.id}:${item.state}:${item.error || ''}`).join('|');
     const taskLogStat = await statTaskLogs(taskLogPaths);
     const requestFingerprint = requests.map(req => `${req.id}:${req.kind}:${req.title}`).join('|');
     const taskFingerprint = backgroundTasks.map(task => `${task.id}:${task.title}:${task.output?.length ?? 0}:${task.output?.slice(-64) ?? ''}`).join('|');
+    const issueFingerprint = hubIssue.issue ? JSON.stringify([hubIssue.issueStep, hubIssue.issue]) : `clear:${hubIssue.clearStep}`;
     const baseRevision = JSON.stringify([
       summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, cwd,
       String(file?.mtimeNs), String(file?.size), taskLogStat, queueVersion, queueFingerprint,
     ]);
-    const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint, taskFingerprint]);
+    const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint, taskFingerprint, issueFingerprint]);
     return {
       path, revision, baseRevision, live: resolved, turn: turnKey(summary), title: summary.title || '未命名对话', cwd,
       running: summary.status === active, canSend: canSend(summary) && !requests.length,
@@ -1159,7 +1336,9 @@ export class AntigravityBridge {
       if (known === current.revision) return {unchanged: true};
     }
     const {path, baseRevision, live, ...view} = current;
-    const {messages: items, issue} = await transcript(path);
+    const tx = await transcript(path);
+    const items = tx.messages;
+    const issue = mergeAntigravityIssue(tx, live.hubIssue);
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
     const records = this.ledger.senders('antigravity', id);
     if (records.length) {
@@ -1210,8 +1389,10 @@ export class AntigravityBridge {
     const cached = this.views.get(id);
     if (cached?.revision === current.revision) return cached.value;
     const value = (async () => {
-      const {path, baseRevision: _, live: __, revision: ___, ...head} = current;
-      const {messages, issue} = await transcript(path);
+      const {path, baseRevision: _, live, revision: ___, ...head} = current;
+      const tx = await transcript(path);
+      const messages = tx.messages;
+      const issue = mergeAntigravityIssue(tx, live.hubIssue);
       const records = this.ledger.senders('antigravity', id);
       if (records.length) {
         const senders = sendersByText(messages.filter(item => item.role === 'user'), records);
@@ -1306,7 +1487,7 @@ export class AntigravityBridge {
       const summary = this.summary(id);
       const [catalog, config, defaultPermissionMode] = await Promise.all([
         this.modelCatalog(),
-        this.turnConfig(summary).catch(() => null),
+        this.conversationConfig(summary).catch(() => null),
         this.defaultPermissionMode(),
       ]);
       return {

@@ -1,8 +1,8 @@
 import {test} from 'node:test';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {AntigravityMessages,antigravityIssueText,groupAntigravityMessages} from '../web/antigravity-messages.js';
-import type {AntigravityMessage} from '../src/shared/types.js';
+import {AntigravityErrorNotice,AntigravityMessages,antigravityIssueText,groupAntigravityMessages} from '../web/antigravity-messages.js';
+import type {AntigravityIssue,AntigravityMessage} from '../src/shared/types.js';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
@@ -12,7 +12,7 @@ import {fileReference} from '../web/preview-target.js';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
-import {AntigravityBridge,parseAntigravityModels,extractAntigravityRequests,extractAntigravityBackgroundTasks} from '../src/connector/antigravity.js';
+import {AntigravityBridge,parseAntigravityModels,extractAntigravityRequests,extractAntigravityBackgroundTasks,extractAntigravityIssue} from '../src/connector/antigravity.js';
 import {BackgroundTasksBar,BackgroundTasksPanel} from '../web/antigravity.js';
 import {QueuedMessages} from '../web/queued-messages.js';
 import {antigravityModelSupportsImages,antigravityPickerModels,concreteAntigravityModel,splitAntigravityModel} from '../web/antigravity-model-picker.js';
@@ -151,7 +151,7 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   const results = await Promise.all([bridge.handle('antigravity.send',payload),bridge.handle('antigravity.send',payload)]);
   assert.ok(results.every(r=>r.state==='accepted'));
   assert.equal(writes.length,1);
-  assert.deepEqual(writes[0],{method:'SendUserCascadeMessage',body:{cascadeId:id,items:[{text:'next'}],clientMessageId:payload.opId.split(':')[1]}});
+  assert.deepEqual(writes[0],{method:'SendUserCascadeMessage',body:{cascadeId:id,items:[{text:'next'}],clientMessageId:payload.opId.split(':')[1],cascadeConfig:config}});
   assert.deepEqual(await bridge.handle('antigravity.models',{conversationId:id}),{models:[{id:'MODEL_HIGH',label:'Model High'}],current:'MODEL_PREVIOUS',supportsImages:true});
   const selected={...payload,model:'MODEL_HIGH',opId:makeOp()};
   assert.equal((await bridge.handle('antigravity.send',selected)).state,'accepted');
@@ -163,7 +163,7 @@ test('desktop transcripts, watch updates and write receipts stay with the select
   const pictured={...payload,opId:makeOp(),images:[png,jpeg]};
   assert.equal((await bridge.handle('antigravity.send',pictured)).state,'accepted');
   assert.deepEqual(writes[2],{method:'SendUserCascadeMessage',body:{cascadeId:id,items:[{text:'next'}],
-    media:[{mimeType:'image/png',inlineData:'iVBORw0KGgo='},{mimeType:'image/jpeg',inlineData:'/9j/4AA='}],clientMessageId:pictured.opId.split(':')[1]}});
+    media:[{mimeType:'image/png',inlineData:'iVBORw0KGgo='},{mimeType:'image/jpeg',inlineData:'/9j/4AA='}],clientMessageId:pictured.opId.split(':')[1],cascadeConfig:config}});
   await assert.rejects(bridge.handle('antigravity.send',{...pictured,images:[jpeg]}),(error:BridgeError)=>error.code==='conflict');
   await assert.rejects(bridge.handle('antigravity.send',{...payload,opId:makeOp(),images:['data:image/gif;base64,R0lGOD==']}),(error:BridgeError)=>error.code==='invalid');
   await assert.rejects(bridge.handle('antigravity.send',{...selected,model:'MODEL_RETIRED'}),(error:BridgeError)=>error.code==='conflict');
@@ -409,7 +409,7 @@ test('Antigravity stays sendable and surfaces stoppable background tasks when id
   };
   let taskStillRunning = true;
   const bridge = new AntigravityBridge(dir, ledger, async (_dir, method, body) => {
-    if (method === 'GetPermissionSettings' || method === 'GetAllCascadeTrajectories') return {};
+    if (method === 'GetPermissionSettings' || method === 'GetAllCascadeTrajectories' || method === 'GetTrajectoryTurns' || method === 'GetCascadeModelConfigData') return {};
     if (method === 'GetCascadeTrajectorySteps') {
       stepOffsets.push(body.stepOffset);
       if (body.stepOffset <= 120 && taskStillRunning) return {steps: [bgStep]};
@@ -558,7 +558,7 @@ test('Antigravity queues messages behind a running turn, drains one per turn, an
   assert.deepEqual(await bridge.handle('antigravity.steerQueued', {conversationId: id, queuedId: q2Op, opId: steerOp}), steered);
   assert.deepEqual(writes.at(-1), {
     method: 'SendUserCascadeMessage',
-    body: {cascadeId: id, items: [{text: '第二条排队'}], clientMessageId: q2Op.split(':')[1], deliveryStrategy: 'MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION'},
+    body: {cascadeId: id, items: [{text: '第二条排队'}], clientMessageId: q2Op.split(':')[1], deliveryStrategy: 'MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION', cascadeConfig: config},
   });
 
   // Direct steer while running also uses NEXT_INVOCATION.
@@ -695,4 +695,183 @@ test('an Antigravity conversation is followed through the subscription hub, its 
   assert.equal(frames.find(frame=>frame.head?.running!==undefined)?.head.running,true);
   const again = await hub.open({service:'antigravity',threadId:id,have:Object.fromEntries([...snapshot.entries,...frames.flatMap(frame=>frame.entries||[])].map((entry:any)=>[entry.id,entry.rev]))});
   assert.deepEqual(again.entries,[],'Reopening with what it holds sends no messages.');
+});
+
+test('Antigravity surfaces Hub error steps missing from transcript files and clears them on subsequent turns', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-err-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  const id = randomUUID(), logs = join(dir, 'brain', id, '.system_generated', 'logs');
+  await mkdir(logs, {recursive: true});
+  const transcriptPath = join(logs, 'transcript_full.jsonl');
+  const line = (step: object) => JSON.stringify(step) + '\n';
+  await writeFile(transcriptPath, line({type: 'PLANNER_RESPONSE', step_index: 1465, content: '等待回归测试完成。'}));
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(id, 'Agent Remediation', 'CASCADE_RUN_STATUS_IDLE', '2026-11-24T06:56:57.000Z', 1467, 1389, 't0', 0, JSON.stringify([pathToFileURL(dir).href]));
+
+  let hubSteps: any[] = [
+    {type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', status: 'CORTEX_STEP_STATUS_DONE', metadata: {sourceTrajectoryStepInfo: {stepIndex: 1465}}},
+    {
+      type: 'CORTEX_STEP_TYPE_ERROR_MESSAGE',
+      status: 'CORTEX_STEP_STATUS_DONE',
+      metadata: {sourceTrajectoryStepInfo: {stepIndex: 1466}},
+      errorMessage: {
+        shouldShowUser: true,
+        error: {
+          userErrorMessage: 'Agent execution terminated due to error.',
+          shortError: 'failed to construct executor: plan model not specified; you must specify a valid model',
+          fullError: 'https://internal.example/stack',
+          errorCode: 2,
+          errorId: '1c9047f2-c2a7-4151-92da-d7ed4e369bed-1466',
+        },
+      },
+    },
+  ];
+  const bridge = new AntigravityBridge(dir, ledger, async (_dir, method) => {
+    if (method === 'GetCascadeTrajectorySteps') return {steps: hubSteps};
+    return {};
+  }, undefined, {queueIntervalMs: 60_000});
+  const {ThreadHub} = await import('../src/connector/thread-hub.js');
+  const frames: any[] = [];
+  const syncHub = new ThreadHub(frame => { frames.push(frame); });
+  syncHub.register('antigravity', bridge.syncSource);
+  t.after(async () => { syncHub.close(); bridge.close(); db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+
+  // Idle conversation whose error step was omitted from transcript_full.jsonl still surfaces the error in both read and sync.
+  const view = await bridge.handle('antigravity.read', {conversationId: id});
+  assert.deepEqual(view.issue, {
+    kind: 'error',
+    message: 'Agent execution terminated due to error.',
+    detail: 'failed to construct executor: plan model not specified; you must specify a valid model',
+    errorId: '1c9047f2-c2a7-4151-92da-d7ed4e369bed-1466',
+  });
+  assert.doesNotMatch(JSON.stringify(view), /internal\.example/);
+
+  const snap = await syncHub.open({service: 'antigravity', threadId: id});
+  assert.deepEqual(snap.head.issue, view.issue);
+
+  // A subsequent USER_INPUT step clears the error and pushes the cleared head over subscription.
+  hubSteps = [
+    ...hubSteps,
+    {type: 'CORTEX_STEP_TYPE_SYSTEM_MESSAGE', status: 'CORTEX_STEP_STATUS_DONE', metadata: {sourceTrajectoryStepInfo: {stepIndex: 1467}}},
+    {type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE', metadata: {sourceTrajectoryStepInfo: {stepIndex: 1468}}},
+  ];
+  db.exec("UPDATE conversation_summaries SET status='CASCADE_RUN_STATUS_RUNNING', step_count=1469, last_modified_time='2026-11-24T07:07:17.000Z'");
+  await appendFile(transcriptPath, line({type: 'USER_INPUT', step_index: 1468, content: '<USER_REQUEST>提交git</USER_REQUEST>'}));
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  assert.equal(frames.find(frame => frame.head && 'issue' in frame.head)?.head.issue, null);
+
+  // Pure extractor: quota errors avoid duplicate detail; retries and hidden errors never leak internal endpoints.
+  const quota = extractAntigravityIssue([{
+    type: 'CORTEX_STEP_TYPE_ERROR_MESSAGE',
+    errorMessage: {
+      shouldShowUser: true,
+      error: {
+        userErrorMessage: 'Individual quota reached. Resets in 1h50m57s.',
+        shortError: 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 1h50m57s.',
+        errorId: 'err-429',
+      },
+    },
+  }], 10);
+  assert.deepEqual(quota.issue, {kind: 'error', message: 'Individual quota reached. Resets in 1h50m57s.', errorId: 'err-429'});
+
+  const hidden = extractAntigravityIssue([{
+    type: 'CORTEX_STEP_TYPE_ERROR_MESSAGE',
+    errorMessage: {
+      shouldShowUser: false,
+      error: {shortError: 'Post "https://secret.endpoint": read tcp 127.0.0.1:7890'},
+    },
+  }], 20);
+  assert.deepEqual(hidden.issue, {kind: 'error'});
+
+  const retry = extractAntigravityIssue([{
+    type: 'CORTEX_STEP_TYPE_ERROR_MESSAGE',
+    errorMessage: {
+      error: {shortError: 'API error (attempt 3): request failed: Post "https://secret.endpoint": wsarecv: connection reset'},
+    },
+  }], 30);
+  assert.deepEqual(retry.issue, {kind: 'retry', attempt: 3, connection: true});
+
+  // Web error notice renders the user message, detail, and Error ID as an alert.
+  const html = renderToStaticMarkup(createElement(AntigravityErrorNotice, {issue: view.issue as Extract<AntigravityIssue, {kind: 'error'}>}));
+  assert.match(html, /role="alert"/);
+  assert.match(html, /Agent execution terminated due to error\./);
+  assert.match(html, /plan model not specified/);
+  assert.match(html, /1c9047f2-c2a7-4151-92da-d7ed4e369bed-1466/);
+});
+
+test('Antigravity preserves and self-heals cascadeConfig planModel across follow-up turns', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-cfg-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  t.after(async () => { db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+  const id = randomUUID(), peerId = randomUUID(), freshId = randomUUID();
+  const project = pathToFileURL(dir).href;
+  const logs = join(dir, 'brain', id, '.system_generated', 'logs');
+  await mkdir(logs, {recursive: true});
+  const line = (step: object) => JSON.stringify(step) + '\n';
+  await writeFile(join(logs, 'transcript.jsonl'),
+    line({type: 'USER_INPUT', step_index: 10, content: '<USER_REQUEST>desktop turn</USER_REQUEST>'}) +
+    line({type: 'USER_INPUT', step_index: 50, content: '<USER_REQUEST>legacy web turn</USER_REQUEST>'}));
+
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const insert = db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)');
+  insert.run(id, 'Recover Earlier', 'CASCADE_RUN_STATUS_IDLE', '2026-11-24T06:00:00.000Z', 60, 50, 't50', 0, JSON.stringify([project]));
+  insert.run(peerId, 'Project Peer', 'CASCADE_RUN_STATUS_IDLE', '2026-11-24T05:00:00.000Z', 10, 0, 't0', 0, JSON.stringify([project]));
+  insert.run(freshId, 'No Config Anywhere', 'CASCADE_RUN_STATUS_IDLE', '2026-11-24T04:00:00.000Z', 5, 0, 't0', 0, JSON.stringify(['file:///isolated']));
+
+  const earlierConfig = {plannerConfig: {planModel: 'MODEL_DESKTOP', toolConfig: {runCommand: {autoCommandConfig: {}}}}, executorConfig: {useCoreDirect: true}};
+  const peerConfig = {plannerConfig: {planModel: 'MODEL_PEER'}};
+  let allowPeerConfig = true;
+  const writes: {method: string; body: any}[] = [];
+  const bridge = new AntigravityBridge(dir, ledger, async (_dir, method, body) => {
+    if (method === 'GetPermissionSettings' || method === 'GetAllCascadeTrajectories' || method === 'GetCascadeTrajectorySteps') return {};
+    if (method === 'GetCascadeModelConfigData') {
+      return {
+        defaultOverrideModelConfig: {modelOrAlias: {model: 'MODEL_DEFAULT'}},
+        clientModelConfigs: [
+          {label: 'Default', modelOrAlias: {model: 'MODEL_DEFAULT'}},
+          {label: 'Desktop', modelOrAlias: {model: 'MODEL_DESKTOP'}},
+        ],
+      };
+    }
+    if (method === 'GetTrajectoryTurns') {
+      if (body.cascadeId === id) {
+        const turns = (body.stepIndices as number[]).map(stepIndex => ({
+          startStepIndex: stepIndex,
+          firstStep: {userInput: {userConfig: stepIndex === 10 ? earlierConfig : undefined}},
+        }));
+        return {turns};
+      }
+      if (body.cascadeId === peerId && allowPeerConfig) {
+        return {turns: [{startStepIndex: 0, firstStep: {userInput: {userConfig: peerConfig}}}]};
+      }
+      return {turns: [{startStepIndex: 0, firstStep: {userInput: {}}}]};
+    }
+    writes.push({method, body});
+    return {};
+  }, undefined, {queueIntervalMs: 60_000});
+  t.after(() => bridge.close());
+
+  const makeOp = () => `${Date.now()}:${randomUUID()}`;
+  // 1. Latest USER_INPUT (step 50) had empty userConfig -> recovers step 10's earlierConfig for both models() and send().
+  const models = await bridge.handle('antigravity.models', {conversationId: id});
+  assert.equal(models.current, 'MODEL_DESKTOP');
+  assert.equal((await bridge.handle('antigravity.send', {conversationId: id, text: '继续', opId: makeOp()})).state, 'accepted');
+  assert.deepEqual(writes.at(-1)!.body.cascadeConfig, earlierConfig);
+
+  // 2. Switching only permissionMode on a session with empty latest userConfig preserves recovered planModel too.
+  assert.equal((await bridge.handle('antigravity.send', {conversationId: id, text: '切权限', permissionMode: 'AGENT_PERMISSION_PRESET_AUTO', opId: makeOp()})).state, 'accepted');
+  assert.equal(writes.at(-1)!.body.cascadeConfig.plannerConfig.planModel, 'MODEL_DESKTOP');
+  assert.equal(writes.at(-1)!.body.cascadeConfig.plannerConfig.toolConfig.runCommand.autoCommandConfig.autoExecutionPolicy, 'CASCADE_COMMANDS_AUTO_EXECUTION_AUTO');
+
+  // 3. Conversation with no userConfig in its own turns falls back to another conversation in the project (peerConfig).
+  db.exec(`UPDATE conversation_summaries SET workspace_uris='${JSON.stringify([project])}' WHERE conversation_id='${freshId}'`);
+  assert.equal((await bridge.handle('antigravity.send', {conversationId: freshId, text: 'from peer', opId: makeOp()})).state, 'accepted');
+  assert.deepEqual(writes.at(-1)!.body.cascadeConfig, peerConfig);
+
+  // 4. When no conversation anywhere has userConfig, falls back to modelCatalog defaultModel so planModel is still specified.
+  allowPeerConfig = false;
+  db.exec(`DELETE FROM conversation_summaries WHERE conversation_id='${id}'`);
+  assert.equal((await bridge.handle('antigravity.send', {conversationId: freshId, text: 'from catalog', opId: makeOp()})).state, 'accepted');
+  assert.deepEqual(writes.at(-1)!.body.cascadeConfig, {plannerConfig: {planModel: 'MODEL_DEFAULT'}});
 });

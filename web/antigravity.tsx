@@ -14,7 +14,7 @@ import {seedOf,useSyncedPanel,useThreadSync} from './use-thread-sync';
 import type {SyncLink} from './sync/engine';
 import {MAX_ATTACHMENTS} from '../src/shared/attachments';
 import {MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
-import {AntigravityMessages,antigravityIssueText} from './antigravity-messages';
+import {AntigravityErrorNotice,AntigravityMessages,antigravityIssueText} from './antigravity-messages';
 import {AntigravityModelPicker,antigravityModelSupportsImages,type AntigravityCatalog} from './antigravity-model-picker';
 import {connectionLost,ConversationStatus,elapsedLabel} from './conversation';
 import {ThreadHeader,useComposerHeight,workspaceName} from './chat-layout';
@@ -378,7 +378,7 @@ export function AntigravityPanel(props:Props){
     reply:view?.messages?.filter((message:Json)=>message.role==='assistant'&&message.text).at(-1)?.text}));
   const antigravityStatus=(
     !connected?(cached?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost):watchError||
-    (pending&&busy?'正在等待电脑确认…':cached?'正在同步最新内容…':issue?antigravityIssueText(issue,view!.canSend):
+    (pending&&busy?'正在等待电脑确认…':cached?'正在同步最新内容…':issue&&issue.kind!=='error'?antigravityIssueText(issue,view!.canSend):
       view&&!view.running&&!view.canSend&&!requests.length?'正在等待 Antigravity…':'')
   );
   useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,antigravityStatus]);
@@ -404,7 +404,8 @@ export function AntigravityPanel(props:Props){
         </select></label></div>}
       {view&&<SenderScope senders={view.messages.map((message:{sender?:{id:string;name:string}})=>message.sender)}><AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/></SenderScope>}
       {!view&&(busy||synced.view?.phase==='syncing'&&!synced.view.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
-      {view&&!view.messages.length&&<p className="muted">{view.running?'Antigravity 正在开始处理…':'桌面尚未记录可显示的消息。'}</p>}
+      {view&&!view.messages.length&&!issue&&<p className="muted">{view.running?'Antigravity 正在开始处理…':'桌面尚未记录可显示的消息。'}</p>}
+      {issue?.kind==='error'&&<AntigravityErrorNotice issue={issue}/>}
       {antigravityStatus&&<ConversationStatus>{antigravityStatus}</ConversationStatus>}
     </div></div>
     <footer className="composer-area">
