@@ -74,7 +74,7 @@ Compose 部署运行 `docker compose -f compose.yaml -f compose.https.yaml up -d
 
 ## 团队成员（可选）
 
-默认整个中继只有一个共享 Token。多人一起用时可以启用团队：每人用自己的邀请链接登录，每台设备可以单独移除，会话列表标出是谁开的会话，管理员能看到操作记录。启用后的日常使用见 [团队使用说明](docs/team/GUIDE.md)，设计见 [团队账号与会话归属](docs/team/DESIGN.md)。
+默认整个中继只有一个共享 Token。多人一起用时可以启用团队：每人用自己的邀请链接登录，每台设备可以单独移除，会话列表标出是谁开的会话，管理员能看到操作记录。启用后的日常使用见 [团队使用说明](docs/team/GUIDE.md)，设计见 [团队账号与会话归属](docs/team/DESIGN.md)。一个中继只能有一个团队；要服务多个互相隔离的团队，见 [一台服务器运行多个团队](#一台服务器运行多个团队)。
 
 1. 先升级中继和网页端。Compose 部署新增 `relay_data` 数据卷，数据库在 `/data/relay.sqlite`。直接用 Node 运行的实例（例如 systemd）默认写在工作目录的 `.local/relay.sqlite`，可用 `BRIDGE_DATA` 指定其他目录；该目录需要可写。
 2. 启用团队并创建所有者，`--url` 填手机访问的地址：
@@ -147,6 +147,198 @@ runuser -u codex-relay -- env BRIDGE_DATA=/var/lib/codex-mobile-relay /opt/codex
 - 备份之后加入的成员、登录的设备要重新邀请；备份之后生成的电脑专用 Token 失效，那台电脑要重新生成，或改回共享 Token。
 - 备份之后移除的设备、停用的成员会重新生效，要到“团队”里再移除或停用一次。
 - 备份之后的用量会缺：电脑连接器在中继确认收到后就删掉了自己的副本，不会重发。
+
+## 一台服务器运行多个团队
+
+一个中继只能有一个团队：成员、电脑、用量都在同一个 `relay.sqlite` 里，所有者和管理员能看到这个中继上的全部电脑。要让几个团队互相隔离，就给每个团队运行一个独立的中继实例。每个实例有自己的 Token、数据目录、端口和网址，彼此不共享数据：一个团队的 Token 和邀请链接进不了另一个团队的中继，各团队自己的所有者管理自己的成员。能登录服务器的人仍然能看到所有实例的数据（见 [隐私与信任边界](PRIVACY.md#简体中文)）。
+
+下面的步骤适用于直接用 Node + systemd 运行的中继，2026-11-25 在现有 IP 证书实例上加第二个团队时验证过。Compose 部署见本节末尾。
+
+### 规划
+
+每个实例要定下团队代号和三个端口。下例代号 `acme`：
+
+| 项目 | 第一个实例 | 新实例（示例） | 说明 |
+| --- | --- | --- | --- |
+| systemd 服务 | `codex-mobile-relay` | `codex-mobile-relay-acme` | |
+| 系统用户 | `codex-relay` | `codex-relay-acme` | 每个实例单独的用户，读不到别的实例的数据 |
+| 中继端口 `PORT` | 3340 | 3350 | 只监听服务器回环地址 |
+| 网页预览端口 | 3341 | 3351 | 中继固定用 `PORT+1`，并按这个端口号生成预览地址，所以**对外也必须是同一个端口** |
+| 对外 HTTPS 端口 | 443 | 8443 | 有域名时也可以给每个团队一个子域名，都用 443 |
+| 数据目录 `BRIDGE_DATA` | `/var/lib/codex-mobile-relay` | `/var/lib/codex-mobile-relay-acme` | |
+| Token 文件 | `/etc/codex-mobile-relay/relay.env` | `/etc/codex-mobile-relay-acme/relay.env` | |
+
+先在云服务器的安全组和本机防火墙放行新实例的对外 HTTPS 端口和预览端口（例中 8443、3351），并确认这几个端口没有被占用：
+
+```sh
+ss -ltn | grep -E ':(3350|3351|8443) '
+```
+
+没有输出才能继续。
+
+### 1. 系统用户和 Token
+
+```sh
+useradd --system --no-create-home --home-dir /nonexistent --shell /sbin/nologin codex-relay-acme
+install -d -m 750 -o root -g codex-relay-acme /etc/codex-mobile-relay-acme
+printf 'BRIDGE_TOKEN=%s\n' "$(openssl rand -hex 32)" > /etc/codex-mobile-relay-acme/relay.env
+chown root:codex-relay-acme /etc/codex-mobile-relay-acme/relay.env
+chmod 640 /etc/codex-mobile-relay-acme/relay.env
+```
+
+这个 Token 只给这个团队的电脑第一次连接用（见下文第 5 步），不要用第一个实例的 Token。
+
+### 2. systemd 服务
+
+程序和 Node 运行时与第一个实例共用 `/opt/codex-mobile-relay`，只有用户、端口、数据目录和 Token 不同。`BRIDGE_CONFIG` 指向一个不存在的文件，免得读到程序目录里别的配置。
+
+```ini
+# /etc/systemd/system/codex-mobile-relay-acme.service
+[Unit]
+Description=Codex Mobile Web relay (acme)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codex-relay-acme
+Group=codex-relay-acme
+WorkingDirectory=/opt/codex-mobile-relay/app
+EnvironmentFile=/etc/codex-mobile-relay-acme/relay.env
+Environment=HOST=127.0.0.1
+Environment=PORT=3350
+Environment=NODE_ENV=production
+Environment=BRIDGE_DATA=/var/lib/codex-mobile-relay-acme
+Environment=BRIDGE_CONFIG=/etc/codex-mobile-relay-acme/config.json
+StateDirectory=codex-mobile-relay-acme
+StateDirectoryMode=0750
+ExecStart=/opt/codex-mobile-relay/runtime/node24/bin/node /opt/codex-mobile-relay/app/build/relay.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/codex-mobile-relay-acme
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+systemctl daemon-reload
+systemctl enable --now codex-mobile-relay-acme.service
+curl --fail http://127.0.0.1:3350/health
+```
+
+### 3. Nginx
+
+照第一个实例的配置复制一份，改成新端口，例如 `/etc/nginx/conf.d/41-codex-mobile-acme.conf`。`$codex_connection_upgrade` 用第一个实例配置里已有的 `map`，不要重复定义。证书沿用第一个实例的（IP 证书或域名证书都对所有端口有效）。
+
+```nginx
+server {
+    listen 8443 ssl http2;
+    server_name 你的IP或域名;
+    ssl_certificate     <与第一个实例相同>/fullchain.pem;
+    ssl_certificate_key <与第一个实例相同>/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    access_log off;
+    # /blob-feed/ 和 /blob/ 两段与“已有 HTTPS 反向代理”一节相同，proxy_pass 改为 http://127.0.0.1:3350
+    location / {
+        proxy_pass http://127.0.0.1:3350;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $codex_connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+}
+
+server {
+    # 中继自己在回环地址上占着 3351，所以这里绑定服务器网卡的地址
+    listen <网卡地址>:3351 ssl;
+    server_name 你的IP或域名;
+    ssl_certificate     <与第一个实例相同>/fullchain.pem;
+    ssl_certificate_key <与第一个实例相同>/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    access_log off;
+    location / {
+        proxy_pass http://127.0.0.1:3351;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $codex_connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+        client_max_body_size 32m;
+    }
+}
+```
+
+```sh
+nginx -t && systemctl reload nginx
+```
+
+在服务器以外的地方检查：`curl --fail https://你的地址:8443/health` 返回 `{"ok":true}`；`https://你的地址:3351/` 返回 401 说明预览端口已通。
+
+### 4. 启用团队
+
+以新实例的系统用户、新实例的数据目录运行 `team init`，`--name` 填对方负责人，`--url` 填带端口的地址：
+
+```sh
+cd /tmp && runuser -u codex-relay-acme -- env BRIDGE_DATA=/var/lib/codex-mobile-relay-acme \
+  /opt/codex-mobile-relay/runtime/node24/bin/node /opt/codex-mobile-relay/app/build/relay.mjs \
+  team init --name 对方负责人 --url https://你的地址:8443
+```
+
+把输出的邀请链接交给负责人（24 小时内有效，只能用一次），他就是这个团队的所有者，之后自己添加成员。以后找回、列成员也用同样的用户和 `BRIDGE_DATA` 运行 `team invite` / `team list`。
+
+### 5. 接入电脑
+
+1. 电脑的连接设置里选“连接自己的中继”，地址填 `https://你的地址:8443`，Token 填第 1 步生成的那个。Token 不要发到聊天里，最好当面或远程输入。
+2. 电脑连上后，团队管理员在“团队 → 电脑”中给它生成专用 Token，换到那台电脑的连接设置里。
+3. 这个团队的电脑都换成专用 Token 后，重新生成第 1 步的 Token 并 `systemctl restart codex-mobile-relay-acme`，让交出去的共享 Token 作废。以后再加电脑时，临时把新的共享 Token 交给对方，接完再换掉。
+
+### 6. 备份
+
+每个实例的 `relay.sqlite` 都要备份，方法同上文“备份和恢复”，用各自的系统用户和数据目录。可以用一个脚本每天备份全部实例，每加一个实例在末尾加一行 `backup`：
+
+```sh
+#!/bin/sh
+# /opt/codex-mobile-relay/relay-backup.sh，cron：30 4 * * * /bin/sh /opt/codex-mobile-relay/relay-backup.sh >>/var/log/relay-backup.log 2>&1
+set -eu
+node=/opt/codex-mobile-relay/runtime/node24/bin/node
+out=/root/relay-backups
+day=$(date +%F)
+mkdir -p "$out"; chmod 700 "$out"
+backup() { # <系统用户> <数据目录> <文件名前缀>
+  db="$2/relay.sqlite"; [ -f "$db" ] || return 0
+  tmp="$2/backup-$day.sqlite"; rm -f "$tmp"
+  (cd /tmp && runuser -u "$1" -- "$node" -e "new (require('node:sqlite').DatabaseSync)(process.argv[1]).exec(\"VACUUM INTO '\"+process.argv[2]+\"'\")" "$db" "$tmp")
+  mv "$tmp" "$out/$3-$day.sqlite"; chmod 600 "$out/$3-$day.sqlite"
+}
+backup codex-relay /var/lib/codex-mobile-relay main
+backup codex-relay-acme /var/lib/codex-mobile-relay-acme acme
+find "$out" -name '*.sqlite' -mtime +30 -delete
+```
+
+备份仍在同一台服务器上，要定期拷到别的机器。
+
+### 升级和移除
+
+- **只更新网页**：各实例共用 `/opt/codex-mobile-relay/app/dist`，按 `scripts/web-deploy.sh` 更新一次，所有实例就都是新页面了。
+- **更新中继程序**（`build/relay.mjs`）：替换后要重启**所有**实例，否则没重启的实例还在跑旧程序：`systemctl restart 'codex-mobile-relay*.service'`。
+- **移除一个团队**：先按第 6 步做最后一次备份，再 `systemctl disable --now codex-mobile-relay-acme`，删掉它的服务文件、Nginx 配置（`nginx -t && systemctl reload nginx`）、`/etc/codex-mobile-relay-acme`、数据目录和系统用户，从备份脚本里删掉那一行，并在安全组关闭它的端口。
+
+### Compose 部署
+
+本包的 Compose 文件按单实例编写：项目名固定为 `codex-mobile-relay`，端口固定 3340/3341，Caddy 独占 80/443。多实例的做法与上面相同，但没有实际验收：每个团队一个目录，用 `-p` 指定不同的项目名（数据卷因此分开）；在 `relay` 的 `environment` 里设 `PORT`，并同步修改端口映射和健康检查里的端口；只启动一个 Caddy 或 Nginx，按域名或端口转到各实例，预览端口同样要对外保持 `PORT+1`。
 
 ## 日常操作
 
