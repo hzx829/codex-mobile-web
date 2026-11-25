@@ -1,5 +1,7 @@
-import {useEffect,useState,type ReactNode} from 'react';
+import {useEffect,useRef,useState,type ReactNode} from 'react';
 import type {Json} from '../src/shared/types';
+import {Icon} from './icons';
+import {Popover,type MenuPoint} from './popover';
 import {relativeTime} from './thread-menu';
 import {UsagePanel} from './usage';
 
@@ -70,7 +72,7 @@ export function mergeMembers(roster:TeamMemberRef[],threads:Json[]):TeamMemberRe
 export function ownerFilterLabel(filter:OwnerFilter,me:TeamUser|null,members:TeamMemberRef[]):string{
   if(filter==='all')return '全部';
   if(filter==='mine')return me?`${me.name}（我）`:'我的';
-  if(filter==='local')return '电脑本机';
+  if(filter==='local')return '桌面端（未归属）';
   const id=filter.slice('member:'.length);
   return members.find(item=>item.id===id)?.name||'指定成员';
 }
@@ -271,21 +273,64 @@ export function TeamPanel({me,team,logout,copy,machines,onOpenThread}:{me:TeamUs
   </div>;
 }
 
-/** Compact sidebar filter bar in team mode: All, Mine, or a specific teammate / local computer sessions. */
-export function OwnerFilterBar({me,value,members,change}:{me:TeamUser;value:OwnerFilter;members:TeamMemberRef[];change:(next:OwnerFilter)=>void}){
+/** Compact sidebar heading filter in team mode: opens a custom popover separating members from unowned desktop sessions. */
+export function OwnerFilterControl({me,value,members,change}:{me:TeamUser;value:OwnerFilter;members:TeamMemberRef[];change:(next:OwnerFilter)=>void}){
+  const [point,setPoint]=useState<MenuPoint|null>(null),trigger=useRef<HTMLButtonElement>(null);
   const others=members.filter(item=>item.id!==me.id);
-  const extraSelected=value==='local'||value.startsWith('member:');
-  const selectValue=extraSelected?value:'';
-  return <div className="owner-filter-bar" role="group" aria-label="按成员筛选会话">
-    <button type="button" aria-pressed={value==='all'} className={value==='all'?'selected':''} onClick={()=>change('all')}>全部</button>
-    <button type="button" aria-pressed={value==='mine'} className={value==='mine'?'selected':''} onClick={()=>change('mine')}>我的</button>
-    <select aria-label="按指定成员筛选" className={extraSelected?'selected':''} value={selectValue}
-      onChange={e=>change((e.target.value||'all') as OwnerFilter)}>
-      <option value="">按成员…</option>
-      {others.map(member=><option key={member.id} value={`member:${member.id}`}>{member.name}</option>)}
-      <option value="local">电脑本机</option>
-    </select>
-  </div>;
+  const memberId=value.startsWith('member:')?value.slice('member:'.length):'';
+  const selectedMember=memberId?members.find(item=>item.id===memberId)||{id:memberId,name:'指定成员'}:null;
+  const active=value!=='all';
+  const activeLabel=value==='mine'?'我':value==='local'?'桌面端':selectedMember?.name||'指定成员';
+  const openMenu=()=>{
+    const rect=trigger.current?.getBoundingClientRect();
+    if(rect)setPoint({x:rect.right,y:rect.bottom+6,align:'end'});
+  };
+  const pick=(next:OwnerFilter)=>{change(next);setPoint(null);};
+  return <>
+    {active?<span className="owner-filter-chip">
+      <button type="button" ref={trigger} className="owner-filter-trigger active" aria-haspopup="dialog" aria-expanded={Boolean(point)}
+        aria-label={`当前筛选：${ownerFilterLabel(value,me,members)}，点击切换`} title={`当前筛选：${ownerFilterLabel(value,me,members)}`} onClick={openMenu}>
+        {value==='mine'&&<OwnerBadge owner={me}/>}
+        {selectedMember&&<OwnerBadge owner={selectedMember}/>}
+        {value==='local'&&<Icon name="computer" size={13}/>}
+        <span>{activeLabel}</span>
+      </button>
+      <button type="button" className="owner-filter-clear" aria-label="清除筛选，显示全部" title="显示全部" onClick={()=>change('all')}><Icon name="close" size={12}/></button>
+    </span>:<button type="button" ref={trigger} className="owner-filter-trigger" aria-haspopup="dialog" aria-expanded={Boolean(point)}
+      aria-label="筛选会话归属" title="按成员或来源筛选会话" onClick={openMenu}>
+      <span>全部</span><Icon name="chevron" size={12}/>
+    </button>}
+    {point&&<Popover point={point} anchor={trigger.current} side="below" showHeader={false} title="筛选会话" label="按成员或来源筛选会话"
+      className="owner-filter-popover" focusSelector="button[aria-pressed=true]" close={()=>setPoint(null)}>
+      <div className="owner-filter-list" role="group" aria-label="按成员筛选">
+        <button type="button" className="owner-filter-option" aria-pressed={value==='all'} onClick={()=>pick('all')}>
+          <span className="owner-filter-icon"><Icon name="team" size={15}/></span>
+          <span className="owner-filter-copy"><strong>全部会话</strong></span>
+          {value==='all'&&<Icon name="check" size={15}/>}
+        </button>
+        <p className="owner-filter-group">成员</p>
+        <button type="button" className="owner-filter-option" aria-pressed={value==='mine'} onClick={()=>pick('mine')}>
+          <OwnerBadge owner={me}/>
+          <span className="owner-filter-copy"><strong>{me.name}<em>我</em></strong><small>我远程发起的会话</small></span>
+          {value==='mine'&&<Icon name="check" size={15}/>}
+        </button>
+        {others.map(member=>{
+          const key:OwnerFilter=`member:${member.id}`;
+          return <button type="button" className="owner-filter-option" key={member.id} aria-pressed={value===key} onClick={()=>pick(key)}>
+            <OwnerBadge owner={member}/>
+            <span className="owner-filter-copy"><strong>{member.name}</strong></span>
+            {value===key&&<Icon name="check" size={15}/>}
+          </button>;
+        })}
+        <p className="owner-filter-group">来源</p>
+        <button type="button" className="owner-filter-option" aria-pressed={value==='local'} onClick={()=>pick('local')}>
+          <span className="owner-filter-icon"><Icon name="computer" size={15}/></span>
+          <span className="owner-filter-copy"><strong>桌面端（未归属）</strong><small>在电脑上直接打开</small></span>
+          {value==='local'&&<Icon name="check" size={15}/>}
+        </button>
+      </div>
+    </Popover>}
+  </>;
 }
 
 /** Compact colored avatar button placed in the sidebar header to show who is signed in and open the team sheet. */

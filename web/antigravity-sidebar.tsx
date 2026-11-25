@@ -1,5 +1,5 @@
 import {useEffect,useMemo,useRef,useState,type ReactNode} from 'react';
-import {ChatSearch,HomeHeader,workspaceName} from './chat-layout';
+import {ChatSearch,HomeHeader,ProjectsSection,workspaceName} from './chat-layout';
 import {Icon} from './icons';
 import {IconButton} from './icon-button';
 import {relativeTime,ThreadMenu,ThreadRow} from './thread-menu';
@@ -8,7 +8,7 @@ import type {MenuPoint} from './popover';
 import {SessionListLoader} from './session-list-loader';
 import {cachedList,listKey,rememberList} from './session-cache';
 import {useStableEvent} from './use-event';
-import {isTeamAdmin,mergeMembers,OwnerFilterBar,ownerFilterLabel,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
+import {isTeamAdmin,mergeMembers,OwnerFilterControl,ownerFilterLabel,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
 import type {Json,RequestAction} from '../src/shared/types';
 
 type Project={id:string;path:string;name?:string};
@@ -24,6 +24,7 @@ type Props={
   /** Starts a new conversation in the shown project (its list id); omitted for apps that cannot create one. */
   onNew?:(project:string)=>void;
   selected:string;project:string;machine:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;switcher:ReactNode;action?:ReactNode;identity?:ReactNode;
+  projectsCollapsed?:boolean;onToggleProjects?:()=>void;
   me?:TeamUser|null;roster?:TeamMemberRef[];ownerFilter?:OwnerFilter;onOwnerFilterChange?:(next:OwnerFilter)=>void;
   claimOwner?:(threadId:string,userId:string|null)=>Promise<void>;
   copyText:(text:string)=>Promise<void>;threadActions?:(thread:Json)=>ThreadActions;
@@ -31,7 +32,7 @@ type Props={
   filter?:(threads:Json[])=>Json[];
   call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseProject:(id:string)=>void;chooseComputer:()=>void;more:()=>void;
 };
-export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',filter,me=null,roster=[],ownerFilter='all',onOwnerFilterChange,claimOwner,identity,onNew,selected,project,machine,machineName,connected,relayOnline,inert,revision,switcher,action,copyText,threadActions,call,open,chooseProject,chooseComputer,more}:Props){
+export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',filter,projectsCollapsed=false,onToggleProjects,me=null,roster=[],ownerFilter='all',onOwnerFilterChange,claimOwner,identity,onNew,selected,project,machine,machineName,connected,relayOnline,inert,revision,switcher,action,copyText,threadActions,call,open,chooseProject,chooseComputer,more}:Props){
   const [search,setSearch]=useState(''),[query,setQuery]=useState(''),[projects,setProjects]=useState<Project[]>([]);
   const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean}|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
@@ -81,17 +82,18 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
   const shownProjects=projects.length?projects:cachedList(projectsCache) as Project[]|null||[];
   const currentProject=shownProjects.find(item=>item.id===project);
   const projectLabel=currentProject?.path;
+  const groups=groupThreads(visible,preferences,heading);
+  const filterControl=me&&onOwnerFilterChange?<OwnerFilterControl me={me} value={ownerFilter} members={members} change={onOwnerFilterChange}/>:null;
   return <aside className="home-panel" inert={inert}>
     <HomeHeader project={project?currentProject?.name||(projectLabel?workspaceName(projectLabel):'项目'):''} machineName={machineName} connected={connected} relayOnline={relayOnline}
       identity={identity} back={()=>{setSearch('');setQuery('');chooseProject('');}} chooseComputer={chooseComputer} more={more}/>
     {!project&&!query&&switcher}
     <div className="home-content">
       {action}
-      {!project&&!query&&shownProjects.length>0&&<section className="project-section"><h2>项目</h2>{shownProjects.map(item=>
-        <button className="project-row" key={item.id} title={item.path} onClick={()=>chooseProject(item.id)}><Icon name="folder"/><span>{item.name||workspaceName(item.path)}</span></button>)}</section>}
-      {me&&onOwnerFilterChange&&<OwnerFilterBar me={me} value={ownerFilter} members={members} change={onOwnerFilterChange}/>}
-      <section className="recent-section">{!visible.length&&<h2>{heading}</h2>}
-        {groupThreads(visible,preferences,heading).map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(item=>{
+      {!project&&!query&&shownProjects.length>0&&<ProjectsSection collapsed={projectsCollapsed} onToggle={()=>onToggleProjects?.()}>{shownProjects.map(item=>
+        <button className="project-row" key={item.id} title={item.path} onClick={()=>chooseProject(item.id)}><Icon name="folder"/><span>{item.name||workspaceName(item.path)}</span></button>)}</ProjectsSection>}
+      <section className="recent-section">{!groups.length&&(filterControl?<div className="section-head"><h2>{heading}</h2>{filterControl}</div>:<h2>{heading}</h2>)}
+        {groups.map((group,index)=><div className="thread-group" key={group.key}>{index===0&&filterControl?<div className="section-head"><h2>{group.label}</h2>{filterControl}</div>:<h2>{group.label}</h2>}<nav aria-label={group.label}>{group.threads.map(item=>{
           const thread={...item,status:item.running?{type:'active'}:undefined};
           return <ThreadRow key={item.id} thread={thread} selected={selected===item.id} preference={preferences[item.id]}
             time={relativeTime(item.updatedAt)} open={()=>open(item.id)} menu={point=>setMenu({thread,point})}/>;})}</nav></div>)}

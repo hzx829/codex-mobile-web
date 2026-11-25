@@ -282,7 +282,7 @@ test('sidebar owner filtering, member colors, and other-owner composer hints beh
   const merged=mergeMembers([{id:'u1',name:'Ada'}],threads);
   assert.deepEqual(merged,[{id:'u1',name:'Ada'},{id:'u2',name:'Bo'}]);
   assert.equal(ownerFilterLabel('member:u2',me,merged),'Bo');
-  assert.equal(ownerFilterLabel('local',me,merged),'电脑本机');
+  assert.equal(ownerFilterLabel('local',me,merged),'桌面端（未归属）');
 
   const slot=ownerColorIndex('u1');
   assert.ok(slot>=0&&slot<8&&Number.isInteger(slot));

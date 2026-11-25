@@ -5,7 +5,7 @@ import {AntigravityPanel} from './antigravity';
 import {AntigravitySidebar} from './antigravity-sidebar';
 import {ClaudeCodePanel} from './claude-code';
 import {ClaudeProjectEditor,GuestProjectForm} from './claude-projects';
-import {ChatSearch,HomeHeader,ThreadHeader,useComposerHeight} from './chat-layout';
+import {ChatSearch,HomeHeader,ProjectsSection,ThreadHeader,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
 import {connectorHas,versionGap,versionGapNotice} from './features';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,supportedRoute,withConversation,type Service} from './services';
@@ -50,7 +50,7 @@ import {defaultVoiceProvider,loadVoiceChoice,resolveVoiceProvider,voiceEngineKey
 import {useVoiceInput} from './use-voice-input';
 import {useStableEvent} from './use-event';
 import {notifyHint,notifyLabel,notifyState,toggleNotify,useTurnNotice,watchWhileHidden,type NotifyState} from './turn-notify';
-import {filterThreadsByOwner,IdentityButton,isTeamAdmin,mergeMembers,otherOwnerHint,OwnerFilterBar,ownerFilterLabel,parseOwnerFilter,TeamPanel,type OpenActivityThread,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
+import {filterThreadsByOwner,IdentityButton,isTeamAdmin,mergeMembers,otherOwnerHint,OwnerFilterControl,ownerFilterLabel,parseOwnerFilter,TeamPanel,type OpenActivityThread,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -94,6 +94,8 @@ function App(){
   // The signed-in member once the relay has a team; null with the shared Token.
   const [me,setMe]=useState<TeamUser|null>(null),[roster,setRoster]=useState<TeamMemberRef[]>([]),[ownerFilter,setOwnerFilterState]=useState<OwnerFilter>(()=>parseOwnerFilter(load('owner-filter',null),load('only-mine',false)===true)),teamDevice=useRef('');
   const setOwnerFilter=(next:OwnerFilter)=>{setOwnerFilterState(next);save('owner-filter',next);save('only-mine',next==='mine');};
+  const [projectsCollapsed,setProjectsCollapsed]=useState<boolean>(()=>load('sidebar-projects-collapsed',false)===true);
+  const toggleProjects=()=>setProjectsCollapsed(old=>{const next=!old;save('sidebar-projects-collapsed',next);return next;});
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Machine[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const [remoteListRevision,refreshRemoteList]=useState(0);
@@ -763,7 +765,7 @@ function App(){
     return <SenderRoot me={me?.id}><div className={`shell ${id||creatingClaude||creatingAntigravity?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
-        identity={identityButton} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
+        identity={identityButton} projectsCollapsed={projectsCollapsed} onToggleProjects={toggleProjects} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
         claimOwner={isTeamAdmin(me)?(threadId,userId)=>claimOwner(machine,service,threadId,userId):undefined}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
         listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>filterThreadsByOwner(threads,me,ownerFilter)} action={service==='claude'&&route.project?
@@ -801,14 +803,16 @@ function App(){
       {previewPane}
     </div></SenderRoot>;
   }
+  const codexHeading=searchQuery?'搜索结果':archived?'归档会话':'最近';
+  const codexGroups=groupThreads(listedThreads,preferences,codexHeading);
+  const codexFilterControl=me?<OwnerFilterControl me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>:null;
   return <SenderRoot me={me?.id}><div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>
       <HomeHeader project={projectName(project)} machineName={machineName} connected={connected} relayOnline={status==='online'} identity={identityButton} back={backToProjects} backDisabled={busy} chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {!project&&!archived&&!searchQuery&&switcher}
       <div className="home-content">
-        {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
-        {me&&<OwnerFilterBar me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>}
-        <section className="recent-section">{!listedThreads.length&&<h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2>}{groupThreads(listedThreads,preferences,searchQuery?'搜索结果':archived?'归档会话':'最近').map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
+        {!project&&!searchQuery&&<ProjectsSection collapsed={projectsCollapsed} onToggle={toggleProjects}><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</ProjectsSection>}
+        <section className="recent-section">{!codexGroups.length&&(codexFilterControl?<div className="section-head"><h2>{codexHeading}</h2>{codexFilterControl}</div>:<h2>{codexHeading}</h2>)}{codexGroups.map((group,index)=><div className="thread-group" key={group.key}>{index===0&&codexFilterControl?<div className="section-head"><h2>{group.label}</h2>{codexFilterControl}</div>:<h2>{group.label}</h2>}<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
           time={relativeTime(s.updatedAt)} active={connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?view.running:s.status?.type==='active')}
           open={()=>{changePreference(s.id,{unread:false});navigate({...route,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
           {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}

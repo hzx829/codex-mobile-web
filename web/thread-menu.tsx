@@ -34,7 +34,7 @@ export function ThreadMenu({thread,point,preference,sections,archived,connected,
   const item=(icon:IconName,label:string,action:()=>void,disabled=false,danger=false,checked=false)=><button type="button" className={`menu-item${danger?' danger':''}`} disabled={busy||disabled} onClick={action}><Icon name={icon} size={22}/><span className="menu-copy">{label}{checked&&<Icon name="check" size={18}/>}</span></button>;
   const owner=thread.owner as TeamMemberRef|null|undefined;
   return <Popover point={point} title={thread.title} label="会话操作" close={close} className={compact?'thread-menu-compact':''} focusSelector={mode==='menu'||mode==='claim'?'.menu-item:not(:disabled)':'input'}>
-      {teamMode&&mode==='menu'&&<div className="thread-menu-owner">{owner?<><OwnerBadge owner={owner}/><span>由 {owner.name} 创建</span></>:<span>电脑本机创建</span>}</div>}
+      {teamMode&&mode==='menu'&&<div className="thread-menu-owner">{owner?<><OwnerBadge owner={owner}/><span>由 {owner.name} 创建</span></>:<span>桌面端直接创建（未归属）</span>}</div>}
       {error&&<p role="alert" className="error">{error}</p>}
       {mode==='menu'?<>
         {compact&&openPreview&&item('browser','打开网页',()=>{close();openPreview();},!connected)}
@@ -50,7 +50,7 @@ export function ThreadMenu({thread,point,preference,sections,archived,connected,
       :mode==='claim'&&claim?<>
         <p className="muted">选择这条会话的归属成员。</p>
         {claim.members.map(member=><div key={member.id}>{item('team',member.name,()=>void run(()=>claim.assign(member.id)),false,false,owner?.id===member.id)}</div>)}
-        {item('computer','电脑本机（清除归属）',()=>void run(()=>claim.assign(null)),false,false,!owner)}
+        {item('computer','桌面端（清除归属）',()=>void run(()=>claim.assign(null)),false,false,!owner)}
       </>:<>
         <p className="muted">分区保存在此浏览器中。</p>
         {item('chat','最近',()=>choose({section:''}))}
