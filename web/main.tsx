@@ -1052,15 +1052,9 @@ function App(){
       {previewPane}
     </div></SenderRoot>;
   }
-  const codexProjectKeySet=new Set(codexProjectItems.map(p=>p.key));
-  const codexPinnedThreads=!searchQuery&&!archived?listedThreads.filter(s=>preferences[s.id]?.pinned):[];
-  const codexUnassignedThreads=searchQuery||archived||!codexProjectItems.length
-    ?listedThreads
-    :listedThreads.filter(s=>!preferences[s.id]?.pinned&&(!s.cwd||!codexProjectKeySet.has(projectPathKey(s.cwd))));
   const codexShowProjectsTree=!searchQuery&&!archived&&(codexProjectItems.length>0||canCreateProject);
-  const codexShowFlatSection=Boolean(searchQuery||archived||!codexProjectItems.length||codexUnassignedThreads.length>0);
-  const codexHeading=searchQuery?'搜索结果':archived?'归档会话':codexProjectItems.length?'其他会话':'最近';
-  const codexGroups=groupThreads(codexUnassignedThreads,preferences,codexHeading);
+  const codexHeading=searchQuery?'搜索结果':archived?'归档会话':'最近';
+  const codexGroups=groupThreads(listedThreads,preferences,codexHeading);
   const codexFilterControl=me?<OwnerFilterControl me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>:null;
   const codexCanManage=canManageProjects&&Boolean(info?.projectApi);
   const isCodexActive=(s:Json)=>connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?Boolean(view.running):s.status?.type==='active');
@@ -1069,12 +1063,6 @@ function App(){
       <HomeHeader machineName={machineName} connected={connected} relayOnline={status==='online'} chooseComputer={()=>setSheet('computer')} mobileSettings={mobileSettings}/>
       {!archived&&!searchQuery&&switcher}
       <div className="home-content">
-        {codexPinnedThreads.length>0&&<section className="pinned-section">
-          <h2>置顶</h2>
-          <nav aria-label="置顶">{codexPinnedThreads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
-            time={relativeTime(s.updatedAt)} active={isCodexActive(s)}
-            open={()=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav>
-        </section>}
         {codexShowProjectsTree&&<ProjectTree
           service="codex"
           machine={machine}
@@ -1090,7 +1078,6 @@ function App(){
           onThreadMenu={(s,point)=>setThreadMenu({thread:s,point,machine,archived})}
           onNewChat={proj=>startNew(proj.path)}
           onCreateProject={canCreateProject?()=>openCreateProject('sidebar'):undefined}
-          headerAction={codexFilterControl}
           onEditProject={codexCanManage?proj=>openEditProject('codex',proj):undefined}
           onRemoveProject={codexCanManage?proj=>removeProject('codex',proj):undefined}
           onMarkAllRead={(_proj,ids)=>markCodexProjectRead(ids)}
@@ -1102,15 +1089,15 @@ function App(){
           canManageProjects={codexCanManage}
           ownerFiltered={Boolean(me&&ownerFilter!=='all')}
         />}
-        {codexShowFlatSection&&<section className="recent-section">
-          {archived&&<div className="section-head"><h2>归档会话</h2><button type="button" className="text-button" onClick={()=>setArchived(false)}>返回项目</button></div>}
-          {!archived&&!codexGroups.length&&(!codexShowProjectsTree&&codexFilterControl?<div className="section-head"><h2>{codexHeading}</h2>{codexFilterControl}</div>:<h2>{codexHeading}</h2>)}
-          {codexGroups.map((group,index)=><div className="thread-group" key={group.key}>{!archived&&(index===0&&!codexShowProjectsTree&&codexFilterControl?<div className="section-head"><h2>{group.label}</h2>{codexFilterControl}</div>:<h2>{group.label}</h2>)}<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
+        <section className="recent-section">
+          {archived&&<div className="section-head"><h2>归档会话</h2><button type="button" className="text-button" onClick={()=>setArchived(false)}>返回最近</button></div>}
+          {!archived&&!codexGroups.length&&(codexFilterControl?<div className="section-head"><h2>{codexHeading}</h2>{codexFilterControl}</div>:<h2>{codexHeading}</h2>)}
+          {codexGroups.map((group,index)=><div className="thread-group" key={group.key}>{!archived&&(index===0&&codexFilterControl?<div className="section-head"><h2>{group.label}</h2>{codexFilterControl}</div>:<h2>{group.label}</h2>)}<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
             time={relativeTime(s.updatedAt)} active={isCodexActive(s)}
             open={()=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
-          {listBusy&&!codexUnassignedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!codexUnassignedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':archived?'还没有归档会话。':'还没有聊天，开始一个新任务吧。'}</p>}
-          {(searchQuery||archived||!codexProjectItems.length)&&cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
-        </section>}
+          {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':archived?'还没有归档会话。':'还没有聊天，开始一个新任务吧。'}</p>}
+          {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
+        </section>
       </div>
       <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><ChatSearch value={search} change={setSearch}/><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={()=>startNew()}/></div></div>
       {sidebarFooter}
