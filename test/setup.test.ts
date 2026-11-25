@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {defaultRelay,prepareSettings,savedSettings} from '../scripts/setup-config.js';
@@ -33,6 +33,11 @@ test('configuration preserves identity and Codex settings, matches local port, a
     for(const relayUrl of ['https://relay.example/path','https://relay.example?token=secret','https://relay.example#secret','http://user:pass@relay.example'])await assert.rejects(prepareSettings({relayUrl},first));
     assert.equal((await prepareSettings({roots:['Z:/no-longer-exists']},old)).roots,undefined);
     await assert.rejects(prepareSettings({codexBin:project},first),/可执行文件/);
+    await assert.rejects(prepareSettings({claudeBin:project},first),/Claude Code 可执行文件/);
+    const claudeExe=join(dir,'claude.exe');await writeFile(claudeExe,'');
+    const withClaude=await prepareSettings({claudeBin:claudeExe},first);assert.equal(withClaude.claudeBin,await realpath(claudeExe));
+    assert.equal((await prepareSettings({relayUrl:'http://127.0.0.1:4444'},withClaude)).claudeBin,withClaude.claudeBin);
+    assert.equal((await prepareSettings({claudeBin:''},withClaude)).claudeBin,undefined);
   } finally {await removeTestTemp(dir);}
 });
 

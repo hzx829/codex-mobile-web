@@ -47,9 +47,9 @@ curl --fail https://codex.your-domain.com/health
 
 ## 连接 Windows 电脑
 
-1. 等连接器管理的任务完成，双击原安装目录的 `stop.cmd`。
-2. 打开 `configure.cmd`，选择“连接自己的中继（已部署的公网地址）”。地址填 `https://codex.your-domain.com`，Token 填服务器 `.env` 中的相同值。
-3. 保存后双击 `start.cmd`。此模式只启动电脑连接器；无需迁移模型配置或项目目录。
+1. 等连接器管理的任务完成。便携包在托盘图标菜单选择“修改连接配置”（会先停止服务）；源码目录先运行 `stop.cmd` 再打开 `configure.cmd`。
+2. 在配置窗口选择“连接自己的中继（已部署的公网地址）”。地址填 `https://codex.your-domain.com`，Token 填服务器 `.env` 中的相同值。
+3. 保存后托盘会自动重新启动（源码目录运行 `start.cmd`）。此模式只启动电脑连接器；无需迁移模型配置或项目目录。
 4. 手机扫码，或打开域名填写同一个 Token。关闭手机 Wi-Fi、用移动数据验证，能看到电脑在线和原有项目才算公网链路通过。
 
 电脑需要保持开机和联网。电脑离线时服务器仍能显示网页，但无法代替电脑执行 Codex。原来的 Wi-Fi 模式仍可通过配置窗口切回。
@@ -71,6 +71,82 @@ BRIDGE_CONNECTOR_TOKENS='[{"machineId":"guest-…","token":"…"}]'
 Compose 部署运行 `docker compose -f compose.yaml -f compose.https.yaml up -d --build` 应用配置。直接运行 Node 的中继可使用 `BRIDGE_CONNECTOR_TOKENS`，也可用打包参数 `--relay-config <路径>` 追加到已有的中继 JSON 配置，再重启中继。手机继续使用原有的主 Token。
 
 电脑主人解压后双击「启动.cmd」。网页的「电脑」菜单会在电脑名旁显示「借用」。停止连接用「停止.cmd」，清空该包里的项目、会话和登录副本用「清除访客数据.cmd」。要撤销访客包，从中继配置删除对应的 Token 并重新应用配置。
+
+## 团队成员（可选）
+
+默认整个中继只有一个共享 Token。多人一起用时可以启用团队：每人用自己的邀请链接登录，每台设备可以单独移除，会话列表标出是谁开的会话，管理员能看到操作记录。启用后的日常使用见 [团队使用说明](docs/team/GUIDE.md)，设计见 [团队账号与会话归属](docs/team/DESIGN.md)。
+
+1. 先升级中继和网页端。Compose 部署新增 `relay_data` 数据卷，数据库在 `/data/relay.sqlite`。直接用 Node 运行的实例（例如 systemd）默认写在工作目录的 `.local/relay.sqlite`，可用 `BRIDGE_DATA` 指定其他目录；该目录需要可写。
+2. 启用团队并创建所有者，`--url` 填手机访问的地址：
+
+   ```sh
+   docker compose -f compose.yaml -f compose.https.yaml exec relay node build/relay.mjs team init --name 你的名字 --url https://codex.your-domain.com
+   ```
+
+   直接用 Node 运行的实例，以运行中继的系统用户、用与中继相同的 `BRIDGE_DATA` 和 Node 运行 `build/relay.mjs team init …`，例如 systemd 服务：
+
+   ```sh
+   runuser -u codex-relay -- env BRIDGE_DATA=/var/lib/codex-mobile-relay /opt/codex-mobile-relay/runtime/node24/bin/node /opt/codex-mobile-relay/app/build/relay.mjs team init --name 你的名字 --url https://你的地址
+   ```
+3. 在手机或电脑浏览器打开输出的邀请链接，即以所有者身份登录。之后在“选项 → 团队 → 成员”添加成员，把生成的链接或二维码发给对方。每个邀请链接 24 小时内有效，只能用一次。
+4. 启用后，手机不能再用共享 Token 登录，已打开的网页会回到登录页。电脑连接器继续用原 Token 连接，不需要修改。若要给某台电脑换成专用 Token，在“团队 → 电脑”中生成，再在那台电脑的“修改连接配置”里替换；生成后，那台电脑就不能再用共享 Token 连接。
+5. 所有者的设备全部丢失时，在服务器上运行 `team invite --user <名字>` 重新生成邀请链接；`team list` 列出成员。
+
+“团队 → 用量”按人统计轮次和 token。只有更新后的电脑连接器才会上报，更新前完成的轮次不会补算。
+
+### 备份和恢复
+
+`relay.sqlite` 保存成员、设备、会话归属、操作记录和每轮用量，不保存消息正文。所有者的设备丢了，可以用 `team invite` 找回；这个文件丢了，团队就没了：中继回到个人模式，手机又能用共享 Token 登录，所有人都要重新邀请，用量和操作记录也找不回来。所以要定期备份，并把备份放到服务器以外的地方。
+
+文件位置：Compose 部署在 `relay_data` 数据卷里，路径 `/data/relay.sqlite`；直接用 Node 运行的实例在 `BRIDGE_DATA` 目录下，没有设置时是程序目录下的 `.local/relay.sqlite`。
+
+**备份**不用停中继。数据库用 WAL 模式，最近的改动可能还在旁边的 `relay.sqlite-wal` 里，直接复制 `relay.sqlite` 会漏掉，要让 SQLite 导出一份完整副本。导出的目标文件不能已经存在。
+
+Compose 部署，在部署目录运行，得到当前目录下的 `relay-backup-<日期>.sqlite`：
+
+```sh
+docker compose -f compose.yaml -f compose.https.yaml exec relay node -e "new (require('node:sqlite').DatabaseSync)('/data/relay.sqlite').exec(\"VACUUM INTO '/data/backup.sqlite'\")"
+docker compose -f compose.yaml -f compose.https.yaml cp relay:/data/backup.sqlite ./relay-backup-$(date +%F).sqlite
+docker compose -f compose.yaml -f compose.https.yaml exec relay rm /data/backup.sqlite
+```
+
+直接用 Node 运行的实例，以运行中继的系统用户执行，避免数据目录里多出属于 root、中继打不开的文件。下例是 systemd 服务用户 `codex-relay`、数据目录 `/var/lib/codex-mobile-relay`，需要服务器有 `sqlite3` 命令：
+
+```sh
+cd /var/lib/codex-mobile-relay
+runuser -u codex-relay -- sqlite3 relay.sqlite ".backup 'backup.sqlite'"
+mv backup.sqlite /root/relay-backup-$(date +%F).sqlite
+```
+
+没有 `sqlite3` 时，把第二行换成用中继自己的 Node 24 运行上面 Compose 第一条命令里的 `node -e …`，路径改成数据目录。系统自带的旧版 Node 可能没有 `node:sqlite`。可以用 cron 每天运行一次，再把文件拷到别的机器。
+
+**恢复**：停止中继，把数据目录里的 `relay.sqlite`、`relay.sqlite-wal`、`relay.sqlite-shm` 移到别处（留着，以防恢复错了），把备份复制成 `relay.sqlite` 并交给运行中继的用户，再启动中继。
+
+Compose 部署（把备份文件名换成实际的）：
+
+```sh
+docker compose -f compose.yaml -f compose.https.yaml stop relay
+docker compose -f compose.yaml -f compose.https.yaml run --rm --no-deps -v "$PWD/relay-backup-2026-11-22.sqlite:/restore.sqlite:ro" --entrypoint sh relay -c 'mkdir -p /data/before-restore && (mv /data/relay.sqlite* /data/before-restore/ || true) && cp /restore.sqlite /data/relay.sqlite'
+docker compose -f compose.yaml -f compose.https.yaml start relay
+docker compose -f compose.yaml -f compose.https.yaml exec relay node build/relay.mjs team list
+```
+
+直接用 Node 运行的实例：
+
+```sh
+systemctl stop codex-mobile-relay
+cd /var/lib/codex-mobile-relay
+mkdir -p before-restore && mv relay.sqlite* before-restore/
+install -o codex-relay -g codex-relay -m 600 /root/relay-backup-2026-11-22.sqlite relay.sqlite
+systemctl start codex-mobile-relay
+runuser -u codex-relay -- env BRIDGE_DATA=/var/lib/codex-mobile-relay /opt/codex-mobile-relay/runtime/node24/bin/node /opt/codex-mobile-relay/app/build/relay.mjs team list
+```
+
+恢复后，数据回到备份那一刻：
+
+- 备份之后加入的成员、登录的设备要重新邀请；备份之后生成的电脑专用 Token 失效，那台电脑要重新生成，或改回共享 Token。
+- 备份之后移除的设备、停用的成员会重新生效，要到“团队”里再移除或停用一次。
+- 备份之后的用量会缺：电脑连接器在中继确认收到后就删掉了自己的副本，不会重发。
 
 ## 日常操作
 
@@ -94,6 +170,12 @@ docker compose -f compose.yaml -f compose.https.yaml down
 
 服务器需保留 `.env` 和 Caddy 证书卷，电脑需保留自己的 `.local/`。程序包中不包含这些运行数据。默认中继状态日志不主动记录聊天或文件正文，附带代理配置未启用访问日志；容器日志做大小轮换。自定义代理、云平台及诊断设置可能另行留存信息；错误日志也应检查后再分享。
 
+### 只更新网页或电脑连接器
+
+只改了手机网页、中继没变时，不必重建中继：按 `scripts/web-deploy.sh` 开头的说明在电脑上打包 `dist`，上传后在服务器上运行这个脚本。它只替换网页文件，保留旧的带哈希资源给还开着旧页面的手机，核对通过前中继进程不动，失败时换回原来的页面。这个脚本按直接运行 Node 的中继（`/opt/codex-mobile-relay`，systemd 服务）编写，目录、服务名和端口可用 `CODEX_RELAY_ROOT`、`CODEX_RELAY_SERVICE`、`CODEX_RELAY_PORT` 改。
+
+电脑上实际运行的连接器如果是安装包（由 `Codex Mobile Web.exe` 启动），`npm run update:deploy` 检查的是仓库自己的安装，会拒绝。这时先 `npm run build`，再运行 `npm run deploy:package-connector -- <安装包文件夹>`：只替换安装包里的 `build/connector.mjs`，等 Claude Code 和 Codex 空闲才重启，保留安装包自己的设置和 Codex 版本，新构建没起来就换回原来的。
+
 ## 已有 HTTPS 反向代理
 
 如果服务器已经有 Nginx 或 Caddy，占用了 80/443，只启动中继：
@@ -104,6 +186,35 @@ curl --fail http://127.0.0.1:3340/health
 ```
 
 在现有代理上将域名根路径转到 `127.0.0.1:3340`，并允许 `/ws` 的 WebSocket 长连接。另将同一域名的 HTTPS 3341 端口完整转到 `127.0.0.1:3341`，保留普通 HTTP 和 WebSocket 转发。不要同时启动本包的 Caddy。若现有代理也在 Docker 容器里，回环地址指向代理容器自身，需要把代理接到中继的 Docker 网络后用 `relay:3340` 和 `relay:3341`。
+
+文件走中继的数据通道（[设计](docs/sync/DESIGN.md#8-数据通道)）。下载时电脑把文件作为一个 HTTP 请求体上传到 `/blob-feed/`；上传时手机把每段（最多 8 MiB）用 `PUT` 发到 `/blob/<电脑>/upload`。中继都是边收边转。现有代理要对这两个路径关闭请求缓冲、放开请求体大小，否则大于默认 1 MB 的请求会被拒绝（网页会退回分块上传），或者要等整个请求传到代理才开始转发。Nginx 示例，放在主入口的 `server` 里：
+
+```nginx
+location /blob-feed/ {
+    proxy_pass http://127.0.0.1:3340;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    client_max_body_size 110m;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+location /blob/ {
+    proxy_pass http://127.0.0.1:3340;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    client_max_body_size 9m;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+手机端的 `/blob/` 下载同样经这一段转发，需要 `proxy_buffering off`（上面已有），并建议开启 HTTP/2，同一页面的多张图片和视频分段请求可以并行。Caddy 默认流式转发且不限制请求体，不需要额外配置。
 
 ### 没有域名：使用 IP 证书
 
@@ -123,6 +234,8 @@ IP 证书有效期约 6 天，必须自动续期，并设置部署钩子执行 `
 | 网页连接反复中断 | 反向代理是否支持 `/ws`；先看连接器错误日志，不要重新发送结果不明的操作 |
 | 预览新标签页无法打开 | 公网 TCP 3341 是否开放、该端口是否配置 HTTPS 和 WebSocket 转发；电脑上的开发服务是否仍在运行 |
 | 502 | `docker compose ps` 中 relay 是否 healthy；用回环 `/health` 区分中继与 HTTPS 问题 |
+| `team init` 提示无法打开数据库 | Compose 是否已加 `relay_data` 数据卷并重新 `up -d`；直接运行时 `BRIDGE_DATA` 目录是否可写 |
+| 团队成员看不到某台电脑 | 管理员在“团队 → 成员 → 编辑”中检查该成员的可用电脑 |
 
 公网部署的完成条件：HTTPS 健康检查通过；手机用移动数据连接；能打开项目和原有任务；在测试会话发送一条消息并收到回复；中继重启后恢复连接。仅 `/health` 成功不代表整条链路已经通过。
 

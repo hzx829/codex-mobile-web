@@ -18,7 +18,9 @@ export function remarkFileCitations(){
             children.push({type:'link',url:encodeURI(path),children:[{type:'text',value:name}]} as Link);
             start=match.index!+match[0].length;
           }
-          if(start<node.value.length)children.push({type:'text',value:node.value.slice(start)} as Text);
+          // Untouched text keeps its node, and with it the source position later plugins read (web/auto-links.ts).
+          if(!start)children.push(node);
+          else if(start<node.value.length)children.push({type:'text',value:node.value.slice(start)} as Text);
         }else{
           if('children' in node&&!['link','linkReference','image','imageReference'].includes(node.type))visit(node);
           children.push(node);

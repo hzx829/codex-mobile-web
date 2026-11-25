@@ -2,9 +2,10 @@ import {Fragment,memo,useState} from 'react';
 import Markdown, {defaultUrlTransform} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type {Json} from '../src/shared/types';
-import {isArtifactUrl,markdownFileUrl} from './preview-target';
+import {isArtifactUrl,lanHost,markdownFileUrl} from './preview-target';
 import {splitFollowups} from './followup';
 import {remarkFileCitations} from './file-citations';
+import {remarkAutoLinks} from './auto-links';
 import {markdownBlocks} from './markdown-blocks';
 const windowsFilePath=/^[a-z]:(?:[\\/]|%5c|%2f)/i;
 export function markdownUrlTransform(url:string,key:string,allowFileUrls:boolean) {
@@ -21,17 +22,18 @@ function localMediaPath(value:string|undefined) {
   let decoded=value;try{decoded=decodeURIComponent(value);}catch{}
   return !decoded.startsWith('#')&&!/^[\\/]{2}/.test(decoded)&&(!/^[a-z][a-z\d+.-]*:/i.test(decoded)||/^[a-z]:[\\/]/i.test(decoded));
 }
+/** A link to a page on the computer or its private network, which the computer can relay. */
 function localPreviewLink(value:string) {
   const address=value.replace(/^(https?:\/\/)%5b::1%5d(?=[:/?#]|$)/i,'$1[::1]');
   try {
     const url=new URL(address);
-    return (url.protocol==='http:'||url.protocol==='https:')&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)&&!url.username&&!url.password?address:null;
+    return (url.protocol==='http:'||url.protocol==='https:')&&lanHost(url.hostname)&&!url.username&&!url.password?address:null;
   }catch{return null;}
 }
 type MarkdownProps={text:string;openFile:(path:string)=>void;openPreview:(url:string)=>void;allowFileUrls:boolean};
 /** One top-level block. Finished blocks keep their rendering while a reply streams. */
 const MarkdownBlock=memo(function MarkdownBlock({text,openFile,openPreview,allowFileUrls}:MarkdownProps){
-  return <Markdown remarkPlugins={[remarkGfm,remarkFileCitations]} urlTransform={(url,key)=>markdownUrlTransform(url,key,allowFileUrls)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
+  return <Markdown remarkPlugins={[remarkGfm,remarkFileCitations,remarkAutoLinks]} urlTransform={(url,key)=>markdownUrlTransform(url,key,allowFileUrls)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
     if(!href)return <span>{children}</span>;
     const previewUrl=localPreviewLink(href);
     if(previewUrl)return <button className="inline-link" type="button" onClick={()=>openPreview(previewUrl)}>{children} · 打开预览</button>;
@@ -47,7 +49,7 @@ export const SafeMarkdown=memo(function SafeMarkdown({text,openFile,openPreview,
 export function RequestCard({request:r,disabled,respond}:{request:Json;disabled:boolean;respond:(response:Json)=>void}){
   const [answers,setAnswers]=useState<Json>({}),[scope,setScope]=useState('turn');
   const p=r.params||{},method=r.method;
-  if(method==='item/tool/requestUserInput')return <div className="request"><strong>Codex 需要你补充信息</strong>{p.questions?.map((q:Json)=><label key={q.id}>{q.question}{q.options?.length>0&&<div className="choices">{q.options.map((o:Json)=><button type="button" disabled={disabled} className={answers[q.id]===o.label?'chosen':''} key={o.label} onClick={()=>setAnswers({...answers,[q.id]:o.label})} title={o.description}>{o.label}</button>)}</div>}<input type={q.isSecret?'password':'text'} value={answers[q.id]||''} onChange={e=>setAnswers({...answers,[q.id]:e.target.value})} placeholder="选择选项或输入回答"/></label>)}<button disabled={disabled||p.questions?.some((q:Json)=>!answers[q.id]?.trim())} onClick={()=>respond({answers:Object.fromEntries(p.questions.map((q:Json)=>[q.id,{answers:[answers[q.id]]}]))})}>提交回答</button></div>;
+  if(method==='item/tool/requestUserInput')return <div className="request"><strong>Codex 需要你补充信息</strong>{p.questions?.map((q:Json)=><label key={q.id}>{q.question}{q.options?.length>0&&<div className="choices">{q.options.map((o:Json)=><button type="button" disabled={disabled} className={answers[q.id]===o.label?'chosen':''} key={o.label} onClick={()=>setAnswers({...answers,[q.id]:o.label})} title={o.description}>{o.label}</button>)}</div>}<input type={q.isSecret?'password':'text'} value={answers[q.id]||''} onChange={e=>setAnswers({...answers,[q.id]:e.target.value})} placeholder="选择选项或输入回答"/></label>)}<button className="primary" disabled={disabled||p.questions?.some((q:Json)=>!answers[q.id]?.trim())} onClick={()=>respond({answers:Object.fromEntries(p.questions.map((q:Json)=>[q.id,{answers:[answers[q.id]]}]))})}>提交回答</button></div>;
   if(method==='item/commandExecution/requestApproval'||method==='item/fileChange/requestApproval')return <div className="request"><strong>{method.includes('commandExecution')?'允许执行这条命令？':'允许修改文件？'}</strong><pre>{p.command||p.reason||'Codex 请求你的确认'}</pre><div className="choices">{(p.availableDecisions||['accept','acceptForSession','decline','cancel']).map((decision:any)=><button disabled={disabled} key={JSON.stringify(decision)} onClick={()=>respond({decision})}>{({accept:'允许一次',acceptForSession:'本会话允许',decline:'拒绝',cancel:'取消'} as Json)[String(decision)]||(decision.acceptWithExecpolicyAmendment?'允许并记住命令规则':decision.applyNetworkPolicyAmendment?'应用网络规则':'按此规则处理')}</button>)}</div></div>;
   if(method==='item/permissions/requestApproval')return <div className="request"><strong>Codex 请求额外权限</strong><p>{p.reason}</p><details><summary>查看请求范围</summary><pre>{JSON.stringify(p.permissions,null,2)}</pre></details><select value={scope} onChange={e=>setScope(e.target.value)}><option value="turn">仅本轮</option><option value="session">本会话</option></select><button disabled={disabled} onClick={()=>respond({allow:true,scope})}>允许请求范围</button><button disabled={disabled} onClick={()=>respond({allow:false,scope:'turn'})}>拒绝</button></div>;
   if(method==='mcpServer/elicitation/request'){

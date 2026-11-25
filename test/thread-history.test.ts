@@ -69,6 +69,88 @@ test('native pagination can continue from a desktop turn anchor without a native
   }finally{control.close();}
 });
 
+test('a detached reader follows an external turn without mistaking it for a stop',async()=>{
+  const tail={...turns(2,3)[0],status:'interrupted',completedAt:null as number|null};
+  const reads:string[]=[];
+  let hasWriter=true;
+  class Runtime extends EventEmitter{
+    requests=new Map();
+    async rpc(method:string){
+      assert.equal(method,'thread/read');
+      return {thread:{id:'s',status:{type:'notLoaded'},turns:[...turns(0,2),tail]}};
+    }
+    close(){}
+  }
+  class Desktop extends EventEmitter{async follow(){throw Error('no owner');}close(){}}
+  const ledger=new Ledger(':memory:');ledger.claim('s');
+  const control=new Control(ledger,new Runtime() as any,new Desktop() as any,undefined,undefined,undefined,async (threadId,turnId)=>{
+    assert.equal(threadId,'s');assert.ok(turnId);reads.push(turnId);return hasWriter;
+  });
+  try{
+    const active=await control.read('s',1);
+    assert.equal(active.source,'history');assert.equal(active.canControl,false);
+    assert.equal(active.running,true);assert.equal(active.activeTurnId,'t2');
+    assert.equal(active.turns[0].status,'inProgress');assert.equal(active.turns[0].canFork,false);
+    assert.deepEqual(active.turns[0].items.map(item=>item.text),['message 2']);
+    const resume=await control.handle({id:'resume',action:'session.resume',payload:{threadId:'s',confirmIdle:true,opId:`${Date.now()}:${randomUUID()}`}});
+    assert.equal(resume.error?.code,'active');
+
+    const older=await control.read('s',1,active.nextCursor!);
+    assert.deepEqual(older.turns.map(turn=>turn.id),['t1']);
+    assert.deepEqual(reads,['t2','t2']);
+
+    hasWriter=false;
+    const stopped=await control.read('s');
+    assert.equal(stopped.running,false);assert.equal(stopped.turns.at(-1)?.status,'interrupted');
+
+    hasWriter=true;tail.completedAt=1;
+    const explicitlyStopped=await control.read('s');
+    assert.equal(explicitlyStopped.running,false);assert.equal(explicitlyStopped.turns.at(-1)?.status,'interrupted');
+
+    tail.status='completed';
+    const completed=await control.read('s');
+    assert.equal(completed.source,'connector');assert.equal(completed.canControl,true);
+    assert.equal(completed.running,false);assert.equal(completed.turns.at(-1)?.status,'completed');
+    assert.deepEqual(reads,['t2','t2','t2']);
+  }finally{control.close();}
+});
+
+test('a new turn can be read and listed before the native history is written',async()=>{
+  const desktopState={turns:[{id:'desktop-turn',status:'inProgress'}]};
+  class Runtime extends EventEmitter{
+    requests=new Map();reads=0;
+    async rpc(method:string){
+      if(method==='thread/start')return {thread:{id:'fresh',status:{type:'idle'},turns:[]}};
+      if(method==='turn/start'){
+        const turn={id:'first'};this.emit('event',{method:'turn/started',params:{threadId:'fresh',turn}});return {turn};
+      }
+      assert.equal(method,'thread/read');this.reads++;
+      throw new BridgeError('runtime_error','thread fresh is not materialized yet');
+    }
+    close(){}
+  }
+  class Desktop extends EventEmitter{states=new Map([['desktop',{state:desktopState}]]);async refreshThread(){}close(){}}
+  const runtime=new Runtime(),list=()=>({data:['fresh','desktop','external','idle'].map(id=>({id,title:id,cwd:'',model:'',provider:'',updatedAt:0})),nextCursor:null});
+  const control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any,undefined,undefined,list,async(id)=>id==='external');
+  try{
+    const created=await control.handle({id:'create',action:'session.create',payload:{cwd:process.cwd(),opId:`${Date.now()}:${randomUUID()}`}});
+    assert.equal(created.state,'accepted');
+    assert.equal((await control.read('fresh')).running,false);assert.equal(runtime.reads,1);
+    const sent=await control.handle({id:'send',action:'turn.send',payload:{threadId:'fresh',source:'connector',generation:created.generation,expectedTurnId:null,text:'first',opId:`${Date.now()}:${randomUUID()}`}});
+    assert.equal(sent.state,'accepted');assert.equal(runtime.reads,2);
+    assert.equal((await control.read('fresh')).activeTurnId,'first');assert.equal(runtime.reads,3);
+
+    const active=async()=>{
+      const page=await control.handle({id:'list',action:'sessions.list',payload:{}});
+      return page.data.filter((thread:any)=>thread.status?.type==='active').map((thread:any)=>thread.id);
+    };
+    assert.deepEqual(await active(),['fresh','desktop','external']);
+    runtime.emit('event',{method:'thread/closed',params:{threadId:'fresh'}});
+    desktopState.turns[0].status='completed';
+    assert.deepEqual(await active(),['external']);
+  }finally{control.close();}
+});
+
 test('fork and edit still reach a selected turn older than 100 rounds',async()=>{
   class Runtime extends EventEmitter{
     requests=new Map();all=turns(0,145);rollback=0;

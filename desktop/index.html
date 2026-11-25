@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+<title>Codex 随行</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="status" class="screen" hidden>
+  <div class="scroll">
+    <header class="hero">
+      <div class="hero-text">
+        <div class="hero-title"><span id="indicator" class="indicator"></span><h1 id="title">正在读取状态…</h1></div>
+        <p id="subtitle" class="sub"></p>
+      </div>
+      <button id="open-settings" class="icon-btn" type="button" aria-label="连接设置" title="连接设置">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+      </button>
+    </header>
+
+    <div id="error" class="banner error" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
+      <span id="error-text"></span>
+    </div>
+
+    <section class="card qr-card">
+      <div class="qr-box">
+        <div id="qr" class="qr" role="img" aria-label="手机连接二维码"></div>
+        <div id="qr-overlay" class="qr-overlay" hidden></div>
+      </div>
+      <p id="qr-caption" class="caption"></p>
+      <div class="chips">
+        <button id="open-web" class="chip strong" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>在浏览器打开</button>
+        <button id="copy" class="chip" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>复制链接</button>
+      </div>
+    </section>
+
+    <section class="card rows" aria-label="连接状态">
+      <div class="info-row"><span id="relay-dot" class="dot"></span><span class="label">中继</span><span id="relay-value" class="value mono"></span></div>
+      <div class="info-row"><span id="codex-dot" class="dot"></span><span class="label">Codex</span><span id="codex-value" class="value"></span></div>
+      <div class="info-row"><span id="claude-dot" class="dot"></span><span class="label">Claude Code</span><span id="claude-value" class="value"></span></div>
+      <div class="info-row"><span id="antigravity-dot" class="dot"></span><span class="label">Antigravity</span><span id="antigravity-value" class="value"></span></div>
+    </section>
+
+    <section id="claude-signin" class="card signin-card" hidden>
+      <p id="claude-signin-text"></p>
+      <div class="chips">
+        <button id="claude-signin-go" class="chip strong" type="button">登录</button>
+        <button id="claude-signin-skip" class="chip" type="button">暂不登录</button>
+      </div>
+    </section>
+
+    <button id="autostart" class="switch-row" type="button" role="switch" aria-checked="false">
+      <span class="switch-text"><span>登录 Windows 时自动启动</span><small>开机后只在托盘显示图标，不弹出窗口</small></span>
+      <span class="switch" aria-hidden="true"><span class="knob"></span></span>
+    </button>
+  </div>
+  <footer class="actions">
+    <button id="primary" class="pill primary" type="button">启动服务</button>
+    <button id="stop" class="pill outline" type="button">停止服务</button>
+    <span class="spacer"></span>
+    <button id="logs" class="text-btn" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>查看日志</button>
+  </footer>
+</main>
+
+<main id="settings" class="screen" hidden>
+  <form id="settings-form" class="settings-form" novalidate>
+    <div class="scroll">
+      <header id="welcome" class="welcome">
+        <h1>欢迎使用 Codex 随行</h1>
+        <p class="sub">在手机或任意浏览器里使用这台电脑上的 Codex、Claude Code 和 Antigravity。先选连接方式，其他设置可以留空自动识别。</p>
+      </header>
+      <header id="settings-head" class="settings-head">
+        <button id="back" class="icon-btn ghost" type="button" aria-label="返回"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <h1>连接设置</h1>
+      </header>
+
+      <div class="field">
+        <span class="field-label" id="mode-label">连接方式</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="mode-label">
+          <button type="button" role="radio" data-mode="all"><span>本机中继</span><small>同一 Wi-Fi 先验证</small></button>
+          <button type="button" role="radio" data-mode="connector"><span>自己的中继</span><small>已部署的公网地址</small></button>
+        </div>
+      </div>
+
+      <label class="field">中继地址（手机和其他设备通过它访问这台电脑）
+        <input id="relay" type="text" autocomplete="off" spellcheck="false" inputmode="url">
+        <small id="relay-hint"></small>
+      </label>
+
+      <label class="field">连接 Token
+        <span class="input-wrap">
+          <input id="token" type="password" autocomplete="off" spellcheck="false">
+          <button id="toggle-token" class="input-icon" type="button" aria-label="显示或隐藏 Token" aria-pressed="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        </span>
+      </label>
+
+      <details id="advanced" class="advanced">
+        <summary><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>高级：Codex、Claude Code 程序路径（留空自动识别）</summary>
+        <div class="advanced-body">
+          <label class="field">Codex 程序
+            <span class="pick"><input id="codexBin" type="text" class="mono" placeholder="自动识别 codex.exe" spellcheck="false"><button type="button" class="chip" data-pick="codexBin">选择…</button></span>
+          </label>
+          <label class="field">Codex 配置目录
+            <span class="pick"><input id="codexHome" type="text" class="mono" placeholder="沿用当前用户" spellcheck="false"><button type="button" class="chip" data-pick="codexHome">选择…</button></span>
+          </label>
+          <label class="field">Claude Code 程序
+            <span class="pick"><input id="claudeBin" type="text" class="mono" placeholder="自动识别 claude.exe" spellcheck="false"><button type="button" class="chip" data-pick="claudeBin">选择…</button></span>
+          </label>
+        </div>
+      </details>
+
+      <div id="restart-warning" class="banner warn" hidden>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4M12 17v.01"/></svg>
+        <span>保存会重新启动服务，电脑上由连接器管理的任务会被中断。</span>
+      </div>
+      <div id="save-error" class="banner error" hidden>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
+        <span id="save-error-text"></span>
+      </div>
+    </div>
+    <footer class="actions end">
+      <button id="cancel" class="pill outline" type="button">取消</button>
+      <button id="save" class="pill primary" type="submit">保存并启动</button>
+    </footer>
+  </form>
+</main>
+
+<div id="dialog" class="overlay" hidden>
+  <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-text">
+    <h2 id="dialog-title"></h2>
+    <p id="dialog-text"></p>
+    <div id="dialog-actions" class="dialog-actions"></div>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

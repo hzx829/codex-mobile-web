@@ -27,3 +27,20 @@ export function optimisticDelivered(message:OptimisticMessage,view:SessionView|n
   const before=new Set(message.baseline);
   return userItemIds(view).some(id=>!before.has(id));
 }
+
+type FlatMessage={id:string;role:string};
+export function flatUserMessageIds(messages:FlatMessage[]|null|undefined):string[] {
+  return Array.isArray(messages)?messages.filter(item=>item.role==='user').map(item=>item.id):[];
+}
+
+/** Optimistic user message for flat-message runtimes (Antigravity). */
+export function optimisticFlatMessage(key:string,messages:FlatMessage[]|null|undefined,text:string,images:string[],fileNames:string[]):OptimisticMessage {
+  return {key,text,images,fileNames,state:'sending',acceptedAt:null,baseline:flatUserMessageIds(messages),at:Date.now()};
+}
+
+/** True when a flat-message conversation now shows a user message that was not there before acceptance. */
+export function optimisticFlatDelivered(message:OptimisticMessage,messages:FlatMessage[]|null|undefined):boolean {
+  if(!message.acceptedAt||!Array.isArray(messages))return false;
+  const before=new Set(message.baseline);
+  return flatUserMessageIds(messages).some(id=>!before.has(id));
+}

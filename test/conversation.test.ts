@@ -18,6 +18,9 @@ test('collapsed tool output is mounted only when opened; live updates and action
   try{
     await act(async()=>root.render(createElement(ConversationTurn,props)));
     assert.equal(document.querySelectorAll('pre').length,0);assert.equal(document.querySelectorAll('.activity').length,0);
+    // A running turn says so once, in its activity summary; no second "in progress" label under it.
+    assert.match(document.querySelector('.activity-group summary')!.textContent!,/^正在处理 · 1 项/);
+    assert.equal(document.querySelector('.turn-status'),null);assert.ok(!document.body.textContent!.includes('进行中'));
     const group=document.querySelector('.activity-group')! as any;
     await act(async()=>{group.open=true;group.dispatchEvent(new window.Event('toggle'));});
     assert.equal(document.querySelectorAll('.activity').length,1);assert.equal(document.querySelectorAll('pre').length,0);
@@ -31,5 +34,10 @@ test('collapsed tool output is mounted only when opened; live updates and action
     assert.deepEqual(copies,['Latest answer']);
     await act(async()=>{group.open=false;group.dispatchEvent(new window.Event('toggle'));});
     assert.equal(document.querySelectorAll('pre').length,0);
+    // A turn that ended other than by completing still says how.
+    await act(async()=>root.render(createElement(ConversationTurn,{...props,running:false,turn:{...updated,status:'interrupted'}})));
+    assert.equal(document.querySelector('.turn-status')?.textContent,'已停止');
+    await act(async()=>root.render(createElement(ConversationTurn,{...props,running:false,turn:{...updated,status:'completed'}})));
+    assert.equal(document.querySelector('.turn-status'),null);
   }finally{await act(async()=>root.unmount());}
 });

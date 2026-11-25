@@ -1,16 +1,26 @@
 import {memo, useMemo} from 'react';
 import type {AntigravityIssue, AntigravityMessage, MessageItem} from '../src/shared/types';
 import {groupItems} from './activity';
+import {BlobImage} from './blob-image';
 import {ActivityGroup} from './conversation';
 import {SafeMarkdown} from './content';
 import {IconButton} from './icon-button';
+import {SenderLabel} from './senders';
 
 export function antigravityIssueText(issue: AntigravityIssue, canSend: boolean) {
   if (issue.kind === 'interrupted') return 'Antigravity 的回复中断了，可以发送消息继续。';
-  if (issue.kind === 'error') return 'Antigravity 处理消息时出错。';
+  if (issue.kind === 'error') return issue.message ? `Antigravity 出错：${issue.message}` : 'Antigravity 处理消息时出错。';
   const reason = issue.connection ? 'Antigravity 连接中断' : 'Antigravity 请求出错';
   if (canSend) return `${reason}，本轮已结束。`;
   return `${reason}，正在${issue.connection ? '重连' : '重试'}（第 ${issue.attempt} 次请求失败）…`;
+}
+
+export function AntigravityErrorNotice({issue}: {issue: Extract<AntigravityIssue, {kind: 'error'}>}) {
+  return <div className="antigravity-error" role="alert">
+    <p className="antigravity-error-title">{antigravityIssueText(issue, true)}</p>
+    {issue.detail && <p className="antigravity-error-detail">{issue.detail}</p>}
+    {issue.errorId && <p className="antigravity-error-id">Error ID: {issue.errorId}</p>}
+  </div>;
 }
 
 export function groupAntigravityMessages(messages: AntigravityMessage[]) {
@@ -34,9 +44,10 @@ export const AntigravityMessages = memo(function AntigravityMessages({messages,r
     const first = group[0];
     if (first.role === 'activity') return <ActivityGroup key={first.id} items={group} running={running && index === groups.length-1} openFile={openFile}/>;
     const message=<article className={`message ${first.role}`}>
-      <SafeMarkdown allowFileUrls text={first.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>
+      {first.text&&<SafeMarkdown allowFileUrls text={first.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>}
+      {first.images?.map((url,i)=><BlobImage className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}
     </article>;
-    return <div key={first.id} className={first.role==='user'?'user-entry':'turn'}>{message}
+    return <div key={first.id} className={first.role==='user'?'user-entry':'turn'}>{first.role==='user'&&<SenderLabel sender={first.sender}/>}{message}
       {onCopy&&first.text&&<div className={first.role==='user'?'user-actions':'assistant-actions'}><IconButton icon="copy" label={first.role==='user'?'复制消息文字':'复制回复文字'} onClick={()=>onCopy(first.text)}/></div>}
     </div>;
   });

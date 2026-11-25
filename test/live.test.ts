@@ -159,3 +159,41 @@ test('desktop patches inside the running turn stream; other patches still ask fo
     assert.deepEqual(patch([{op:'replace',path:['turns',1,'status'],value:'completed'}]),['change'],'Finishing the turn needs a read.');
   }finally{control.close();}
 });
+
+test('a Codex thread is followed through the subscription hub: words as patches, reads only for structure',async()=>{
+  const {ThreadHub}=await import('../src/connector/thread-hub.js');
+  let reads=0;
+  class Runtime extends EventEmitter{requests=new Map();turns:Json[]=[];async rpc(method:string,params:Json){
+    if(method==='thread/start')return {thread:{id:'t',cwd:'/p',turns:[]},model:'m',modelProvider:'openai'};
+    if(method==='thread/read'){reads++;return {thread:{id:params.threadId,cwd:'/p',turns:structuredClone(this.turns)}};}
+    if(method==='thread/unsubscribe')return {status:'notLoaded'};
+    return {};
+  }close(){}}
+  class Desktop extends EventEmitter{clientId='';states=new Map();async follow(){throw Error('none');}close(){}}
+  const runtime=new Runtime(),control=new Control(new Ledger(':memory:'),runtime as any,new Desktop() as any,async()=>[],()=>null);
+  control.livePush=true;
+  const frames:any[]=[],hub=new ThreadHub(frame=>{frames.push(frame);});
+  hub.register('codex',control.syncSource);
+  try{
+    assert.equal((await control.handle({id:randomUUID(),action:'session.create',payload:{cwd:process.cwd(),opId:`${Date.now()}:${randomUUID()}`}})).state,'accepted');
+    runtime.turns=[{id:'u0',status:'completed',items:[{id:'item-1',type:'agentMessage',text:'earlier'}]}];
+    const fire=(method:string,params:Json)=>runtime.emit('event',{method,params:{threadId:'t',...params}});
+    const snapshot=await hub.open({service:'codex',threadId:'t'});
+    assert.deepEqual(snapshot.order,['u0']);
+    assert.equal(snapshot.head.id,'t');
+    assert.equal('turns' in snapshot.head,false);
+    fire('turn/started',{turn:{id:'u1',status:'inProgress',items:[]}});
+    runtime.turns.push({id:'u1',status:'inProgress',items:[]});
+    fire('item/started',{turnId:'u1',item:{type:'agentMessage',id:'a1',text:''}});
+    await new Promise(resolve=>setTimeout(resolve,150));
+    assert.deepEqual(frames.flatMap(frame=>frame.entries||[]).map((entry:any)=>entry.id),['u1'],'A new turn arrives whole.');
+    const before=reads;
+    for(const delta of ['Hel','lo',' there']){fire('item/agentMessage/delta',{turnId:'u1',itemId:'a1',delta});await new Promise(resolve=>setTimeout(resolve,80));}
+    assert.equal(reads,before,'Words do not read the thread again.');
+    const text=frames.flatMap(frame=>frame.patches||[]).flatMap((patch:any)=>patch.ops).map((op:any)=>op.t??op.item?.text).join('');
+    assert.equal(text,'Hello there');
+    assert.deepEqual(frames.map(frame=>frame.seq),frames.map((_,index)=>snapshot.seq+index+1),'Frames are numbered without gaps.');
+    const page=await hub.page({service:'codex',threadId:'t',before:'u1',limit:5});
+    assert.deepEqual(page.order,['u0']);
+  }finally{hub.close();control.close();}
+});

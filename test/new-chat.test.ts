@@ -6,13 +6,13 @@ test('new chat creates then sends once to the confirmed session',async()=>{
   const calls:any[]=[];let saved='';
   const result=await createFirstTurn(async(action,payload)=>{
     calls.push({action,payload});
-    if(action==='session.create')return {state:'accepted',threadId:'s'};
-    if(action==='session.read'){assert.equal(saved,'s');return {canControl:true,activeTurnId:null,source:'connector',generation:'g'};}
+    if(action==='session.create')return {state:'accepted',threadId:'s',generation:'g'};
+    assert.equal(saved,'s');
     return {state:'accepted'};
   },input,id=>{saved=id;});
   assert.equal(result.stage,'send');assert.equal(result.result.state,'accepted');
-  assert.deepEqual(calls.map(c=>c.action),['session.create','session.read','turn.send']);
-  assert.equal(calls[2].payload.threadId,'s');assert.equal(calls[2].payload.opId,'send');assert.equal(calls[2].payload.generation,'g');
+  assert.deepEqual(calls.map(c=>c.action),['session.create','turn.send']);
+  assert.equal(calls[1].payload.threadId,'s');assert.equal(calls[1].payload.opId,'send');assert.equal(calls[1].payload.generation,'g');
 });
 test('new chat passes model and approval settings to thread creation and first turn',async()=>{
   const calls:any[]=[];

@@ -14,6 +14,13 @@ const assembled=({revision:_,...turn}:TurnView):TurnView=>turn;
  * not caught up to. Repeated text is skipped, so a frame that overlaps a newer
  * snapshot is harmless.
  */
+/** A replacement item keeps the sender the last read gave it; live frames from older connectors carry none. */
+const withSender=(old:MessageItem|undefined,item:MessageItem)=>item.sender||!old?.sender||old.id!==item.id?item:{...item,sender:old.sender};
+function keepSenders(old:TurnView,turn:TurnView):TurnView{
+  if(!old.items.some(item=>item.sender))return turn;
+  const known=new Map(old.items.map(item=>[item.id,item]));
+  return {...turn,items:turn.items.map(item=>withSender(known.get(item.id),item))};
+}
 export function applyLiveFrames(view:SessionView|null,frames:LiveFrame[]):{view:SessionView|null;resync:boolean} {
   let resync=false,turns=view?.turns,running=view?.running;
   for(const frame of frames) {
@@ -25,12 +32,12 @@ export function applyLiveFrames(view:SessionView|null,frames:LiveFrame[]):{view:
       if(frame.turn&&(!turns.length||turns.at(-1)!.status!=='inProgress')){turns=[...turns,assembled(frame.turn)];running=true;}
       resync=true;continue;
     }
-    if(frame.turn){turns=replaceAt(turns,index,assembled(frame.turn));continue;}
+    if(frame.turn){turns=replaceAt(turns,index,assembled(keepSenders(turns[index],frame.turn)));continue;}
     const turn=turns[index];let items=turn.items,changed=false;
     for(const op of frame.ops||[]) {
       const at=items.findIndex(item=>item.id===op.i);
       if(op.item) {
-        items=at<0?[...items,op.item as MessageItem]:replaceAt(items,at,op.item as MessageItem);changed=true;continue;
+        items=at<0?[...items,op.item as MessageItem]:replaceAt(items,at,withSender(items[at],op.item as MessageItem));changed=true;continue;
       }
       if(at<0||typeof op.o!=='number'||typeof op.t!=='string'){resync=true;continue;}
       const item=items[at],length=item.text.length;

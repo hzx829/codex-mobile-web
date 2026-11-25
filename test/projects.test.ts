@@ -9,6 +9,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {projectCatalog,indexedSessions} from '../src/connector/projects.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger} from '../src/connector/ledger.js';
+import {mergeProjectPaths} from '../src/shared/project-paths.js';
 import {BridgeError} from '../src/shared/types.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 
@@ -18,6 +19,12 @@ test('native projects keep desktop names and order, including empty or moved pro
   const projects=projectCatalog(state,{projects:{[a]:{},[c]:{trust_level:'trusted'}}});
   assert.deepEqual(projects,[{path:b,name:'我的项目'},{path:a,name:'旧名称'},{path:c,name:'cli-only-project'}]);
   assert.deepEqual(projectCatalog({'electron-saved-workspace-roots':[a],'electron-workspace-root-labels':{[a]:'自定义名称'}},{}),[{path:a,name:'自定义名称'}]);
+});
+
+test('project discovery merges Windows path aliases while keeping the supplied roots first',()=>{
+  const catalog=['D:\\lingan','\\\\Server\\Share\\invest','D:\\other\\lingan','/work/Case','/work/case'];
+  const discovered=['\\\\?\\D:\\lingan','d:/LINGAN/','\\\\?\\UNC\\server\\share\\invest','D:\\other\\project'];
+  assert.deepEqual(mergeProjectPaths([...catalog,...discovered]),[...catalog,'D:\\other\\project']);
 });
 
 test('session listing and reading do not require an allowed or existing directory',async()=>{
@@ -57,6 +64,11 @@ test('session index lists desktop-owned threads without asking app-server to ope
   for(let i=0;i<32;i++)insert.run(`thread-${i}`,null,`会话 ${i}`,`会话 ${i}`,process.platform==='win32'?`\\\\?\\${cwd}`:cwd,'model','openai',1000-i,0);
   insert.run('archived',null,'旧会话','旧会话',cwd,'model','openai',2000,1);
   insert.run('empty',null,null,null,cwd,'model','openai',3000,0);
+  const share='\\\\Server\\Share\\project',extendedShare='\\\\?\\UNC\\Server\\Share\\project';
+  if(process.platform==='win32'){
+    insert.run('unc',null,'网络目录','网络目录',share,'model','openai',2,0);
+    insert.run('unc-extended',null,'网络目录','网络目录',extendedShare,'model','openai',1,0);
+  }
   db.close();
   try{
     const first=indexedSessions({cwd,archived:false},home);
@@ -65,6 +77,9 @@ test('session index lists desktop-owned threads without asking app-server to ope
     assert.deepEqual(second.data.map(t=>t.id),['thread-30','thread-31']);assert.equal(second.nextCursor,null);
     assert.deepEqual(indexedSessions({cwd,archived:false,search:'会话 7'},home).data.map(t=>t.id),['thread-7']);
     assert.deepEqual(indexedSessions({cwd,archived:true},home).data.map(t=>t.id),['archived']);
+    if(process.platform==='win32')for(const alias of [share,extendedShare]){
+      assert.deepEqual(indexedSessions({cwd:alias,archived:false},home).data.map(t=>t.id),['unc','unc-extended']);
+    }
     assert.throws(()=>indexedSessions({archived:false,cursor:'wrong'},home),/分页标识/);
   }finally{await removeTestTemp(home);}
 });

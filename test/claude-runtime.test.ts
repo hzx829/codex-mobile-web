@@ -9,6 +9,9 @@ import {ClaudeCodeBridge} from '../src/connector/claude-code.js';
 import {ClaudeRuntime, claudeEnv, findClaude, userMessage, type QueryFn} from '../src/connector/claude-runtime.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
+import {readFile} from 'node:fs/promises';
+import {uploadAttachments} from '../web/file-upload.js';
+import {fileReference} from '../web/preview-target.js';
 
 const opId = () => `${Date.now()}:${randomUUID()}`;
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -49,6 +52,7 @@ function fakeClaude(projects: string) {
         if (text === 'ask') {
           answers.push(await options!.canUseTool!('AskUserQuestion', {questions: [{question: '用哪个数据库？', header: '数据库', multiSelect: false, options: [{label: 'SQLite', description: ''}, {label: 'Postgres', description: ''}]}]}, {signal: new AbortController().signal} as any));
         }
+        if (text === 'plan') answers.push(await options!.canUseTool!('ExitPlanMode', {plan: '1. 改代码'}, {signal: new AbortController().signal} as any));
         if (text === 'slow') await until(() => interrupted || closed, Boolean, 5000);
         await write({type: 'assistant', message: {id: 'r', role: 'assistant', model: 'claude-test', content: [{type: 'text', text: interrupted ? '已停止' : `好的：${text}`}]}});
         yield {type: 'assistant', session_id: id, message: {}};
@@ -60,8 +64,9 @@ function fakeClaude(projects: string) {
     const generator = run() as any;
     generator.interrupt = async () => {interrupted = true;calls.push({type: 'interrupt'});};
     generator.setModel = async (model: string) => {calls.push({type: 'model', model});};
+    generator.applyFlagSettings = async (settings: any) => {calls.push({type: 'settings', settings});};
     generator.setPermissionMode = async (mode: string) => {calls.push({type: 'mode', mode});};
-    generator.supportedModels = async () => [{value: 'opus', displayName: 'Opus', description: '最强'}, {value: 'sonnet', displayName: 'Sonnet', description: '均衡'}];
+    generator.supportedModels = async () => [{value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: '最强', supportsEffort: true, supportedEffortLevels: ['low', 'high', 'max']}, {value: 'sonnet', displayName: 'Sonnet', description: '均衡'}];
     generator.close = () => {closed = true;calls.push({type: 'close'});};
     return generator;
   };
@@ -84,26 +89,28 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
 
     // New session, with a model and image.
     const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-    const create = {cwd, text: '你好', images: [image], model: 'opus', permissionMode: 'acceptEdits', opId: opId()};
+    const create = {cwd, text: '你好', images: [image], model: 'opus', effort: 'high', permissionMode: 'acceptEdits', opId: opId()};
     const created = await bridge.handle('claude.create', create);
     assert.equal(created.state, 'accepted');
     const id = created.conversationId;
     assert.deepEqual(await bridge.handle('claude.create', create), created, 'retrying an operation never starts a second session');
     assert.equal(fake.calls.filter(call => call.type === 'start').length, 1);
-    assert.equal(fake.calls[0].options.model, 'opus');assert.equal(fake.calls[0].options.permissionMode, 'acceptEdits');
+    assert.equal(fake.calls[0].options.model, 'opus');assert.equal(fake.calls[0].options.effort, 'high');assert.equal(fake.calls[0].options.permissionMode, 'acceptEdits');
     assert.equal(fake.calls[0].options.env.CLAUDE_CODE_ENTRYPOINT, 'codex-mobile-web', 'an entrypoint the terminal resume list shows');
     assert.equal(fake.calls[0].options.cwd, cwd);
     assert.deepEqual(fake.calls[0].options.systemPrompt, {type: 'preset', preset: 'claude_code'});
     assert.equal(fake.calls[1].images, 1);
     let view = await until(() => read(id), value => !value.running && value.turns.length === 1);
     assert.equal(view.controlled, true);assert.equal(view.turns[0].items.at(-1).text, '好的：你好');
+    assert.equal(view.effort, 'high', 'the session reports the effort it was started with');
+    await assert.rejects(bridge.handle('claude.send', {conversationId: id, text: 'x', effort: 'extreme', opId: opId()}), /思考程度无效/);
 
     // Tool approval with "remember".
     assert.equal((await bridge.handle('claude.send', {conversationId: id, text: 'run npm test', opId: opId()})).state, 'accepted');
     view = await until(() => read(id), value => value.requests.length === 1);
     const firstRequestId = view.requests[0].id;
     assert.equal(view.running, true);
-    assert.deepEqual({kind: view.requests[0].kind, detail: view.requests[0].detail, canRemember: view.requests[0].canRemember}, {kind: 'permission', detail: 'npm test', canRemember: true});
+    assert.deepEqual({kind: view.requests[0].kind, detail: view.requests[0].detail, canRemember: view.requests[0].canRemember, rememberScope: view.requests[0].rememberScope}, {kind: 'permission', detail: 'npm test', canRemember: true, rememberScope: 'session'});
     const watched = bridge.handle('claude.watch', {conversationId: id, revision: view.revision});
     assert.equal((await bridge.handle('claude.respond', {conversationId: id, requestId: view.requests[0].id, decision: 'allowSession', opId: opId()})).state, 'accepted');
     assert.notEqual((await watched).revision, view.revision, 'an answered request wakes the phone without a transcript write');
@@ -121,20 +128,41 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
     assert.deepEqual(fake.answers[1].updatedInput.answers, {'用哪个数据库？': 'Postgres'});
     await until(() => read(id), value => !value.running);
 
-    // Queue behind a running task, steer, stop, and change model.
+    // Queue behind a running task on this computer, withdraw and delete queued messages, steer, send now, stop, and change model.
     await bridge.handle('claude.send', {conversationId: id, text: 'slow', opId: opId()});
     await until(() => read(id), value => value.running);
-    await bridge.handle('claude.send', {conversationId: id, text: '之后再做', opId: opId()});
-    await bridge.handle('claude.send', {conversationId: id, text: '顺便', mode: 'steer', model: 'sonnet', opId: opId()});
-    assert.equal((await read(id)).queued, true);
+    const queuedOp = opId();
+    assert.equal((await bridge.handle('claude.send', {conversationId: id, text: '之后再做', images: [image], model: 'opus', opId: queuedOp})).kind, 'queued');
+    await bridge.handle('claude.send', {conversationId: id, text: '撤回我', opId: opId()});
+    const dropOp = opId();
+    await bridge.handle('claude.send', {conversationId: id, text: '删掉我', opId: dropOp});
+    view = await read(id);
+    assert.deepEqual(view.queuedMessages.map((m: any) => [m.text, m.imageCount, m.state]), [['之后再做', 1, 'queued'], ['撤回我', 0, 'queued'], ['删掉我', 0, 'queued']]);
+    assert.equal(fake.calls.filter(call => call.type === 'message').at(-1).text, 'slow', 'queued messages stay on this computer while the turn runs');
+    const withdrawn = await bridge.handle('claude.withdrawQueued', {conversationId: id, queuedId: view.queuedMessages[1].id, opId: opId()});
+    assert.deepEqual([withdrawn.kind, withdrawn.message.text], ['queue_withdrawn', '撤回我']);
+    assert.equal((await bridge.handle('claude.cancelQueued', {conversationId: id, queuedId: dropOp, opId: opId()})).kind, 'queue_cancelled');
+    assert.equal((await bridge.handle('claude.operation', {opId: dropOp})).kind, 'queue_cancelled', 'a deleted message reads back as not sent');
+    assert.equal((await bridge.handle('claude.archive', {conversationId: id, opId: opId()})).state, 'failed', 'queued messages block archiving');
+    await bridge.handle('claude.send', {conversationId: id, text: '顺便', mode: 'steer', model: 'sonnet', effort: 'max', opId: opId()});
+    await bridge.handle('claude.send', {conversationId: id, text: '马上', mode: 'now', opId: opId()});
+    // A queued message can also interrupt the reply, from the queue.
+    const jumpOp = opId();
+    await bridge.handle('claude.send', {conversationId: id, text: '插队', opId: jumpOp});
+    await assert.rejects(bridge.handle('claude.steerQueued', {conversationId: id, queuedId: jumpOp, mode: 'queue', opId: opId()}), /发送方式无效/);
+    assert.equal((await bridge.handle('claude.steerQueued', {conversationId: id, queuedId: jumpOp, mode: 'now', opId: opId()})).kind, 'sent_now');
+    await assert.rejects(bridge.handle('claude.send', {conversationId: id, text: 'x', mode: 'later', opId: opId()}), /发送方式无效/, 'unknown send modes are refused');
     assert.equal((await bridge.handle('claude.stop', {conversationId: id, opId: opId()})).state, 'accepted');
-    await until(() => read(id), value => !value.running && !value.queued);
+    await until(() => read(id), value => !value.running && !value.queuedMessages.length);
     const messages = fake.calls.filter(call => call.type === 'message');
-    assert.deepEqual(messages.slice(-3).map(call => [call.text, call.priority]), [['slow', undefined], ['之后再做', 'later'], ['顺便', 'next']]);
+    assert.deepEqual(messages.slice(-5).map(call => [call.text, call.priority, call.images]),
+      [['slow', undefined, 0], ['顺便', 'next', 0], ['马上', 'now', 0], ['插队', 'now', 0], ['之后再做', undefined, 1]], 'the queued message goes out after the turn, with its image');
+    assert.equal((await bridge.handle('claude.operation', {opId: queuedOp})).submitted, true);
     assert.ok(fake.calls.some(call => call.type === 'model' && call.model === 'sonnet'));
+    assert.deepEqual(fake.calls.filter(call => call.type === 'settings').map(call => call.settings), [{effortLevel: 'max'}], 'a changed effort is applied to the running session, once');
     assert.ok(fake.calls.some(call => call.type === 'interrupt'));
     assert.equal((await read(id)).error, '', 'a requested stop is not reported as an error');
-    assert.deepEqual((await bridge.handle('claude.models', {})).models.map((m: any) => m.id), ['opus', 'sonnet']);
+    assert.deepEqual((await bridge.handle('claude.models', {})).models.map((m: any) => [m.id, m.resolvedModel, m.efforts]), [['opus', 'claude-opus-5-5', ['low', 'high', 'max']], ['sonnet', undefined, []]]);
 
     // Idle sessions are released so the terminal can resume them.
     await until(() => read(id), value => value.controlled === false, 15_000);
@@ -142,7 +170,7 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
 
     // Resuming a session someone just used elsewhere needs confirmation.
     const file = join(config, 'projects', 'work', id + '.jsonl');
-    const now = new Date();await utimes(file, now, now);
+    const now = new Date(Date.now() + 5000);await utimes(file, now, now);
     const blocked = await bridge.handle('claude.send', {conversationId: id, text: '继续', opId: opId()});
     assert.equal(blocked.state, 'failed');assert.equal(blocked.error.code, 'active');
     const beforeResume = fake.calls.filter(call => call.type === 'start').length;
@@ -174,6 +202,64 @@ test('phone drives Claude Code sessions: create, approve, answer, queue, stop an
   }
 });
 
+test('the connector default permission mode: skip prompts by default, and switch in and out while running', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-mode-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  const bridges: ClaudeCodeBridge[] = [];
+  try {
+    const config = join(root, 'config'), cwd = join(root, 'repo');
+    await mkdir(join(config, 'projects', 'work'), {recursive: true});await mkdir(cwd);
+    process.env.CLAUDE_CONFIG_DIR = config;
+
+    // Own computer: no mode chosen means skipping prompts, and the session may switch back and forth.
+    const fake = fakeClaude(join(config, 'projects'));
+    const bridge = new ClaudeCodeBridge(ledger, config, undefined, Date.now, new ClaudeRuntime(async () => fake.query, () => undefined, 60_000, undefined, 'bypassPermissions'));
+    bridges.push(bridge);
+    assert.equal((await bridge.handle('claude.list', {})).defaultPermissionMode, 'bypassPermissions');
+    const id = (await bridge.handle('claude.create', {cwd, text: '你好', opId: opId()})).conversationId;
+    assert.equal(fake.calls[0].options.permissionMode, 'bypassPermissions');
+    assert.equal(fake.calls[0].options.allowDangerouslySkipPermissions, true);
+    let view = await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 1);
+    assert.deepEqual([view.permissionMode, view.defaultPermissionMode, view.canBypass], ['bypassPermissions', 'bypassPermissions', true]);
+    await bridge.handle('claude.send', {conversationId: id, text: '慢一点', permissionMode: 'default', opId: opId()});
+    await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 2);
+    assert.equal((await bridge.handle('claude.send', {conversationId: id, text: '继续', permissionMode: 'bypassPermissions', opId: opId()})).state, 'accepted');
+    assert.deepEqual(fake.calls.filter(call => call.type === 'mode').map(call => call.mode), ['default', 'bypassPermissions']);
+    await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 3);
+
+    // An approved plan is carried out in the mode chosen on the phone, including the one the session left to plan.
+    await bridge.handle('claude.send', {conversationId: id, text: 'plan', permissionMode: 'plan', opId: opId()});
+    view = await until(() => bridge.handle('claude.read', {conversationId: id}), value => value.requests.length === 1);
+    assert.equal(view.requests[0].kind, 'plan');
+    assert.deepEqual(view.requests[0].implementModes, ['acceptEdits', 'default', 'bypassPermissions']);
+    const wrong = await bridge.handle('claude.respond', {conversationId: id, requestId: view.requests[0].id, decision: 'allow', mode: 'auto', opId: opId()});
+    assert.equal(wrong.state, 'failed', 'only an offered mode');
+    assert.equal((await bridge.handle('claude.respond', {conversationId: id, requestId: view.requests[0].id, decision: 'allow', mode: 'bypassPermissions', opId: opId()})).state, 'accepted');
+    assert.deepEqual(fake.answers.at(-1), {behavior: 'allow', updatedInput: {plan: '1. 改代码'}, updatedPermissions: [{type: 'setMode', mode: 'bypassPermissions', destination: 'session'}]});
+    assert.deepEqual(fake.calls.filter(call => call.type === 'mode').map(call => call.mode), ['default', 'bypassPermissions', 'plan', 'bypassPermissions']);
+    view = await until(() => bridge.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 4);
+    assert.equal(view.permissionMode, 'bypassPermissions');
+
+    // Claude Code's own default (a borrowed computer): skipping is only possible when the session starts with it.
+    const plain = fakeClaude(join(config, 'projects'));
+    const guarded = new ClaudeCodeBridge(ledger, config, undefined, Date.now, new ClaudeRuntime(async () => plain.query, () => undefined, 60_000));
+    bridges.push(guarded);
+    const other = (await guarded.handle('claude.create', {cwd, text: '你好', opId: opId()})).conversationId;
+    assert.equal(plain.calls[0].options.permissionMode, 'default');
+    assert.equal(plain.calls[0].options.allowDangerouslySkipPermissions, undefined);
+    view = await until(() => guarded.handle('claude.read', {conversationId: other}), value => !value.running && value.turns.length === 1);
+    assert.deepEqual([view.defaultPermissionMode, view.canBypass], ['default', false]);
+    const refused = await guarded.handle('claude.send', {conversationId: other, text: 'x', permissionMode: 'bypassPermissions', opId: opId()});
+    assert.equal(refused.state, 'failed');
+  } finally {
+    for (const bridge of bridges) bridge.close();
+    ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
 test('Claude Code executable and messages', () => {
   assert.equal(findClaude({CLAUDE_CODE_BIN: 'C:/tools/claude.exe'}, () => false, 'win32'), 'C:/tools/claude.exe');
   assert.equal(findClaude({PATH: 'C:\\a;C:\\b', USERPROFILE: 'C:\\Users\\me'}, path => path === join('C:\\b', 'claude.exe'), 'win32'), join('C:\\b', 'claude.exe'));
@@ -188,4 +274,45 @@ test('Claude Code executable and messages', () => {
   const message = userMessage('看图', ['data:image/png;base64,AAAA'], 'later');
   assert.deepEqual(message.message.content, [{type: 'image', source: {type: 'base64', media_type: 'image/png', data: 'AAAA'}}, {type: 'text', text: '看图'}]);
   assert.equal(message.priority, 'later');assert.deepEqual(message.origin, {kind: 'human'});
+});
+
+test('documents upload into the project and reach Claude Code as links, only in the scope they were uploaded for', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-files-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const config = join(root, 'config'), cwd = join(root, 'repo');
+    await mkdir(join(config, 'projects', 'work'), {recursive: true});await mkdir(cwd);
+    process.env.CLAUDE_CONFIG_DIR = config;
+    const fake = fakeClaude(join(config, 'projects'));
+    bridge = new ClaudeCodeBridge(ledger, config, undefined, Date.now, new ClaudeRuntime(async () => fake.query, () => undefined, 200));
+    const call = (action: any, payload: any) => bridge!.handle(action, payload);
+    const doc = (text: string) => ({id: randomUUID(), name: '需求.md', size: Buffer.byteLength(text), file: new File([text], '需求.md')});
+    const linked = (text: string) => [...text.matchAll(/\]\(<([^>]+)>\)/g)].map(match => fileReference(match[1]).path);
+    const messages = () => fake.calls.filter(item => item.type === 'message');
+
+    // Before the session exists the files belong to its project; with files the typed text may be empty.
+    const first = await uploadAttachments(call, {prefix: 'claude.', scope: {cwd}}, [doc('第一版')]);
+    const created = await bridge.handle('claude.create', {cwd, text: '', files: first, opId: opId()});
+    assert.equal(created.state, 'accepted', JSON.stringify(created));
+    const id = created.conversationId;
+    await until(() => messages().length, count => count === 1);
+    assert.equal(await readFile(linked(messages()[0].text)[0], 'utf8'), '第一版');
+    await until(() => bridge!.handle('claude.read', {conversationId: id}), value => !value.running);
+
+    const elsewhere = await bridge.handle('claude.send', {conversationId: id, text: '再看', files: first, opId: opId()});
+    assert.equal(elsewhere.state, 'failed');assert.match(elsewhere.error.message, /当前会话/);
+    const own = await uploadAttachments(call, {prefix: 'claude.', scope: {conversationId: id}}, [doc('第二版')]);
+    assert.equal((await bridge.handle('claude.send', {conversationId: id, text: '再看', files: own, opId: opId()})).state, 'accepted');
+    await until(() => messages().length, count => count === 2);
+    assert.match(messages()[1].text, /^再看\n\n附件/);
+    assert.equal(await readFile(linked(messages()[1].text)[0], 'utf8'), '第二版');
+    await until(() => bridge!.handle('claude.read', {conversationId: id}), value => !value.running);
+  } finally {
+    bridge?.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    ledger.close();
+    await removeTestTemp(root);
+  }
 });

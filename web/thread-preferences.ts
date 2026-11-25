@@ -1,4 +1,5 @@
 import type {Json} from '../src/shared/types';
+import {projectPathKey} from '../src/shared/project-paths';
 
 type SavedThread={id:string;title:string;cwd:string;updatedAt:number;archived:boolean};
 export type ThreadPreference={pinned?:boolean;unread?:boolean;section?:string;thread?:SavedThread};
@@ -9,8 +10,9 @@ export function saveThread(thread:Json,archived:boolean):SavedThread {
 // Keep locally organized threads visible even when they leave the most recent page.
 export function visibleThreads(threads:Json[],preferences:ThreadPreferences,project:string,archived:boolean,search:string):Json[] {
   const ids=new Set(threads.map(t=>t.id));
+  const projectKey=projectPathKey(project);
   const saved=Object.values(preferences).filter(p=>p.pinned||p.section).map(p=>p.thread).filter((t):t is SavedThread=>Boolean(t));
-  return [...threads,...saved.filter(t=>!ids.has(t.id)&&t.archived===archived&&(!project||t.cwd===project)&&(!search||t.title.toLocaleLowerCase().includes(search.toLocaleLowerCase())))];
+  return [...threads,...saved.filter(t=>!ids.has(t.id)&&t.archived===archived&&(!project||projectPathKey(t.cwd)===projectKey)&&(!search||t.title.toLocaleLowerCase().includes(search.toLocaleLowerCase())))];
 }
 export function rememberThreads(preferences:ThreadPreferences,threads:Json[],archived:boolean):ThreadPreferences {
   let next=preferences;

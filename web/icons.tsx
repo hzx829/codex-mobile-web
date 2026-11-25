@@ -1,5 +1,5 @@
 import type {ReactNode} from 'react';
-export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'undo'|'trash'|'diff';
+export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'redo'|'crop'|'trash'|'diff'|'team'|'bell'|'expand'|'collapse';
 // One line-icon family: 24-unit grid, 1.75 stroke, round joins. Drawn at 20 px by default.
 const paths:Record<IconName,ReactNode>={
   back:<path d="M19 12H5m6-6.5L4.5 12l6.5 6.5"/>,
@@ -12,13 +12,16 @@ const paths:Record<IconName,ReactNode>={
   mic:<><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></>,
   send:<path d="M12 19V5m-6 6 6-6 6 6"/>,
   steer:<path d="M12 20V9m-5 5 5-5 5 5M6 4.5h12"/>,
+  now:<path d="M13.5 3 5.5 13.5h6L10.5 21l8-10.5h-6Z"/>,
   undo:<path d="M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>,
+  redo:<path d="m15 14 5-5-5-5m5 5H9.5a5.5 5.5 0 0 0 0 11H13"/>,
+  crop:<path d="M6.5 2.5v13a2 2 0 0 0 2 2h13M2.5 6.5h13a2 2 0 0 1 2 2v13"/>,
   trash:<path d="M4 7h16M9.5 7V4.5h5V7M6 7l.9 11.6a1.5 1.5 0 0 0 1.5 1.4h7.2a1.5 1.5 0 0 0 1.5-1.4L18 7M10 11v5M14 11v5"/>,
   stop:<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>,
   chevron:<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>,
   close:<path d="M6.5 6.5l11 11m0-11-11 11"/>,
   refresh:<path d="M19.5 12A7.5 7.5 0 0 1 6.2 16.8M4.5 12A7.5 7.5 0 0 1 17.8 7.2M18 3.5v4h-4M6 20.5v-4h4"/>,
-  settings:<><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--icon-fill, #fff)"/><circle cx="15" cy="17" r="2.5" fill="var(--icon-fill, #fff)"/></>,
+  settings:<><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--icon-fill, var(--bg, #fff))"/><circle cx="15" cy="17" r="2.5" fill="var(--icon-fill, var(--bg, #fff))"/></>,
   file:<><path d="M13.5 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9Z"/><path d="M13.5 3.5V9H19"/></>,
   image:<><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m20.5 15.5-4.5-4.5-9.5 8.5"/></>,
   logout:<path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4M15 8l4 4-4 4M19 12H9"/>,
@@ -33,6 +36,10 @@ const paths:Record<IconName,ReactNode>={
   fork:<><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="7.5" r="2"/><path d="M6.5 7.5v9M17.5 9.5a5 5 0 0 1-5 5h-2a4 4 0 0 0-4 2"/></>,
   edit:<path d="M4.5 19.5h4l10.3-10.3a2.1 2.1 0 0 0-3-3L5.5 16.5Zm9.5-11.5 3 3"/>,
   diff:<><path d="M13.5 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9Z"/><path d="M12 9v5M9.5 11.5h5M9.5 17h5"/></>,
+  bell:<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15ZM10 20.5a2 2 0 0 0 4 0"/>,
+  expand:<path d="M14 4.5h5.5V10M10 19.5H4.5V14M19.5 4.5 13.5 10.5M4.5 19.5l6-6"/>,
+  collapse:<path d="M19.5 4.5l-6 6M13.5 6v4.5H18M4.5 19.5l6-6M10.5 18v-4.5H6"/>,
+  team:<><circle cx="9" cy="8.5" r="3.25"/><path d="M3.5 19.5a5.5 5.5 0 0 1 11 0"/><path d="M15.5 5.6a3.25 3.25 0 0 1 0 6.1M17.5 14.4a5.5 5.5 0 0 1 3 5.1"/></>,
 };
 export function Icon({name,size=20}:{name:IconName;size?:number}) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;

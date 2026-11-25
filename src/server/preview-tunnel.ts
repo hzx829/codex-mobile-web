@@ -42,6 +42,12 @@ export class PreviewTunnel {
     const session=this.sessions.get(id);
     if(session&&session.threadId===threadId&&session.connector===connector)this.stop(id,notify);
   }
+  /** Ends a phone's previews whose computer `keep` rejects (all of them without `keep`), and tells those computers to stop. */
+  stopPhone(phone:WebSocket,keep:(connector:WebSocket)=>boolean=()=>false){
+    for(const session of [...this.sessions.values()])if(session.phone===phone&&!keep(session.connector)){
+      this.stop(session.id,true);this.send(session.connector,{type:'preview.stop',sessionId:session.id,threadId:session.threadId});
+    }
+  }
   stopPeer(peer:WebSocket){
     for(const session of this.sessions.values())if(session.connector===peer)this.stop(session.id,true);
   }
@@ -97,7 +103,8 @@ export class PreviewTunnel {
     if(typeof headers.location==='string'){
       try{const local=new URL(targetUrl);const next=new URL(headers.location,local);if(next.origin===local.origin)headers.location=origin+next.pathname+next.search+next.hash;}catch{}
     }
-    if(headers['set-cookie'])headers['set-cookie']=(Array.isArray(headers['set-cookie'])?headers['set-cookie']:[headers['set-cookie']]).map((v:string)=>v.replace(/;\s*Domain=(?:localhost|127\.0\.0\.1)/ig,''));
+    // The page runs under the preview origin, so a cookie tied to the computer's own host name would be dropped.
+    if(headers['set-cookie'])headers['set-cookie']=(Array.isArray(headers['set-cookie'])?headers['set-cookie']:[headers['set-cookie']]).map((v:string)=>v.replace(/;\s*Domain=[^;]*/ig,''));
     return headers;
   }
   private async http(req:IncomingMessage,res:ServerResponse){

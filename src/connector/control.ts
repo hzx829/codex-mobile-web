@@ -7,19 +7,23 @@ import { Ledger } from './ledger.js';
 import { codexRetryText, desktopTurns, normalizeSession, normalizeTurn, turnPage } from './normalize.js';
 import { LiveDiff, RuntimeLive, type LiveFrame } from './live.js';
 import { approvalResult } from './approvals.js';
-import { createGuestProject, guestWorkspace, projectDirectory, readProjectFile, downloadProjectFile, workspaceProjects } from './project.js';
+import { createGuestProject, guestWorkspace, projectDirectory, readProjectFile, downloadProjectFile, openProjectDownload, workspaceProjects } from './project.js';
 import { nativeProjects, indexedSessions, indexedProjectPaths } from './projects.js';
-import { readPaginatedHistory } from './paginated-history.js';
+import { indexedTurnHasWriter, readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor, type TurnView } from '../shared/types.js';
 import {imageBytes} from '../shared/images.js';
 import {validateAttachments,uploadId,fileAttachment} from '../shared/attachments.js';
-import {startUpload,appendUpload,attachmentLinks} from './attachments.js';
+import {startUpload,appendUpload,attachmentLinks,UploadBody} from './attachments.js';
 import {contextUsage,accountLimits} from './usage.js';
+import {codexBase,codexTokens} from './usage-meter.js';
+import {markCodexSenders} from './message-senders.js';
 import {readModels,reasoningEffort} from './models.js';
 import {revertThread} from './revert.js';
 import {fastTier} from '../shared/models.js';
 import {transcribeVoice} from './voice.js';
 import {sessionSnapshot} from './session-snapshot.js';
+import type {ThreadSource} from './thread-hub.js';
+import {step,stepSync} from './trace.js';
 
 /** A phone keeps a thread watched by reading it; the poll renews well within this. */
 const WATCH_MS=30_000;
@@ -55,17 +59,25 @@ function approvalPolicy(value:unknown):'on-request'|'never'|undefined {
   throw new BridgeError('invalid','审批策略无效');
 }
 
+/** Turns a followed thread sends at a time (older ones come by page), and how often it is read again regardless. */
+const SYNC_WINDOW=20,SYNC_REREAD_MS=10_000;
 export class Control extends EventEmitter {
   bundleHash='';
   generation=randomUUID();
   /** Whether the relay forwards live frames; an older relay only forwards change notices. */
   livePush=true;
   private loaded=new Set<string>();
+  private newThreads=new Map<string,Json>();
+  private runtimeActive=new Set<string>();
   private settings=new Map<string,Json>();
   private diffs=new Map<string,string>();
   private starting=new Map<string,string>();
   private retries=new Map<string,{turnId:string;text:string}>();
   private contexts=new Map<string,ContextUsage|null>();
+  /** Turns started from a phone until they finish: the operation that started each, and for desktop turns the token total before it. */
+  private turnStarts=new Map<string,{threadId:string;opId:string;desktop:boolean;model:string;base?:Json;at:number}>();
+  /** Per running turn, Codex's cumulative token total before the turn and after its latest model call. */
+  private turnTokens=new Map<string,{threadId:string;base:Json;total:Json}>();
   private locks=new Map<string,Promise<unknown>>();
   private live=new RuntimeLive();
   private liveDiff=new LiveDiff();
@@ -78,7 +90,7 @@ export class Control extends EventEmitter {
   private closed=false;
   private restartTimer?:NodeJS.Timeout;
   private restartDelay=1000;
-  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions) {
+  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions,private externalTurnRunning=indexedTurnHasWriter) {
     super();
     runtime.on('event',(e:Json)=>{
       const {threadId,turnId}=e.params||{};
@@ -90,9 +102,20 @@ export class Control extends EventEmitter {
       if(retry&&(e.method==='thread/closed'||e.method==='turn/started'||e.method==='turn/completed'||
         retry.turnId===turnId&&(e.method==='item/started'||e.method==='item/agentMessage/delta'||e.method==='error'&&e.params.willRetry===false)))this.retries.delete(threadId);
       if(e.method==='turn/diff/updated')this.diffs.set(e.params.turnId,e.params.diff);
-      if(e.method==='turn/completed')this.starting.delete(e.params.threadId);
-      if(e.method==='thread/closed'){this.loaded.delete(e.params.threadId);this.starting.delete(e.params.threadId);}
-      if(e.method==='thread/tokenUsage/updated')this.contexts.set(e.params.threadId,contextUsage(e.params.tokenUsage));
+      if(e.method==='thread/status/changed') {
+        if(e.params.status?.type==='active')this.runtimeActive.add(threadId);
+        else this.runtimeActive.delete(threadId);
+      }
+      if(e.method==='turn/completed'||e.method==='thread/closed') {
+        this.starting.delete(threadId);this.newThreads.delete(threadId);this.runtimeActive.delete(threadId);
+      }
+      if(e.method==='thread/closed')this.loaded.delete(threadId);
+      if(e.method==='thread/tokenUsage/updated'){
+        this.contexts.set(e.params.threadId,contextUsage(e.params.tokenUsage));
+        const usage=e.params.tokenUsage;
+        if(threadId&&turnId&&usage?.total)this.turnTokens.set(turnId,{threadId,base:this.turnTokens.get(turnId)?.base??codexBase(usage.total,usage.last),total:usage.total});
+      }
+      if(e.method==='turn/completed'&&typeof e.params.turn?.id==='string')this.finishTurn(e.params.threadId,e.params.turn.id);
       if(e.method==='thread/compacted')this.contexts.delete(e.params.threadId);
       if(e.method==='thread/settings/updated')this.rememberSettings(e.params.threadId,e.params.threadSettings);
       if(e.method==='turn/completed')this.scheduleRelease(e.params.threadId);
@@ -100,8 +123,9 @@ export class Control extends EventEmitter {
       if(itemsOnly&&this.loaded.has(threadId)&&this.watched(threadId)&&hadRetry===this.retries.has(threadId))this.emit('stream',threadId);
       else this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
     });
-    runtime.on('offline',()=>{this.loaded.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.live.clear();this.liveDiff.clear();this.generation=randomUUID();this.emit('change',null);this.scheduleRestart();});
+    runtime.on('offline',()=>{this.turnTokens.clear();for(const [id,start] of this.turnStarts)if(!start.desktop)this.turnStarts.delete(id);this.loaded.clear();this.newThreads.clear();this.runtimeActive.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.live.clear();this.liveDiff.clear();this.generation=randomUUID();this.emit('change',null);this.scheduleRestart();});
     desktop.on('change',(id:string,detail?:Json)=>{
+      this.finishDesktopTurns(id);
       if(!this.loaded.has(id)&&this.watched(id)&&this.desktopItemsOnly(id,detail))this.emit('stream',id);
       else this.emit('change',id);
     });
@@ -138,7 +162,7 @@ export class Control extends EventEmitter {
     if(req.action==='file.uploadStart'||req.action==='file.uploadChunk'){
       const threadId=textRequired(p.threadId,'会话'),id=uploadId(p.id);
       return this.exclusive(`upload:${id}`,async()=>{
-        if(req.action==='file.uploadChunk')return appendUpload(this.ledger,threadId,id,p.offset,p.data);
+        if(req.action==='file.uploadChunk')return appendUpload(this.ledger,threadId,id,p.offset,p.body instanceof UploadBody?p.body:p.data);
         const session=await this.read(threadId,5);
         if(session.source==='history')throw new BridgeError('read_only',session.notice||'请先接入当前会话');
         return startUpload(this.ledger,threadId,session.cwd,p);
@@ -181,14 +205,23 @@ export class Control extends EventEmitter {
         const path=await projectDirectory(thread.cwd).catch(()=>undefined);
         return path?{...thread,cwd:path}:null;
       })):page.data;
-      return {...page,data:threads.flatMap(thread=>thread?[{...thread,status:this.desktop.states.get(thread.id)?.state.threadRuntimeStatus}]:[])};
+      const data=await Promise.all(threads.filter(thread=>thread!==null).map(async thread=>{
+        const id=thread.id;
+        if(this.loaded.has(id))return {...thread,status:this.runtimeActive.has(id)||this.starting.has(id)||this.live.has(id)?{type:'active'}:undefined};
+        const desktop=this.desktop.states.get(id)?.state,status=desktop?.threadRuntimeStatus;
+        if(status?.type==='active')return {...thread,status};
+        const running=Boolean(desktop&&liveLocation(desktop)?.turn.status==='inProgress')||await this.externalTurnRunning(id);
+        return {...thread,status:running?{type:'active'}:status};
+      }));
+      return {...page,data};
     }
     if(req.action==='session.read') {
       const cursor:TurnCursor|undefined=p.cursor==null?undefined:{before:textRequired(p.cursor.before,'历史位置',200)};
       if(cursor&&p.cursor.native!=null)cursor.native=textRequired(p.cursor.native,'历史游标',4000);
-      const view=await this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(1,Math.floor(Number(p.limit)||20))),cursor);
+      const view=await step('read',()=>this.read(textRequired(p.threadId,'会话'),Math.min(100,Math.max(1,Math.floor(Number(p.limit)||20))),cursor));
       if(!cursor&&p.watch===true){this.watch(view.id);this.liveDiff.prime(view.id,this.generation,view.turns.at(-1));}
-      return sessionSnapshot(view,cursor?undefined:p.known);
+      markCodexSenders(view.turns,this.ledger.senders('codex',view.id));
+      return stepSync('snapshot',()=>sessionSnapshot(view,cursor?undefined:p.known));
     }
     if(req.action==='session.status') {
       const session=await this.read(textRequired(p.threadId,'会话'),5);
@@ -200,7 +233,9 @@ export class Control extends EventEmitter {
     }
     if(req.action==='file.read'||req.action==='file.download') {
       const session=await this.read(textRequired(p.threadId,'会话'),5),path=textRequired(p.path,'文件路径');
-      return req.action==='file.read'?readProjectFile(session.cwd,path):downloadProjectFile(session.cwd,path,textRequired(p.revision,'文件版本',64),p.offset);
+      // `stream`: set only by the connector itself for a download through the relay's data channel (src/connector/blob.ts).
+      return req.action==='file.read'?readProjectFile(session.cwd,path):p.stream===true?openProjectDownload(session.cwd,path,textRequired(p.revision,'文件版本',64),p.range) as unknown as Json
+        :downloadProjectFile(session.cwd,path,textRequired(p.revision,'文件版本',64),p.offset);
     }
     throw new BridgeError('unsupported','此操作暂不支持');
   }
@@ -231,13 +266,21 @@ export class Control extends EventEmitter {
         if(e instanceof BridgeError&&e.code==='changed')throw e;
         const {raw,hasMore,notice,resumeUnavailable,nextCursor}=await this.runtimeThread(id,limit,cursor);
         nativeCursor=nextCursor;
-        const managed=Boolean(guestWorkspace()||this.ledger.owns(id))&&!resumeUnavailable;
+        const tail=raw.turns?.at(-1);
+        // An unloaded App Server may report an unfinished turn owned by another process as interrupted.
+        const tailId=tail?.id||tail?.turnId;
+        const externalRunning=!cursor&&raw.status?.type==='notLoaded'&&typeof tailId==='string'&&
+          (tail.status==='inProgress'||tail.status==='interrupted'&&tail.completedAt==null&&!tail.error)&&
+          await this.externalTurnRunning(id,tailId);
+        if(externalRunning)raw.turns=[...raw.turns.slice(0,-1),{...tail,status:'inProgress'}];
+        const managed=Boolean(guestWorkspace()||this.ledger.owns(id))&&!resumeUnavailable&&!externalRunning;
         for(const [key,value] of Object.entries(this.settings.get(id)||{}))if(raw[key]===undefined||raw[key]===null||raw[key]==='')raw[key]=value;
         view=normalizeSession(raw,managed?'connector':'history',[],limit);
         if(managed){view.contextUsage=this.contexts.get(id)||null;for(const turn of view.turns)turn.diff=this.diffs.get(turn.id)||turn.diff;}
         view.hasMore=hasMore||view.hasMore;
         view.resumeUnavailable=resumeUnavailable;
-        if(!managed)view.notice=guestWorkspace()?'这条会话的历史格式暂不支持继续。':notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
+        if(externalRunning)view.notice='此任务正在另一个 Codex 进程中运行，这里只能查看进度。';
+        else if(!managed)view.notice=guestWorkspace()?'这条会话的历史格式暂不支持继续。':notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
       }
     }
     if(guestWorkspace())view.cwd=await projectDirectory(view.cwd);
@@ -289,6 +332,9 @@ export class Control extends EventEmitter {
       const unsupportedTurns=e instanceof BridgeError&&/list_turns is not supported yet/i.test(e.message);
       if(!paginated&&!unsupportedTurns) {
         if(e instanceof BridgeError&&/not materialized yet/.test(e.message)) {
+          // A freshly created thread already has metadata, even before its rollout exists.
+          const created=!cursor?this.newThreads.get(id):undefined;
+          if(created)return {raw:{...created},hasMore:false};
           const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:false});
           return {raw:r.thread,hasMore:false};
         }
@@ -334,10 +380,56 @@ export class Control extends EventEmitter {
     if(until>=Date.now())return true;
     this.watchers.delete(id);this.liveDiff.forget(id);return false;
   }
+  /** Counts of changes per thread (structure, stream) and for all threads, which the subscription source's version follows. */
+  private syncCounts=new Map<string,{structure:number;stream:number}>();
+  private syncAll=0;
+  /** The last full read for each followed thread, reused until something besides the running turn's items changed. */
+  private syncReads=new Map<string,{key:string;value:Promise<SessionView>}>();
+  private syncCount(id:string){let count=this.syncCounts.get(id);if(!count){count={structure:0,stream:0};this.syncCounts.set(id,count);}return count;}
+  /** Which full read a thread's state comes from; changes every ten seconds as well, as the page's own refresh did. */
+  private syncKey(id:string){return `${this.generation}:${this.syncAll}:${this.syncCount(id).structure}:${Math.floor(Date.now()/SYNC_REREAD_MS)}`;}
+  private syncRead(id:string){
+    const key=this.syncKey(id),cached=this.syncReads.get(id);
+    if(cached?.key===key)return cached.value;
+    const value=this.read(id,SYNC_WINDOW).then(view=>{markCodexSenders(view.turns,this.ledger.senders('codex',view.id));return view;});
+    this.syncReads.delete(id);this.syncReads.set(id,{key,value});
+    if(this.syncReads.size>16)this.syncReads.delete(this.syncReads.keys().next().value!);
+    value.catch(()=>{if(this.syncReads.get(id)?.value===value)this.syncReads.delete(id);});
+    return value;
+  }
+  /**
+   * What the subscription hub (src/connector/thread-hub.ts) follows: the newest turns of a thread. A running turn's new
+   * words only change that turn, built from the runtime's notifications or the desktop's patches as live frames were,
+   * without reading the thread again.
+   */
+  readonly syncSource:ThreadSource={
+    window:SYNC_WINDOW,
+    version:async id=>{this.watch(id);const count=this.syncCount(id);return `${this.syncKey(id)}:${count.stream}`;},
+    state:async id=>{
+      this.watch(id);
+      const view=await this.syncRead(id),{turns,hasMore:_more,nextCursor:_cursor,...head}=view;
+      let entries:TurnView[]=turns;
+      const live=this.liveTurn(id),at=live?turns.findIndex(turn=>turn.id===live.id):-1;
+      if(live&&at>=0){markCodexSenders([live],this.ledger.senders('codex',id));entries=[...turns.slice(0,at),live,...turns.slice(at+1)];}
+      return {head,entries,hasMore:Boolean(view.hasMore)};
+    },
+    page:async(id,before,limit)=>{
+      const view=await this.read(id,limit,{before});
+      markCodexSenders(view.turns,this.ledger.senders('codex',view.id));
+      return {entries:view.turns,hasMore:Boolean(view.hasMore)};
+    },
+    watch:poke=>{
+      this.on('change',(id:string|null)=>{if(id){this.syncCount(id).structure++;poke(id);}else this.syncAll++;});
+      this.on('stream',(id:string)=>{if(id){this.syncCount(id).stream++;poke(id);}});
+    },
+  };
   /** The frame that brings watching phones to the current running turn, if it changed. */
   liveFrame(id:string):LiveFrame|null {
     if(!this.watched(id))return null;
-    return this.liveDiff.frame(id,this.generation,this.liveTurn(id));
+    // A frame may carry the whole turn, which replaces the phone's copy; it keeps the senders a read showed.
+    const turn=this.liveTurn(id);
+    if(turn)markCodexSenders([turn],this.ledger.senders('codex',id));
+    return this.liveDiff.frame(id,this.generation,turn);
   }
   /** The running turn as the phone shows it, built without reading the thread; null when that is not possible. */
   liveTurn(id:string):TurnView|null {
@@ -394,7 +486,8 @@ export class Control extends EventEmitter {
       const policy=approvalPolicy(p.approvalPolicy);if(policy)options.approvalPolicy=policy;
       const r=await this.runtime.rpc('thread/start',options);
       this.loaded.add(r.thread.id);this.ledger.claim(r.thread.id);this.settings.set(r.thread.id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy||policy,sessionId:r.thread.sessionId||r.thread.id});
-      this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider};
+      this.newThreads.set(r.thread.id,{...r.thread,turns:[]});
+      this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider,generation:this.generation};
     }
     const id=textRequired(p.threadId,'会话');
     if(action==='turn.cancelQueued'||action==='turn.withdrawQueued') {
@@ -449,18 +542,18 @@ export class Control extends EventEmitter {
       await this.runtime.rpc('thread/unarchive',{threadId:id});
       this.emit('change',id);return {threadId:id,archived:false};
     }
-    const session=await this.read(id);
+    const session=await this.read(id,action==='turn.send'?1:undefined);
     if(action==='session.archive') {
       if(session.running)throw new BridgeError('active','请等当前任务结束后再归档');
       if(this.ledger.queued(id).length)throw new BridgeError('active','请先处理排队消息再归档');
       await this.runtime.rpc('thread/archive',{threadId:id});
-      this.loaded.delete(id);this.settings.delete(id);this.contexts.delete(id);
+      this.loaded.delete(id);this.newThreads.delete(id);this.runtimeActive.delete(id);this.settings.delete(id);this.contexts.delete(id);
       this.emit('change',id);return {threadId:id,archived:true};
     }
     if(action==='session.resume') {
       if(session.source!=='history')throw new BridgeError('already_connected','会话已经接入，请刷新后直接发送');
       if(session.resumeUnavailable)throw new BridgeError('unsupported','此分页会话暂不能在连接器中继续，请在 Codex 桌面操作');
-      if(!p.confirmIdle||session.activeTurnId)throw new BridgeError('active','请先在电脑结束原任务，再继续会话');
+      if(!p.confirmIdle||session.running)throw new BridgeError('active','请先在电脑结束原任务，再继续会话');
       const r=await this.runtime.rpc('thread/resume',{threadId:id});
       this.loaded.add(id);this.ledger.claim(id);this.settings.set(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy,sessionId:r.thread?.sessionId||id});this.emit('change',id);return {threadId:id,model:r.model,provider:r.modelProvider};
     }
@@ -477,11 +570,12 @@ export class Control extends EventEmitter {
       // Resume by ID: app-server's native ownership lock rejects another application's active thread.
       const r=await this.runtime.rpc('thread/resume',{threadId:id});
       this.loaded.add(id);this.rememberSettings(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy});
-      const connected=await this.read(id);
+      const connected=await this.read(id,1);
       if(connected.running||connected.activeTurnId!==session.activeTurnId)throw new BridgeError('changed','任务已发生变化，输入已保留，请刷新后发送');
     }
     const context={conversationId:id,hostId:this.desktop.states.get(id)?.hostId||'local'};
-    if(session.source==='desktop')await this.desktop.request('thread-owner-discovery',context,1500);
+    // A send is routed directly to the desktop owner by the follower request.
+    if(session.source==='desktop'&&action!=='turn.send')await this.desktop.request('thread-owner-discovery',context,1500);
     if(action==='turn.edit') {
       if(session.running||p.expectedTurnId!==session.activeTurnId)throw new BridgeError('active','请等当前任务结束后再编辑');
       const turnId=textRequired(p.turnId,'轮次',200),itemId=textRequired(p.itemId,'消息',200),text=textRequired(p.text,'输入');
@@ -507,7 +601,7 @@ export class Control extends EventEmitter {
         this.loaded.add(id);
         this.contexts.delete(id);
         for(const turn of raw.turns.slice(-numTurns))this.diffs.delete(turn.id||turn.turnId);
-        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input,...settings});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);this.rememberSettings(id,settings);}
+        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input,...settings});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);this.startTurn(id,result.turn.id,p.opId,false,settings.model||session.model);this.ledger.recordSender({service:'codex',threadId:id,opId:p.opId,kind:'start',turnId:result.turn.id});this.rememberSettings(id,settings);}
         catch {this.emit('change',id);throw new BridgeError('partial','后续聊天已回退，但重发未获确认。请刷新会话核实后再发送。',true);}
       }
       this.emit('change',id);return {threadId:id,kind:'edited'};
@@ -537,11 +631,15 @@ export class Control extends EventEmitter {
         const started=result?.result?.turn?.id||result?.turn?.id;
         if(!started)throw new BridgeError('unexpected','发送结果未返回轮次，请刷新会话核实',true);
         this.starting.set(id,started);
+        this.startTurn(id,started,p.opId,session.source==='desktop',settings.model||session.model);
         if(session.source==='connector') {
           this.rememberSettings(id,settings);
           void this.refreshDesktop(id);
         }
       }
+      // The message joins the running turn (steer) or starts the new one; either way its sender is remembered by that turn.
+      const sentTurn=session.activeTurnId||result?.result?.turn?.id||result?.turn?.id;
+      if(sentTurn)this.ledger.recordSender({service:'codex',threadId:id,opId:p.opId,kind:session.activeTurnId?'steer':'start',turnId:sentTurn});
       this.emit('change',id);
       return {threadId:id,turnId:result?.result?.turn?.id||result?.turn?.id||result?.result?.turnId||result?.turnId||session.activeTurnId||null,kind:session.activeTurnId?'steer_accepted':'turn_accepted'};
     }
@@ -640,6 +738,32 @@ export class Control extends EventEmitter {
       else input.unshift({type:'text',text:attachments,text_elements:[]});
     }
     return input;
+  }
+  /** Remembers who started a turn; a desktop turn also keeps the token total it starts from. */
+  private startTurn(threadId:string,turnId:string,opId:string,desktop:boolean,model:string){
+    const now=Date.now();
+    for(const [id,start] of this.turnStarts)if(now-start.at>12*3600_000)this.turnStarts.delete(id);
+    const base=desktop?this.desktop.states.get(threadId)?.state?.latestTokenUsageInfo?.total:undefined;
+    this.turnStarts.set(turnId,{threadId,opId,desktop,model:model||'',base,at:now});
+  }
+  /** Records a finished Codex turn with the tokens it used, when known. */
+  private finishTurn(threadId:string,turnId:string,total?:Json){
+    const start=this.turnStarts.get(turnId),tokens=this.turnTokens.get(turnId);
+    this.turnStarts.delete(turnId);this.turnTokens.delete(turnId);
+    if(!start&&!tokens)return;
+    const model=start?.model||this.settings.get(threadId)?.model||'';
+    const base=tokens?.base??start?.base,end=tokens?.total??total;
+    try{this.ledger.recordUsage({id:`codex:${threadId}:${turnId}`,service:'codex',threadId,turnId,opId:start?.opId,models:base&&end?[codexTokens(model,base,end)]:[]});}
+    catch(error){console.error('用量记录失败：',(error as Error).message);}
+  }
+  /** Desktop turns end in the desktop's snapshot, which also carries the thread's token total. */
+  private finishDesktopTurns(threadId:string){
+    for(const [turnId,start] of this.turnStarts){
+      if(!start.desktop||start.threadId!==threadId)continue;
+      const state=this.desktop.states.get(threadId)?.state;if(!state)continue;
+      const turn=desktopTurns(state).find(item=>(item.turnId||item.id)===turnId);
+      if(turn&&turnFinished(turn.status))this.finishTurn(threadId,turnId,state.latestTokenUsageInfo?.total);
+    }
   }
   async drainQueue() {
     if(this.draining||this.reloading||this.closed)return;

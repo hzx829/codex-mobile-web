@@ -1,24 +1,35 @@
+/* The picker's own blue; style.css holds the shared tokens. */
+:root { --accent: #2563eb; --accent-bg: #eff5ff; --warn-bg: #fff4e5; }
+@media (prefers-color-scheme: dark) { :root { --accent: #7aa7ff; --accent-bg: #1e2a44; --warn-bg: #3a2a14; } }
 .thread-menu.model-picker { width: min(280px, calc(100vw - 24px)); padding: 8px 10px; border-radius: 20px; box-shadow: 0 6px 24px #0002; }
 .model-picker-controls { display: grid; grid-template-columns: 36px minmax(0, 1fr) 36px; align-items: start; gap: 4px; }
 .model-picker-controls > button { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border-radius: 10px; color: var(--muted); }
-.model-picker-speed.active { color: #2563eb; background: #eff5ff; }
+.model-picker-speed.active { color: var(--accent); background: var(--accent-bg); }
 .model-picker-current { display: grid; justify-items: center; min-width: 0; padding-top: 4px; }
-.model-picker-current > strong { color: #3076e8; font-size: 14px; font-weight: 600; line-height: 20px; }
+.model-picker-current > strong { color: var(--accent); font-size: 14px; font-weight: 600; line-height: 20px; }
+.model-picker-current > strong > small { margin-left: 6px; padding: 1px 5px; border-radius: 4px; background: var(--panel); color: var(--muted); font-size: 11px; font-weight: 500; vertical-align: 1px; }
 .model-picker-current .model-picker-model { display: flex; align-items: center; justify-content: center; gap: 2px; max-width: 100%; min-height: 30px; padding: 1px 3px; color: var(--muted); font-size: 12px; border-radius: 6px; }
 .model-picker-model > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-picker-model > svg { flex: none; }
 .model-picker-effort { position: relative; height: 40px; margin: 0 1px; }
-.model-picker-track { position: absolute; inset: 8px 0; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-radius: 999px; background: linear-gradient(to right, #3d82f6 var(--effort-progress), #e8e8e8 var(--effort-progress)); pointer-events: none; }
-.model-picker-track > i { width: 4px; height: 4px; border-radius: 50%; background: #b7b7b7; }
+.model-picker-track { position: absolute; inset: 8px 0; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-radius: 999px; background: linear-gradient(to right, #3d82f6 var(--effort-progress), var(--disabled) var(--effort-progress)); pointer-events: none; }
+.model-picker-track > i { width: 4px; height: 4px; border-radius: 50%; background: var(--fg-3); }
 .model-picker-track > i.filled { background: #ffffff80; }
 .model-picker .model-picker-slider { position: absolute; inset: 0; width: 100%; height: 40px; margin: 0; padding: 0; appearance: none; -webkit-appearance: none; background: transparent; border: 0; border-radius: 12px; cursor: pointer; touch-action: pan-y; }
 .model-picker-slider::-webkit-slider-runnable-track { height: 24px; background: transparent; }
 .model-picker-slider::-moz-range-track { height: 24px; background: transparent; }
-.model-picker-slider::-webkit-slider-thumb { width: 28px; height: 28px; margin-top: -2px; appearance: none; -webkit-appearance: none; background: #fff; border: 1px solid #00000012; border-radius: 50%; box-shadow: 0 1px 3px #0002; }
-.model-picker-slider::-moz-range-thumb { width: 26px; height: 26px; background: #fff; border: 1px solid #00000012; border-radius: 50%; box-shadow: 0 1px 3px #0002; }
+.model-picker-slider::-webkit-slider-thumb { width: 28px; height: 28px; margin-top: -2px; appearance: none; -webkit-appearance: none; background: var(--raised); border: 1px solid rgb(var(--ink) / 0.07); border-radius: 50%; box-shadow: 0 1px 3px #0002; }
+.model-picker-slider::-moz-range-thumb { width: 26px; height: 26px; background: var(--raised); border: 1px solid rgb(var(--ink) / 0.07); border-radius: 50%; box-shadow: 0 1px 3px #0002; }
 .model-picker :focus-visible { outline: 2px solid #3d82f6; outline-offset: 2px; }
 .model-picker-options { display: grid; gap: 2px; margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--line); max-height: min(300px, 45dvh); overflow-y: auto; overscroll-behavior: contain; }
 .model-picker-options > button { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 10px; border-radius: 10px; text-align: left; font-size: 13px; }
 .model-picker-options > button > span { flex: 1; }
-.model-picker-options > button[aria-pressed="true"] { color: #2563eb; background: #eff5ff; }
+.model-picker-options > button[aria-pressed="true"] { color: var(--accent); background: var(--accent-bg); }
 @media (hover: hover) { .model-picker-options > button:hover, .model-picker-controls > button:not(:disabled):hover, .model-picker-model:not(:disabled):hover { background: var(--panel); } }
+/* A plain list: models only (Claude Code, Antigravity) or permission levels. */
+.model-picker-options.plain { margin-top: 0; padding-top: 0; border-top: 0; }
+.permission-picker-title { margin: 2px 4px 4px; font-size: 12px; color: var(--fg-3); }
+.model-picker-options small { display: block; margin-top: 1px; color: var(--fg-3); font-size: 12px; line-height: 1.4; }
+.model-picker-options > button.elevated { color: var(--warn); }
+.model-picker-options > button.elevated[aria-pressed="true"] { color: var(--warn); background: var(--warn-bg); }
+.model-picker > p { margin: 6px 10px 2px; color: var(--fg-3); font-size: 12px; }

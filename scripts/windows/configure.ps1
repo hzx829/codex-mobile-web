@@ -14,7 +14,7 @@ function Assert-Stopped {
     $recordedId=Get-Content -LiteralPath $pidFile
     if($recordedId -notmatch '^\d+$'){throw '进程记录无效，请检查 .local 目录。'}
     $proc=Get-CimInstance Win32_Process -Filter "ProcessId=$recordedId" -ErrorAction SilentlyContinue
-    if($proc -and $proc.CommandLine -and $proc.CommandLine.Contains((Join-Path $projectRoot "build\$entry.mjs"))){throw '请先完成电脑任务并运行 stop.cmd，再修改连接配置。停止服务会结束连接器管理的任务。'}
+    if($proc -and $proc.CommandLine -and $proc.CommandLine.Contains((Join-Path $projectRoot "build\$entry.mjs"))){throw '请先完成电脑任务并停止服务（托盘图标菜单或 stop.cmd），再修改连接配置。停止服务会结束连接器管理的任务。'}
   }
 }
 function Invoke-Setup([string]$SetupArguments,[string]$Payload='') {
@@ -101,7 +101,7 @@ Add-Label 'Codex 程序（留空自动识别）'
 $bin=Add-Path $false;$bin.Text=$settings.codexBin
 Add-Label 'Codex 配置目录（留空沿用当前用户）'
 $codexDirectory=Add-Path $true;$codexDirectory.Text=$settings.codexHome
-Add-Label '保存后双击 start.cmd 启动。此处不修改模型、Key 或原生会话。'
+Add-Label '保存后自动启动服务。此处不修改模型、Key 或原生会话。'
 $save=New-Object System.Windows.Forms.Button;$save.Text='保存配置';$save.Height=40;$save.Dock='Top'
 $save.Add_Click({
   $save.Enabled=$false;$form.UseWaitCursor=$true

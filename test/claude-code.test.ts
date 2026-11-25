@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp, mkdir, writeFile, utimes} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {claudeArtifactTitles, claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
+import {claudeArtifactTitles, claudeRecordedSettings, claudeTranscriptCwd, claudeTurns, toolActivity} from '../src/connector/claude-transcript.js';
 import {ClaudeCodeBridge} from '../src/connector/claude-code.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 import {Ledger} from '../src/connector/ledger.js';
@@ -58,6 +58,65 @@ test('Claude Code transcripts become Codex-style turns', () => {
   assert.equal(claudeTurns([{type: 'user', uuid: 'u', message: {content: 'hi'}}], true)[0].status, 'inProgress');
   assert.equal(toolActivity({name: 'TodoWrite', input: {todos: [{content: 'a', status: 'completed'}, {content: 'b', status: 'pending'}]}}).text, '[x] a\n[ ] b');
   assert.equal(toolActivity({name: 'mcp__x__y', input: {q: 1}}).type, 'toolCall');
+});
+
+test('a background task notification is a status line, not something the user typed', () => {
+  const notice = '<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_9</tool-use-id>\n<output-file>C:\\tmp\\b1.output</output-file>\n'
+    + '<status>completed</status>\n<summary>Background command "Run evals" completed (exit code 0)</summary>\n</task-notification>';
+  const turns = claudeTurns([
+    {type: 'user', uuid: 'u1', message: {role: 'user', content: '跑一下评测'}},
+    {type: 'assistant', uuid: 'a1', message: {role: 'assistant', content: [{type: 'text', text: '已在后台运行。'}]}},
+    {type: 'user', uuid: 'u2', message: {role: 'user', content: notice}},
+    {type: 'assistant', uuid: 'a2', message: {role: 'assistant', content: [{type: 'text', text: '评测通过。'}]}},
+  ]);
+  assert.equal(turns.length, 1);
+  assert.deepEqual(turns[0].items.map(item => [item.role, item.text]), [
+    ['user', '跑一下评测'], ['assistant', '已在后台运行。'], ['status', 'Background command "Run evals" completed (exit code 0)'], ['assistant', '评测通过。'],
+  ]);
+});
+
+test('a compaction summary and other injected messages are not shown as the user’s input', () => {
+  const summary = 'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary: …';
+  const turns = claudeTurns([
+    {type: 'user', uuid: 'u1', message: {role: 'user', content: '重构一下'}},
+    {type: 'system', uuid: 's1', message: undefined},
+    {type: 'user', uuid: 'u2', message: {role: 'user', content: summary}},
+    {type: 'user', uuid: 'u3', message: {role: 'user', content: '<artifact-content-authored-by-others/>\nThe summarized conversation included Artifact content written by people other than you.\n' + summary}},
+    {type: 'user', uuid: 'u4', message: {role: 'user', content: 'Another Claude session sent a message:\n<agent-message from="a1">\n[Subagent hand-back] The report follows:\n  done\n</agent-message>'}},
+    {type: 'user', uuid: 'u5', message: {role: 'user', content: '<ci-monitor-event>Auto-fix enabled.</ci-monitor-event>'}},
+    {type: 'assistant', uuid: 'a1', message: {role: 'assistant', content: [{type: 'text', text: '继续。'}]}},
+  ]);
+  assert.equal(turns.length, 1);
+  assert.deepEqual(turns[0].items.map(item => [item.role, item.text]), [
+    ['user', '重构一下'], ['activity', '整理上下文'], ['status', '子 Agent 已交回结果'], ['status', 'CI 监控通知'], ['assistant', '继续。'],
+  ]);
+  // The desktop app's context ahead of a prompt is left out; its Create PR button shows as such.
+  const prompts = claudeTurns([
+    {type: 'user', uuid: 'p1', message: {role: 'user', content: [{type: 'text', text: '<system-reminder>\nScratch workspace.\n</system-reminder>\n'}, {type: 'text', text: '环境有什么区别？'}]}},
+    {type: 'user', uuid: 'p2', message: {role: 'user', content: '<artifact-view-context artifact="x">\n{}\n<artifact-content-authored-by-others/>\n</artifact-view-context>\n\ncommit 吧'}},
+    {type: 'user', uuid: 'p3', message: {role: 'user', content: '<create-pr-command>\n## Overview\n</create-pr-command>'}},
+    {type: 'user', uuid: 'p4', message: {role: 'user', content: '<agent-message from="a1">\nhi\n</agent-message>'}},
+  ]).flatMap(turn => turn.items.map(item => [item.role, item.text]));
+  assert.deepEqual(prompts, [['user', '环境有什么区别？'], ['user', 'commit 吧'], ['user', '创建 PR'], ['status', '收到另一个 Claude 会话的消息']]);
+});
+
+test('a session’s model, effort and permission mode are read from the latest entries that record them', () => {
+  const line = (entry: object) => JSON.stringify(entry);
+  const reply = (model: string, extra: object = {}) => line({type: 'assistant', ...extra, message: {role: 'assistant', model, content: []}});
+  const transcript = [
+    line({type: 'user', permissionMode: 'default', message: {role: 'user', content: '先看看'}}),
+    reply('claude-sonnet-4-5', {effort: 'high', perTurnEffort: 'high'}),
+    line({type: 'user', permissionMode: 'auto', message: {role: 'user', content: '继续'}}),
+    line({type: 'api-request', body: {model: 'claude-haiku-4-5', output_config: {effort: 'low'}}}),
+    reply('claude-opus-5-5', {effort: 'xhigh', perTurnEffort: 'xhigh'}),
+    reply('claude-haiku-4-5', {isSidechain: true, effort: 'low'}),
+    reply('<synthetic>'),
+    line({type: 'user', message: {role: 'user', content: [{type: 'tool_result', tool_use_id: 't', content: 'ok'}]}}),
+  ].join('\n');
+  assert.deepEqual(claudeRecordedSettings(transcript), {model: 'claude-opus-5-5', effort: 'xhigh', permissionMode: 'auto'});
+  // An older transcript without them says nothing, rather than guessing.
+  assert.deepEqual(claudeRecordedSettings(reply('claude-opus-5-5')), {model: 'claude-opus-5-5', effort: '', permissionMode: ''});
+  assert.deepEqual(claudeRecordedSettings(''), {model: '', effort: '', permissionMode: ''});
 });
 
 test('connector lists, reads and watches Claude Code sessions from the local transcripts', async () => {
@@ -138,6 +197,10 @@ test('connector forks, copies, renames and archives Claude Code sessions with th
     assert.equal(branch.title, '修复登录 bug（分叉）');
     assert.equal(branch.turns.length, 1);
     assert.deepEqual(branch.turns[0].items.map((item: any) => item.text), view.turns[0].items.map((item: any) => item.text));
+    // The connector wrote the new transcript itself just now; no terminal is running it.
+    assert.equal(branch.external, false);assert.equal(branch.running, false);
+    assert.notEqual(branch.turns.at(-1).status, 'inProgress');
+    assert.equal((await bridge.handle('claude.list', {refresh: true})).data.find((item: any) => item.id === forked.conversationId).running, false);
 
     const copy = await run('claude.fork', {});
     assert.equal((await bridge.handle('claude.read', {conversationId: copy.conversationId})).turns.length, 3);
@@ -145,7 +208,9 @@ test('connector forks, copies, renames and archives Claude Code sessions with th
     assert.equal(missing.state, 'failed');
 
     await run('claude.rename', {title: '登录问题'});
-    assert.equal((await bridge.handle('claude.read', {conversationId: sid})).title, '登录问题');
+    const renamed = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(renamed.title, '登录问题');assert.equal(renamed.external, false);assert.equal(renamed.running, false);
+    assert.equal((await bridge.handle('claude.list', {refresh: true})).data.find((item: any) => item.id === sid).running, false);
     await run('claude.archive', {});
     const list = await bridge.handle('claude.list', {refresh: true});
     assert.equal(list.data.some((item: any) => item.id === sid), false);
@@ -212,6 +277,125 @@ test('editing a message resumes the session from the turn before it, with diffs 
   }
 });
 
+test('a session run in the desktop app shows its own settings and keeps them when the phone continues it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    // As the desktop app writes it: effort on each reply, the permission mode on each prompt.
+    const lines = transcript(cwd).trim().split('\n').map(line => {
+      const entry = JSON.parse(line);
+      if (entry.type === 'assistant') {Object.assign(entry, {effort: 'xhigh', perTurnEffort: 'xhigh'});entry.message.model = 'claude-opus-5-5';}
+      if (entry.type === 'user' && typeof entry.message.content === 'string' && !entry.message.content.startsWith('<')) entry.permissionMode = 'bypassPermissions';
+      return JSON.stringify(entry);
+    });
+    await writeFile(file, lines.join('\n') + '\n');
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const starts: any[] = [];
+    let fallback = 'claude-sonnet-4-5';
+    const query: QueryFn = ({prompt, options}) => {
+      // Reading the model list starts Claude Code briefly too; only resumes are kept.
+      if (options?.resume) starts.push(options);
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const _ of prompt) yield {type: 'result', subtype: 'success', session_id: sid, errors: []};
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      generator.supportedModels = async () => [{value: 'default', displayName: 'Default', description: '', resolvedModel: fallback}];
+      return generator;
+    };
+    const runtime = new ClaudeRuntime(async () => query, () => undefined, 60_000);
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, runtime);
+    const view = await bridge.handle('claude.read', {conversationId: sid});
+    assert.deepEqual([view.model, view.effort, view.permissionMode], ['claude-opus-5-5', 'xhigh', 'bypassPermissions']);
+
+    let n = 0;
+    const opId = () => `${Date.now()}:a1b2c3d4-0000-4000-8000-${String(++n).padStart(12, '0')}`;
+    // Claude Code's default is another model, so the session's own model, level and mode are named.
+    assert.equal((await bridge.handle('claude.send', {conversationId: sid, text: '继续', opId: opId()})).state, 'accepted');
+    assert.deepEqual([starts[0].resume, starts[0].model, starts[0].effort, starts[0].permissionMode, starts[0].allowDangerouslySkipPermissions],
+      [sid, 'claude-opus-5-5', 'xhigh', 'bypassPermissions', true]);
+    const live = await bridge.handle('claude.read', {conversationId: sid});
+    assert.deepEqual([live.model, live.effort, live.permissionMode], ['claude-opus-5-5', 'xhigh', 'bypassPermissions']);
+
+    // Editing restarts the session; what the phone picks wins, the rest is kept. A default resolving to the session's own
+    // model (here an alias with a context suffix) is left in use.
+    fallback = 'claude-opus-5-5[1m]';
+    (runtime as any).models = undefined;
+    const turn = live.turns.at(-1);
+    assert.equal((await bridge.handle('claude.edit', {conversationId: sid, opId: opId(), turnId: turn.id, text: '只跑单元测试', effort: 'high'})).state, 'accepted');
+    assert.deepEqual([starts[1].model, starts[1].effort, starts[1].permissionMode], [undefined, 'high', 'bypassPermissions']);
+  } finally {
+    bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('a session whose first prompt carries a large image still resumes in its own folder', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    // As Claude Code writes it: the image comes first and the entry's cwd after it, past the SDK's 64 KiB head.
+    const [first, ...rest] = transcript(cwd).trim().split('\n').map(line => JSON.parse(line));
+    const {cwd: _, ...head} = first;
+    const image = {type: 'image', source: {type: 'base64', media_type: 'image/jpeg', data: 'A'.repeat(100_000)}};
+    const lines = [{...head, message: {role: 'user', content: [image, {type: 'text', text: '看看这张图'}]}, cwd}, ...rest,
+      {type: 'ai-title', aiTitle: '看图修 bug', sessionId: sid}];
+    await writeFile(file, lines.map(line => JSON.stringify(line)).join('\n') + '\n');
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const {getSessionInfo} = await import('@anthropic-ai/claude-agent-sdk');
+    assert.equal((await getSessionInfo(sid))?.cwd, undefined, 'the SDK no longer misses the folder; this fallback may be unneeded');
+
+    const starts: any[] = [];
+    const query: QueryFn = ({prompt, options}) => {
+      if (options?.resume) starts.push(options);
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const _ of prompt) yield {type: 'result', subtype: 'success', session_id: sid, errors: []};
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      generator.supportedModels = async () => [];
+      return generator;
+    };
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000));
+    const list = await bridge.handle('claude.list', {});
+    assert.deepEqual(list.data.map((item: any) => [item.id, item.cwd]), [[sid, cwd]]);
+    assert.deepEqual(list.projects, [{id: cwd, path: cwd}]);
+    assert.equal((await bridge.handle('claude.read', {conversationId: sid})).cwd, cwd);
+    const sent = await bridge.handle('claude.send', {conversationId: sid, text: '好', opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-000000000001`});
+    assert.equal(sent.state, 'accepted', JSON.stringify(sent));
+    assert.equal(starts[0].cwd, cwd);
+  } finally {
+    bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('a transcript’s folder is where it was last moved, else the first entry that names one', () => {
+  const line = (entry: object) => JSON.stringify(entry);
+  assert.equal(claudeTranscriptCwd([line({type: 'ai-title', aiTitle: 'x'}), line({type: 'user', cwd: '/a', message: {content: [{type: 'tool_use', input: {cwd: '/z'}}]}}),
+    line({type: 'user', cwd: '/b'})].join('\n')), '/a');
+  assert.equal(claudeTranscriptCwd([line({type: 'user', cwd: '/a'}), line({type: 'relocated', relocatedCwd: '/b'}), 'not json',
+    line({type: 'relocated', relocatedCwd: '/c'})].join('\n')), '/c');
+  assert.equal(claudeTranscriptCwd(line({type: 'user', message: {content: '"cwd":"/fake"'}})), undefined);
+  assert.equal(claudeTranscriptCwd(''), undefined);
+});
+
 test('claude.ai pages are named from the raw transcript and repeated on the newest turn', () => {
   const page = 'https://claude.ai/artifact/FR2QT5upk4yhRE2SLNe2oM', type = 'https://claude.ai/artifact/GZLZthZ2sQjn7T16skfdeF';
   const user = (uuid: string, content: unknown) => ({type: 'user', uuid, message: {role: 'user', content}});
@@ -225,9 +409,235 @@ test('claude.ai pages are named from the raw transcript and repeated on the newe
   assert.deepEqual([...titles], [[page, '持仓决策看板']]);
   const turns = claudeTurns(branch.map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles);
   assert.equal(turns.length, 2);
-  assert.deepEqual(turns[0].pages, [{url: page, title: '持仓决策看板'}]);
+  assert.deepEqual(turns[0].pages, [{url: page, title: '持仓决策看板', changed: 't2', shown: 't2'}]);
   assert.deepEqual(turns[1].pages, [{url: page, title: '持仓决策看板', earlier: true}]);
   // A page the newest turn already shows is not repeated, and a turn with no pages anywhere gets none.
-  assert.deepEqual(claudeTurns(branch.slice(0, 3).map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles).at(-1)?.pages, [{url: page, title: '持仓决策看板'}]);
+  assert.deepEqual(claudeTurns(branch.slice(0, 3).map(line => ({...line, parent_tool_use_id: null})), false, undefined, titles).at(-1)?.pages, [{url: page, title: '持仓决策看板', changed: 't2', shown: 't2'}]);
   assert.equal(claudeTurns([{type: 'user', uuid: 'u', message: {content: 'hi'}}]).at(-1)?.pages, undefined);
+});
+
+/** `count` prompts and replies, compacted after `compactAfter` of them: the SDK returns only what follows the boundary. */
+function compactedTranscript(cwd: string, count: number, compactAfter: number) {
+  let parent: string | null = null, n = 0;
+  const base = {sessionId: sid, cwd, version: '2.1.0', userType: 'external', isSidechain: false};
+  const lines: object[] = [];
+  const add = (entry: object) => {
+    const uuid = `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
+    lines.push({parentUuid: parent, ...base, ...entry, uuid, timestamp: new Date(1_790_000_000_000 + n * 1000).toISOString()});
+    parent = uuid;
+    return uuid;
+  };
+  for (let index = 1; index <= count; index++) {
+    if (index === compactAfter + 1) {
+      const last = parent;
+      parent = null;
+      add({type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', logicalParentUuid: last, compactMetadata: {trigger: 'auto'}});
+      add({type: 'user', isCompactSummary: true, isVisibleInTranscriptOnly: true,
+        message: {role: 'user', content: 'This session is being continued from a previous conversation that ran out of context. Summary…'}});
+    }
+    add({type: 'user', message: {role: 'user', content: `问题 ${index}`}});
+    add({type: 'assistant', message: {id: `msg_${index}`, role: 'assistant', model: 'claude-sonnet-4-5', content: [{type: 'text', text: `回答 ${index}`}]}});
+  }
+  return lines.map(line => JSON.stringify(line)).join('\n') + '\n';
+}
+
+test('a compacted session shows what came before the compaction, and the phone can load earlier turns', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, compactedTranscript(cwd, 100, 90));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'));
+    const text = (turn: any) => turn.items.find((item: any) => item.role === 'user')?.text;
+
+    const view = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(view.turns.length, 60);assert.equal(view.truncated, true);
+    assert.equal(text(view.turns[0]), '问题 41');assert.equal(text(view.turns.at(-1)), '问题 100');
+    assert.ok(view.turns.at(-11).items.some((item: any) => item.type === 'contextCompaction'));
+    // Edits and forks resume from the branch after the compaction.
+    assert.equal(view.turns.find((turn: any) => text(turn) === '问题 50').canFork, false);
+    assert.equal(view.turns.find((turn: any) => text(turn) === '问题 95').canFork, true);
+
+    const earlier = await bridge.handle('claude.read', {conversationId: sid, from: view.turns[0].id, earlier: 30});
+    assert.equal(earlier.turns.length, 90);assert.equal(text(earlier.turns[0]), '问题 11');assert.equal(earlier.truncated, true);
+    // Watching keeps the loaded turns.
+    const kept = await bridge.handle('claude.read', {conversationId: sid, from: earlier.turns[0].id});
+    assert.equal(text(kept.turns[0]), '问题 11');
+    const all = await bridge.handle('claude.read', {conversationId: sid, from: kept.turns[0].id, earlier: 30});
+    assert.equal(all.turns.length, 100);assert.equal(text(all.turns[0]), '问题 1');assert.equal(all.truncated, false);
+    const ids = all.turns.flatMap((turn: any) => turn.items.map((item: any) => item.id));
+    assert.equal(new Set(ids).size, ids.length);
+
+    const edit = await bridge.handle('claude.edit', {conversationId: sid, turnId: all.turns[49].id, text: '改写', opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-000000000001`});
+    assert.equal(edit.state, 'failed');assert.match(edit.error.message, /整理上下文之前/);
+    await assert.rejects(bridge.handle('claude.read', {conversationId: sid, earlier: -1}), /无效/);
+  } finally {
+    bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('what a released session’s own process saves as it exits does not look like a turn under way', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, transcript(cwd));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const query: QueryFn = ({prompt}) => {
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const _ of prompt) yield {type: 'result', subtype: 'success', session_id: sid, errors: []};
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      return generator;
+    };
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000));
+    const sent = await bridge.handle('claude.send', {conversationId: sid, opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-000000000001`, text: '继续'});
+    assert.equal(sent.state, 'accepted', JSON.stringify(sent));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const live = bridge.runtime.get(sid)!;
+    assert.equal(live.running, false);
+
+    // Claude Code saves the session's title, mode and cost as it exits, minutes after the last turn.
+    await writeFile(file, transcript(cwd) + JSON.stringify({type: 'ai-title', sessionId: sid, aiTitle: '修复登录 bug'}) + '\n');
+    await bridge.runtime.shutdown(live);
+    const view = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(view.controlled, false);
+    assert.equal(view.external, false);assert.equal(view.running, false);
+    assert.notEqual(view.turns.at(-1).status, 'inProgress');
+    assert.equal((await bridge.handle('claude.list', {refresh: true})).data[0].running, false);
+
+    // A terminal that takes the session up afterwards, with a new prompt, still shows.
+    await writeFile(file, transcript(cwd) + JSON.stringify({type: 'user', sessionId: sid, cwd, uuid: '00000000-0000-4000-8000-999999999998',
+      parentUuid: '00000000-0000-4000-8000-000000000013', timestamp: new Date().toISOString(), message: {role: 'user', content: '再看看'}}) + '\n');
+    const later = new Date(Date.now() + 10_000);await utimes(file, later, later);
+    const resumed = await bridge.handle('claude.read', {conversationId: sid});
+    assert.equal(resumed.external, true);assert.equal(resumed.running, true);
+  } finally {
+    bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('a Claude Code session is followed through the subscription hub, built once per revision', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-sync-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, transcript(cwd));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const bridge = new ClaudeCodeBridge(undefined, join(root, 'config'));
+    const {ThreadHub} = await import('../src/connector/thread-hub.js');
+    const frames: any[] = [];
+    const hub = new ThreadHub(frame => {frames.push(frame);});
+    hub.register('claude', bridge.syncSource);
+    try {
+      const first = await bridge.syncSource.state(sid), second = await bridge.syncSource.state(sid);
+      assert.equal(first.entries[0], second.entries[0], 'The same revision gives the same turn objects.');
+      assert.equal('revision' in first.head, false, 'The head leaves out the revision, which changes with every write.');
+      const snapshot = await hub.open({service: 'claude', threadId: sid});
+      assert.equal(snapshot.order.length, 3);
+      assert.equal(snapshot.head.title, '修复登录 bug');
+      const read = await bridge.handle('claude.read', {conversationId: sid});
+      assert.deepEqual(read.turns.map((turn: any) => turn.id), snapshot.order, 'The old read and the subscription agree.');
+      // A new turn written to the transcript reaches followers as one entry.
+      const more = transcript(cwd).split('\n').filter(Boolean).slice(0, 1).map(line => {const entry = JSON.parse(line);return JSON.stringify({...entry, uuid: '00000000-0000-4000-8000-000000000099', parentUuid: '00000000-0000-4000-8000-000000000013', message: {role: 'user', content: '再来一次'}});});
+      await writeFile(file, transcript(cwd) + more.join('\n') + '\n');
+      await utimes(file, old, new Date(Date.now() - 50_000));
+      await new Promise(resolve => setTimeout(resolve, 600));
+      assert.equal(frames.length, 1);
+      assert.equal(frames[0].seq, snapshot.seq + 1);
+      assert.deepEqual(frames[0].entries?.map((entry: any) => entry.body.items[0].text), ['再来一次']);
+    } finally {hub.close();bridge.close();}
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test('a running Claude Code reply reaches followers word by word, then as the transcript has it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-stream-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  const {ThreadHub} = await import('../src/connector/thread-hub.js');
+  const {appendFile, readFile} = await import('node:fs/promises');
+  const hub = new ThreadHub(frame => {frames.push(frame);});
+  const frames: any[] = [];
+  try {
+    const cwd = join(root, 'work'), project = join(root, 'config', 'projects', 'work');
+    await mkdir(cwd, {recursive: true});await mkdir(project, {recursive: true});
+    const file = join(project, sid + '.jsonl');
+    await writeFile(file, transcript(cwd));
+    const old = new Date(Date.now() - 60_000);await utimes(file, old, old);
+    process.env.CLAUDE_CONFIG_DIR = join(root, 'config');
+    const pause = () => new Promise(resolve => setTimeout(resolve, 120));
+    // A Claude Code process that streams its reply, then writes it to the transcript as the CLI does.
+    const query: QueryFn = ({prompt}) => {
+      async function* run(): AsyncGenerator<any> {
+        yield {type: 'system', subtype: 'init', session_id: sid};
+        for await (const message of prompt) {
+          const lines = (await readFile(file, 'utf8')).trim().split('\n'), parent = JSON.parse(lines.at(-1)!).uuid, base = {sessionId: sid, cwd, isSidechain: false, userType: 'external', version: '2.1.0'};
+          const user = {...base, type: 'user', uuid: '00000000-0000-4000-8000-0000000000a1', parentUuid: parent, timestamp: new Date().toISOString(), message: {role: 'user', content: (message.message.content as any[]).find(block => block.type === 'text').text}};
+          await appendFile(file, JSON.stringify(user) + '\n');
+          yield {type: 'system', subtype: 'session_state_changed', state: 'running', session_id: sid};
+          yield {type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: {type: 'message_start', message: {id: 'msg_s'}}};
+          yield {type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: {type: 'content_block_start', index: 0, content_block: {type: 'text', text: ''}}};
+          for (const word of ['Hello', ' streaming', ' world']) {
+            await pause();
+            yield {type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: {type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: word}}};
+          }
+          yield {type: 'stream_event', session_id: sid, parent_tool_use_id: 'toolu_x', event: {type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: 'subagent'}}};
+          await pause();
+          yield {type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: {type: 'message_stop'}};
+          await appendFile(file, JSON.stringify({...base, type: 'assistant', uuid: '00000000-0000-4000-8000-0000000000a2', parentUuid: user.uuid, timestamp: new Date().toISOString(),
+            message: {id: 'msg_s', role: 'assistant', model: 'claude-test', content: [{type: 'text', text: 'Hello streaming world'}]}}) + '\n');
+          yield {type: 'assistant', session_id: sid, message: {id: 'msg_s'}};
+          await pause();
+          yield {type: 'result', subtype: 'success', session_id: sid, errors: []};
+          yield {type: 'system', subtype: 'session_state_changed', state: 'idle', session_id: sid};
+        }
+      }
+      const generator = run() as any;
+      generator.close = () => {};generator.interrupt = async () => {};
+      return generator;
+    };
+    bridge = new ClaudeCodeBridge(ledger, join(root, 'config'), undefined, Date.now, new ClaudeRuntime(async () => query, () => undefined, 60_000));
+    hub.register('claude', bridge.syncSource);
+    await hub.open({service: 'claude', threadId: sid});
+    const sent = await bridge.handle('claude.send', {conversationId: sid, opId: `${Date.now()}:a1b2c3d4-0000-4000-8000-00000000abcd`, text: '讲一句'});
+    assert.equal(sent.state, 'accepted', JSON.stringify(sent));
+    for (let i = 0; i < 60 && !frames.some(frame => frame.head?.running === false); i++) await new Promise(resolve => setTimeout(resolve, 100));
+    const streamed = frames.flatMap(frame => [...(frame.entries || []).flatMap((entry: any) => entry.body.items), ...(frame.patches || []).flatMap((patch: any) => patch.ops)])
+      .filter((item: any) => String(item.id ?? item.i).startsWith('stream:')).map((item: any) => item.text ?? item.item?.text ?? item.t);
+    assert.ok(streamed.length >= 2, `The reply grows in several frames: ${JSON.stringify(streamed)}`);
+    assert.ok(streamed.join('').includes('streaming'), JSON.stringify(streamed));
+    assert.ok(!JSON.stringify(frames).includes('subagent'), 'A subagent’s words stay out of the main reply.');
+    const final = await bridge.syncSource.state(sid);
+    const items = final.entries.at(-1)!.items;
+    assert.equal(items.filter((item: any) => item.id.startsWith('stream:')).length, 0, 'Once the transcript has it, the streamed copy is gone.');
+    assert.equal(items.at(-1).text, 'Hello streaming world');
+  } finally {
+    hub.close();bridge?.close();ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
 });

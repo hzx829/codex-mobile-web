@@ -4,11 +4,22 @@ import {createServer} from 'node:http';
 import {mkdir, mkdtemp, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {ArtifactViewer, artifactSlug, findBrowser} from '../src/connector/claude-artifacts.js';
+import {ArtifactViewer, artifactSlug, findBrowser, profileFolder} from '../src/connector/claude-artifacts.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 
 // A 1x1 PNG.
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+
+test('Chrome is used before Edge, and each browser has its own profile folder', {skip: process.platform !== 'win32' && 'Windows paths'}, () => {
+  const env = {ProgramFiles: 'C:\\PF', 'ProgramFiles(x86)': 'C:\\PF86', LOCALAPPDATA: 'C:\\Local'};
+  const chrome = join('C:\\Local', 'Google', 'Chrome', 'Application', 'chrome.exe'), edge = join('C:\\PF86', 'Microsoft', 'Edge', 'Application', 'msedge.exe');
+  assert.equal(findBrowser(env, path => path === chrome || path === edge), chrome);
+  assert.equal(findBrowser(env, path => path === edge), edge);
+  assert.equal(findBrowser({...env, CLAUDE_ARTIFACT_BROWSER: 'D:\\x.exe'}, () => true), 'D:\\x.exe');
+  assert.equal(profileFolder(edge), 'claude-browser');
+  assert.equal(profileFolder('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'), 'claude-browser');
+  assert.equal(profileFolder(chrome), 'claude-browser-chrome');
+});
 
 test('artifact links are limited to claude.ai Artifacts', () => {
   assert.equal(artifactSlug('https://claude.ai/artifact/FR2QT5upk4yhRE2SLNe2oM'), 'FR2QT5upk4yhRE2SLNe2oM');
@@ -24,8 +35,8 @@ test('a rendered Artifact frame becomes a static page without scripts', {skip: !
     const send = (type: string, body: string | Buffer) => {response.writeHead(200, {'content-type': type.startsWith('text/') ? type + '; charset=utf-8' : type});response.end(body);};
     if (path === '/artifact/FR2QT5upk4yhRE2SLNe2oM') return send('text/html', `<title>持仓决策看板 – Claude</title><h1>shell</h1><iframe src="http://127.0.0.1:${port}/frame" style="width:100%;height:600px"></iframe>`);
     if (path === '/frame') return send('text/html', `<!doctype html><html data-theme="x"><head><link rel="stylesheet" href="/style.css"><style>.dyn{color:rgb(1,2,3)}</style></head>
-      <body><div id="root">loading</div><canvas id="c" width="20" height="10"></canvas><input id="q"><my-card></my-card><img src="/dot.png" alt="dot">
-      <iframe srcdoc="<p id=inner>nested frame</p>" style="height:40px"></iframe>
+      <body><header class="tb-root" data-uncommentable>Updated 5 days ago</header><div id="root">loading</div><canvas id="c" width="20" height="10"></canvas><input id="q"><my-card></my-card><img src="/dot.png" alt="dot">
+      <iframe srcdoc="<header class='tb-root' data-uncommentable>page header</header><p id=inner>nested frame</p>" style="height:40px"></iframe>
       <a href="/elsewhere" onclick="alert(1)">link</a>
       <script>
         setTimeout(() => {
@@ -67,6 +78,9 @@ test('a rendered Artifact frame becomes a static page without scripts', {skip: !
     assert.match(html, /href="http:\/\/127\.0\.0\.1:\d+\/elsewhere" target="_blank"/);
     assert.match(html, /Content-Security-Policy/);
     assert.doesNotMatch(html, /<script|onclick|shell/i);
+    // claude.ai's toolbar is left out of the Artifact's frame; a page's own header in a nested frame stays.
+    assert.doesNotMatch(html, /Updated 5 days ago/);
+    assert.match(html, /page header/);
     // A second request reuses the saved copy.
     const again = await viewer.snapshot({url: 'https://claude.ai/artifact/FR2QT5upk4yhRE2SLNe2oM', width: 400}, 100);
     assert.equal(again.state, 'ready');
