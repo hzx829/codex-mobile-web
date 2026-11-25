@@ -1,6 +1,5 @@
 import {useEffect,useMemo,useRef,useState,type ReactNode} from 'react';
-import {ChatSearch,HomeHeader,workspaceName} from './chat-layout';
-import {IconButton} from './icon-button';
+import {GroupHeading,HomeHeader,SidebarActions,workspaceName} from './chat-layout';
 import {relativeTime,ThreadMenu,ThreadRow} from './thread-menu';
 import {groupThreads,rememberThreads,visibleThreads,type ThreadPreference,type ThreadPreferences} from './thread-preferences';
 import type {MenuPoint} from './popover';
@@ -38,6 +37,8 @@ type Props={
   selected:string;machine:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;
   switcher:ReactNode;footer:ReactNode;mobileSettings?:ReactNode;
   projectsCollapsed?:boolean;onToggleProjects?:()=>void;
+  /** Group keys ("pinned", "recent", "section:…") whose sessions are folded away. */
+  collapsedGroups?:readonly string[];onToggleGroup?:(key:string)=>void;
   me?:TeamUser|null;roster?:TeamMemberRef[];ownerFilter?:OwnerFilter;onOwnerFilterChange?:(next:OwnerFilter)=>void;
   claimOwner?:(threadId:string,userId:string|null)=>Promise<void>;
   copyText:(text:string)=>Promise<void>;threadActions?:(thread:Json)=>ThreadActions;
@@ -48,7 +49,7 @@ type Props={
 
 export function AntigravitySidebar({
   service,listAction='antigravity.list',appName='Antigravity',filter,
-  projectsCollapsed=false,onToggleProjects,me=null,roster=[],ownerFilter='all',onOwnerFilterChange,claimOwner,
+  projectsCollapsed=false,onToggleProjects,collapsedGroups=[],onToggleGroup,me=null,roster=[],ownerFilter='all',onOwnerFilterChange,claimOwner,
   onNew,onCreateProject,onEditProject,onClaudeSettings,onRemoveProject,canManageProjects=false,autoExpandKey='',
   selected,machine,machineName,connected,relayOnline,inert,revision,switcher,footer,mobileSettings,
   copyText,threadActions,call,open,chooseComputer,
@@ -253,11 +254,14 @@ export function AntigravitySidebar({
   const groups=groupThreads(visible,preferences,heading);
   const filterControl=me&&onOwnerFilterChange?<OwnerFilterControl me={me} value={ownerFilter} members={members} change={onOwnerFilterChange}/>:null;
   const showProjectsTree=!query&&(projectItems.length>0||Boolean(onCreateProject));
+  const foldable=!query&&Boolean(onToggleGroup),recentCollapsed=foldable&&collapsedGroups.includes('recent');
+  const toggleGroup=(key:string)=>foldable?()=>onToggleGroup?.(key):undefined;
 
   return <aside className="home-panel" inert={inert}>
     <HomeHeader machineName={machineName} connected={connected} relayOnline={relayOnline}
       chooseComputer={chooseComputer} mobileSettings={mobileSettings} onRefresh={refreshAll}/>
     {!query&&switcher}
+    <SidebarActions search={search} setSearch={setSearch} onNew={onNew?()=>onNew(''):undefined}/>
     <div className="home-content">
       {showProjectsTree&&<ProjectTree
         service={service}
@@ -287,23 +291,22 @@ export function AntigravitySidebar({
       />}
 
       <section className="recent-section">
-        {!groups.length&&(filterControl?<div className="section-head"><h2>{heading}</h2>{filterControl}</div>:<h2>{heading}</h2>)}
-        {groups.map((group,index)=><div className="thread-group" key={group.key}>{index===0&&filterControl?<div className="section-head"><h2>{group.label}</h2>{filterControl}</div>:<h2>{group.label}</h2>}<nav aria-label={group.label}>{group.threads.map(item=>{
+        {!groups.length&&<GroupHeading label={heading} collapsed={recentCollapsed} onToggle={toggleGroup('recent')} action={filterControl}/>}
+        {groups.map((group,index)=>{const folded=foldable&&collapsedGroups.includes(group.key);return <div className="thread-group" key={group.key}><GroupHeading label={group.label} collapsed={folded} onToggle={toggleGroup(group.key)} action={index===0?filterControl:undefined}/>{!folded&&<nav aria-label={group.label}>{group.threads.map(item=>{
           const thread={...item,status:item.running?{type:'active'}:undefined};
           return <ThreadRow key={item.id} thread={thread} selected={selected===item.id} preference={preferences[item.id]}
-            time={relativeTime(item.updatedAt)} open={()=>open(item.id)} menu={point=>setMenu({thread,point})}/>;})}</nav></div>)}
-        {busy&&!visible.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:
+            time={relativeTime(item.updatedAt)} open={()=>open(item.id)} menu={point=>setMenu({thread,point})}/>;})}</nav>}</div>;})}
+        {recentCollapsed?null:busy&&!visible.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:
           !visible.length&&!error&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':ownerFiltered?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,members)}」的会话，已加载列表中没有匹配项。{onOwnerFilterChange&&<button type="button" className="empty-list-action" onClick={()=>onOwnerFilterChange('all')}>显示全部</button>}</>:query?'没有找到匹配的会话。':`还没有 ${appName} 会话。`}</p>}
         {error&&<p className="error" role="alert">{error} {connected&&<button type="button" onClick={refreshAll}>重试</button>}</p>}
         {notice&&<p className="muted">{notice}</p>}
-        {current?.hasMore&&<button className="more-link" disabled={!connected||busy} onClick={()=>load(true)}>{busy?'正在加载…':'加载更多'}</button>}
+        {current?.hasMore&&!recentCollapsed&&<button className="more-link" disabled={!connected||busy} onClick={()=>load(true)}>{busy?'正在加载…':'加载更多'}</button>}
       </section>
     </div>
     {menu&&<ThreadMenu key={menu.thread.id} thread={menu.thread} point={menu.point} preference={preferences[menu.thread.id]||{}} sections={[]} archived={false} compact connected={connected}
       teamMode={Boolean(me)} claim={isTeamAdmin(me)&&claimOwner?{members,assign:async userId=>{await claimOwner(menu.thread.id,userId);refreshAll();}}:undefined}
       close={()=>setMenu(null)} change={patch=>changePreference(menu.thread.id,patch,menu.thread)} copy={()=>copyText(menu.thread.id)}
       {...afterEach(threadActions?.(menu.thread)||{},refreshAll)}/>}
-    <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/>{onNew&&<IconButton icon="compose" label="新聊天" className="round black new-chat" onClick={()=>onNew('')}/>}</div></div>
     {footer}
   </aside>;
 }

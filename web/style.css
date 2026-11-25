@@ -158,6 +158,15 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 /* On wide screens search and new chat sit at the top of the sidebar, like Codex desktop. */
 .home-bottom { order: -1; position: static; padding: 0 8px 4px; background: none; }
 .home-dock { display: flex; align-items: center; gap: 4px; }
+/* Desktop: New and Search are plain sidebar rows; the pill dock is the phone layout. */
+.home-bottom .home-dock { display: none; }
+.sidebar-nav { display: flex; flex-direction: column; gap: 1px; }
+.sidebar-nav-row { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 32px; padding: 6px 8px; border-radius: 8px; text-align: left; font-size: 14px; color: var(--fg); }
+.sidebar-nav-row svg { color: var(--fg-2); flex-shrink: 0; }
+.sidebar-search { background: var(--bg); box-shadow: 0 0 0 1px var(--line-strong); cursor: text; }
+.sidebar-search input { flex: 1; min-width: 0; border: 0; background: transparent; margin: 0; padding: 0; outline: 0; font-size: 14px; box-shadow: none; }
+.sidebar-search input:focus { box-shadow: none; }
+.sidebar-search .icon-button { min-width: 22px; width: 22px; height: 22px; padding: 3px; border-radius: 50%; }
 .search-pill { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; height: 32px; border-radius: 8px; background: transparent; padding: 0 8px; color: var(--fg-2); transition: background-color .12s ease; }
 .search-pill:focus-within { background: var(--bg); box-shadow: 0 0 0 1px var(--line-strong); }
 .search-pill input { border: 0; background: transparent; margin: 0; padding: 0; outline: 0; font-size: 14px; box-shadow: none; }
@@ -455,7 +464,7 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 @media (prefers-reduced-motion: reduce) { .overlay, .thread-menu, .sheet { animation: none; } }
 
 @media (hover: hover) {
-  .project-row:hover, .session-row:hover, .menu-item:hover, .search-pill:hover, .home-identity:hover, .identity-button:hover, .thread-title:is(button):hover, .center-project:not(:disabled):hover, .composer-model:not(:disabled):hover, .composer-permission:not(:disabled):hover, .section-toggle:hover, .owner-filter-trigger:hover, .owner-filter-clear:hover, .owner-filter-option:hover { background: var(--hover); }
+  .project-row:hover, .session-row:hover, .menu-item:hover, .search-pill:hover, .home-identity:hover, .identity-button:hover, .thread-title:is(button):hover, .center-project:not(:disabled):hover, .composer-model:not(:disabled):hover, .composer-permission:not(:disabled):hover, .section-toggle:hover, .owner-filter-trigger:hover, .owner-filter-clear:hover, .owner-filter-option:hover, button.sidebar-nav-row:not(:disabled):hover { background: var(--hover); }
   .section-toggle:hover, .owner-filter-trigger:hover, .owner-filter-clear:hover { color: var(--fg); }
   .session-row.selected:hover, .owner-filter-option[aria-pressed="true"]:hover { background: var(--selected); }
   .black:hover, .primary:hover { background: var(--fg-hover); }
@@ -533,6 +542,8 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
   .thread-group + .thread-group { margin-top: 18px; }
   .home-bottom { order: 0; position: absolute; bottom: 0; left: 0; right: 0; padding: 18px 16px max(12px, env(safe-area-inset-bottom)); background: linear-gradient(var(--bg-fade), var(--bg-veil) 30%, var(--bg) 100%); }
   .home-dock { gap: 10px; }
+  .home-bottom .home-dock { display: flex; }
+  .sidebar-nav { display: none; }
   .search-pill { height: 48px; padding: 0 16px; border-radius: 24px; background: var(--chip); color: var(--fg-3); box-shadow: 0 0 0 .5px rgb(var(--ink) / 0.102), 0 4px 16px #0000000f; -webkit-backdrop-filter: blur(16px) saturate(1.6); backdrop-filter: blur(16px) saturate(1.6); }
   .search-pill:focus-within { box-shadow: 0 0 0 .5px rgb(var(--ink) / 0.149), 0 4px 16px #00000014; background: var(--bg); }
   .search-pill input { font-size: 16px; }

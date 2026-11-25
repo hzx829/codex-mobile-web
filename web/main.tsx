@@ -8,7 +8,7 @@ import {ClaudeProjectEditor,GuestProjectForm} from './claude-projects';
 import {ProjectCreateSheet} from './project-create';
 import {loadExpandedProjects,ProjectEditSheet,ProjectTree,saveExpandedProjects,type ProjectItem,type ProjectThreadsState} from './project-tree';
 import {MobileSettingsTrigger,SettingsSheet,SidebarFooter,type SidebarFooterProps} from './settings-menu';
-import {ChatSearch,HomeHeader,ThreadHeader,useComposerHeight} from './chat-layout';
+import {GroupHeading,HomeHeader,SidebarActions,ThreadHeader,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
 import {connectorHas,versionGap,versionGapNotice} from './features';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,supportedRoute,withConversation,type Service} from './services';
@@ -106,6 +106,8 @@ function App(){
   const setOwnerFilter=(next:OwnerFilter)=>{setOwnerFilterState(next);save('owner-filter',next);save('only-mine',next==='mine');};
   const [projectsCollapsed,setProjectsCollapsed]=useState<boolean>(()=>load('sidebar-projects-collapsed',false)===true);
   const toggleProjects=()=>setProjectsCollapsed(old=>{const next=!old;save('sidebar-projects-collapsed',next);return next;});
+  const [collapsedGroups,setCollapsedGroups]=useState<string[]>(()=>{const saved=load('sidebar-groups-collapsed',[]);return Array.isArray(saved)?saved.filter(item=>typeof item==='string'):[];});
+  const toggleGroup=(key:string)=>setCollapsedGroups(old=>{const next=old.includes(key)?old.filter(item=>item!==key):[...old,key];save('sidebar-groups-collapsed',next);return next;});
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Machine[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(initialRoute),[sheet,setSheet]=useState<Sheet>(null);
   const [drawerOpen,setDrawerOpen]=useState(false);
@@ -1068,7 +1070,7 @@ function App(){
       <AntigravitySidebar key={`${service}:${machine}`} service={service} inert={sidebarInert} selected={id} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
         footer={sidebarFooter} mobileSettings={mobileSettings}
-        projectsCollapsed={projectsCollapsed} onToggleProjects={toggleProjects} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
+        projectsCollapsed={projectsCollapsed} onToggleProjects={toggleProjects} collapsedGroups={collapsedGroups} onToggleGroup={toggleGroup} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
         claimOwner={isTeamAdmin(me)?(threadId,userId)=>claimOwner(machine,service,threadId,userId):undefined}
         revision={remoteListRevision} switcher={switcher} call={call} open={open}
         listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>filterThreadsByOwner(threads,me,ownerFilter)}
@@ -1116,6 +1118,8 @@ function App(){
   const codexShowProjectsTree=!searchQuery&&!archived&&(codexProjectItems.length>0||canCreateProject);
   const codexHeading=searchQuery?'搜索结果':archived?'归档会话':'最近';
   const codexGroups=groupThreads(listedThreads,preferences,codexHeading);
+  // Folding only applies to the normal list: search results and the archive always show everything.
+  const codexFoldable=!searchQuery&&!archived,codexRecentCollapsed=codexFoldable&&collapsedGroups.includes('recent');
   const codexFilterControl=me?<OwnerFilterControl me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>:null;
   const codexCanManage=canManageProjects&&Boolean(info?.projectApi);
   const isCodexActive=(s:Json)=>connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?Boolean(view.running):s.status?.type==='active');
@@ -1127,6 +1131,7 @@ function App(){
     <aside className="home-panel" inert={codexSidebarInert}>
       <HomeHeader machineName={machineName} connected={connected} relayOnline={status==='online'} chooseComputer={()=>setSheet('computer')} mobileSettings={mobileSettings} onRefresh={refreshSidebar} refreshDisabled={listBusy}/>
       {!archived&&!searchQuery&&switcher}
+      <SidebarActions search={search} setSearch={setSearch} onNew={()=>startNew()} newDisabled={busy||Boolean(pending)}/>
       <div className="home-content">
         {codexShowProjectsTree&&<ProjectTree
           service="codex"
@@ -1156,15 +1161,14 @@ function App(){
         />}
         <section className="recent-section">
           {archived&&<div className="section-head"><h2>归档会话</h2><button type="button" className="text-button" onClick={()=>setArchived(false)}>返回最近</button></div>}
-          {!archived&&!codexGroups.length&&(codexFilterControl?<div className="section-head"><h2>{codexHeading}</h2>{codexFilterControl}</div>:<h2>{codexHeading}</h2>)}
-          {codexGroups.map((group,index)=><div className="thread-group" key={group.key}>{!archived&&(index===0&&codexFilterControl?<div className="section-head"><h2>{group.label}</h2>{codexFilterControl}</div>:<h2>{group.label}</h2>)}<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
+          {!archived&&!codexGroups.length&&<GroupHeading label={codexHeading} collapsed={codexFoldable&&codexRecentCollapsed} onToggle={codexFoldable?()=>toggleGroup('recent'):undefined} action={codexFilterControl}/>}
+          {codexGroups.map((group,index)=>{const folded=codexFoldable&&collapsedGroups.includes(group.key);return <div className="thread-group" key={group.key}>{!archived&&<GroupHeading label={group.label} collapsed={folded} onToggle={codexFoldable?()=>toggleGroup(group.key):undefined} action={index===0?codexFilterControl:undefined}/>}{!folded&&<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
             time={relativeTime(s.updatedAt)} active={isCodexActive(s)}
-            open={()=>openCodexThread(s)} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
-          {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':archived?'还没有归档会话。':'还没有聊天，开始一个新任务吧。'}</p>}
-          {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
+            open={()=>openCodexThread(s)} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav>}</div>;})}
+          {codexRecentCollapsed?null:listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':archived?'还没有归档会话。':'还没有聊天，开始一个新任务吧。'}</p>}
+          {cursor&&!codexRecentCollapsed&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
         </section>
       </div>
-      <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={busy||Boolean(pending)} onClick={()=>startNew()}/></div></div>
       {sidebarFooter}
     </aside>
     {drawerOpen&&<div className="drawer-backdrop" aria-hidden="true" onClick={()=>setDrawerOpen(false)}/>}

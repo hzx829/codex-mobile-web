@@ -1,4 +1,4 @@
-import {useLayoutEffect,type KeyboardEvent,type ReactNode,type RefObject} from 'react';
+import {useLayoutEffect,useState,type KeyboardEvent,type ReactNode,type RefObject} from 'react';
 import {Icon} from './icons';
 import {IconButton} from './icon-button';
 import {OwnerBadge,type TeamMemberRef} from './team';
@@ -18,6 +18,33 @@ export function HomeHeader({project,machineName,connected,relayOnline,back,backD
 
 export function ChatSearch({value,change}:{value:string;change:(value:string)=>void}){
   return <label className="search-pill"><Icon name="search"/><input aria-label="搜索聊天" placeholder="搜索聊天…" value={value} maxLength={200} onChange={event=>change(event.target.value)}/>{value&&<IconButton icon="close" label="清除搜索" onClick={()=>change('')}/>}</label>;
+}
+
+/** Desktop shows New and Search as sidebar rows; phones keep the floating search pill and round new-chat button. */
+export function SidebarActions({search,setSearch,onNew,newDisabled=false}:{search:string;setSearch:(value:string)=>void;onNew?:()=>void;newDisabled?:boolean}){
+  const [searching,setSearching]=useState(false);
+  const open=searching||Boolean(search);
+  const close=()=>{setSearch('');setSearching(false);};
+  return <div className="home-bottom">
+    <nav className="sidebar-nav" aria-label="侧边栏操作">
+      {onNew&&<button type="button" className="sidebar-nav-row" disabled={newDisabled} onClick={onNew}><Icon name="plus" size={17}/><span>新建</span></button>}
+      {open?<label className="sidebar-nav-row sidebar-search"><Icon name="search" size={17}/>
+        <input autoFocus aria-label="搜索聊天" placeholder="搜索聊天…" value={search} maxLength={200}
+          onChange={event=>setSearch(event.target.value)}
+          onBlur={()=>{if(!search)setSearching(false);}}
+          onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();close();}}}/>
+        <button type="button" className="icon-button" aria-label="关闭搜索" title="关闭搜索" onPointerDown={event=>event.preventDefault()} onClick={close}><Icon name="close"/></button>
+      </label>:<button type="button" className="sidebar-nav-row" onClick={()=>setSearching(true)}><Icon name="search" size={17}/><span>搜索</span></button>}
+    </nav>
+    <div className="home-dock"><ChatSearch value={search} change={setSearch}/>{onNew&&<IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={newDisabled} onClick={onNew}/>}</div>
+  </div>;
+}
+
+/** A sidebar group title that folds its list away; search results pass no toggle and stay open. */
+export function GroupHeading({label,collapsed=false,onToggle,action}:{label:string;collapsed?:boolean;onToggle?:()=>void;action?:ReactNode}){
+  const title=onToggle?<h2 className="section-heading"><button type="button" className="section-toggle" aria-expanded={!collapsed} title={collapsed?`展开${label}`:`收起${label}`} onClick={onToggle}>
+    <span>{label}</span><Icon name="chevron" size={13}/></button></h2>:<h2>{label}</h2>;
+  return action?<div className="section-head">{title}{action}</div>:title;
 }
 
 export function ProjectsSection({collapsed,onToggle,action,children}:{collapsed:boolean;onToggle:()=>void;action?:ReactNode;children:ReactNode}){
