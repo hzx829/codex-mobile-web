@@ -71,7 +71,7 @@ const load=(key:string,fallback:any)=>{try{return JSON.parse(localStorage.getIte
 const save=(key:string,value:any)=>{try{localStorage.setItem(key,JSON.stringify(value));}catch{}};
 const name=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 const computerName=(machine:Machine)=>machine.name+(machine.guest?'（借用）':'');
-const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:target.kind==='artifact'?target.title||'claude.ai 页面':target.kind==='site'?siteName(target.url):'网页预览';
+const previewTitle=(target:PreviewTarget)=>target.kind==='file'?target.file?.name||name(target.path):target.kind==='diff'?'本轮修改':target.kind==='image'?target.title:target.kind==='artifact'?target.title||'claude.ai 页面':target.kind==='site'?siteName(target.url):target.kind==='tasks'?'后台任务':'网页预览';
 const siteName=(url:string)=>{try{return new URL(url).host;}catch{return '网页预览';}};
 /** What the address form says about where a page will be loaded from. */
 const ROUTE_HINT={tunnel:'通过电脑打开：先在电脑或局域网里启动网页服务。',direct:'手机直接打开，不经过电脑。',external:'http 的公网地址不能嵌在这里，只能在浏览器里打开。',artifact:'claude.ai 页面，通过电脑打开。'} as const;
@@ -136,6 +136,8 @@ function App(){
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
   const [previewState,setPreviewState]=useState<{tabs:PreviewTab[];activeId:number|null}>({tabs:[],activeId:null}),[filePath,setFilePath]=useState('');
   const preview=previewState.tabs.find(tab=>tab.id===previewState.activeId)?.target||null;
+  // Where an Antigravity conversation shows its background tasks while their tab is open.
+  const [tasksSlot,setTasksSlot]=useState<HTMLElement|null>(null);
   const previewIds=useRef(0);
   const compactPreview=useCompactPreview();
   const fileSequence=useRef(0),browserSequence=useRef(0);
@@ -671,6 +673,7 @@ function App(){
          {target.kind==='site'&&<PageViewer src={target.url} address={target.url} widthKey={previewWidthKey(target.machineId,target.threadId)} onEnd={()=>closePreviewTab(id)} endLabel="关闭"/>}
          {target.kind==='artifact'&&<ArtifactPanel url={target.url} fresh={target.fresh} active={id===previewState.activeId} connected={connected&&target.machineId===machine} call={(action,payload)=>call(action,payload,target.machineId)}
            onTitle={title=>setPreviewState(old=>({...old,tabs:old.tabs.map(tab=>tab.id===id&&tab.target.kind==='artifact'?{...tab,target:{...tab.target,title}}:tab)}))}/>}
+         {target.kind==='tasks'&&<div className="bg-tasks-pane" ref={setTasksSlot}/>}
          {target.kind==='image'&&<div className="image-viewer"><BlobImage className="preview-image" src={target.url} alt={target.title}/></div>}
        </div>)}
      </PreviewPane>;
@@ -733,6 +736,7 @@ function App(){
         id||creatingAntigravity?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open} newProject={id?null:claudeNewCwd} created={created} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')}
         sync={connectorHas(activeMachine,'sync.antigravity')?syncLink:undefined}
+        showTasks={()=>{if(id)showPreview({kind:'tasks',conversationId:id});}} tasksSlot={tasksSlot}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}

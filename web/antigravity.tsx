@@ -1,4 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
+import {createPortal} from 'react-dom';
 import {useComposerAttachments} from './composer-attachments';
 import {useVoiceInput} from './use-voice-input';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
@@ -60,6 +61,8 @@ type Props={
   voiceMode:VoiceProvider;chooseVoice:()=>void;
   /** Set when the computer's connector pushes this app's conversations (`sync.antigravity`): the conversation follows it. */
   sync?:SyncLink;
+  /** Opens the background tasks in the preview pane, beside documents and pages; `tasksSlot` is where they render while that tab is open. */
+  showTasks:()=>void;tasksSlot:HTMLElement|null;
 };
 
 export function BackgroundTasksBar({tasks,onOpen}:{tasks:AntigravityBackgroundTask[];onOpen:()=>void}){
@@ -138,7 +141,7 @@ export function AntigravityPanel(props:Props){
   const [defaultMode,setDefaultMode]=useState('');
   const [catalog,setCatalog]=useState<AntigravityCatalog|null>(()=>storedCatalog(machine));
   // Unknown (null) until the desktop's model list for the new conversation's project has been read.
-  const [createImages,setCreateImages]=useState<boolean|null>(null),[adding,setAdding]=useState(false),[tasksOpen,setTasksOpen]=useState(false);
+  const [createImages,setCreateImages]=useState<boolean|null>(null),[adding,setAdding]=useState(false);
   // An older connector drops images without saying so; it only advertises them once it can send them.
   const readModels=useStableEvent(async()=>{
     const result:AntigravityCatalog=await request.current('antigravity.models',creating?{project:target}:{conversationId});
@@ -416,7 +419,7 @@ export function AntigravityPanel(props:Props){
       {notice&&<div className="feedback" role="status">{notice}</div>}
       {pending&&!busy&&<div className="pending">{checkPending}</div>}
       {view?.running&&!antigravityStatus&&!requests.length&&<div className="running-status"><i className="dot online"/>Antigravity 正在处理</div>}
-      {hasBackgroundTasks&&<BackgroundTasksBar tasks={backgroundTasks} onOpen={()=>setTasksOpen(true)}/>}
+      {hasBackgroundTasks&&<BackgroundTasksBar tasks={backgroundTasks} onOpen={props.showTasks}/>}
       {!creating&&<QueuedMessages messages={queued} disabled={!canOperate} canSteer={Boolean(view?.running)} withdrawBlocked={voiceBusy||attachments.loading}
         nowLabel="立即发送（打断当前回复并发送；保留后台任务）"
         attachmentsFull={message=>attachments.count+message.imageCount>MAX_ATTACHMENTS||images.reduce((sum,url)=>sum+imageBytes(url),0)+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
@@ -435,11 +438,9 @@ export function AntigravityPanel(props:Props){
         send={{label:queueNext?'完成后发送':'发送消息',sending,disabled:!canOperate||attachments.loading||voiceBusy||!canSendNow||!draft.trim()&&!files.length}}/>
       {pick.inputs}
     </footer>
-    {tasksOpen&&<SheetPanel title="后台任务" close={()=>setTasksOpen(false)}>
-      <BackgroundTasksPanel tasks={backgroundTasks} hasTasks={hasBackgroundTasks} turnRunning={Boolean(view?.running)}
-        canOperate={canOperate} busy={busy} connected={connected}
-        onRefresh={()=>void refresh()} onStop={()=>void mutate('stop',{killBackgroundTasks:true})} onCopy={copy}/>
-    </SheetPanel>}
+    {props.tasksSlot&&!creating&&createPortal(<BackgroundTasksPanel tasks={backgroundTasks} hasTasks={hasBackgroundTasks} turnRunning={Boolean(view?.running)}
+      canOperate={canOperate} busy={busy} connected={connected}
+      onRefresh={()=>void refresh()} onStop={()=>void mutate('stop',{killBackgroundTasks:true})} onCopy={copy}/>,props.tasksSlot)}
     {adding&&<SheetPanel title="添加与选项" close={()=>setAdding(false)}>
       <AddOptions attachments={attachments} pick={pick} disabled={busy||Boolean(pending)} connected={connected} error={error}
         imagesBlocked={imagesBlockedReason}

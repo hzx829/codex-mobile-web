@@ -708,7 +708,8 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .bg-tasks-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-3); font-size: 12.5px; }
 .bg-tasks-open { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; color: var(--fg-3); font-size: 12px; flex-shrink: 0; }
 .bg-tasks-open svg { transform: rotate(-90deg); }
-.bg-tasks-sheet { display: flex; flex-direction: column; gap: 12px; padding: 4px 4px 0; }
+.bg-tasks-pane { padding: 16px; }
+.bg-tasks-sheet { display: flex; flex-direction: column; gap: 12px; }
 .bg-task-card { border: 1px solid var(--line-strong); border-radius: 14px; padding: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 8px; }
 .bg-task-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .bg-task-head strong { font-size: 14px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }

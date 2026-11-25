@@ -7,7 +7,9 @@ export type PreviewTarget =
   | {kind:'image'; url:string; title:string}
   | {kind:'web'; session:PreviewSession}
   | {kind:'site'; machineId:string; threadId:string; url:string}
-  | {kind:'artifact'; machineId:string; url:string; title?:string; fresh?:string};
+  | {kind:'artifact'; machineId:string; url:string; title?:string; fresh?:string}
+  /** An Antigravity conversation's background tasks; the conversation renders them into the tab (web/antigravity.tsx). */
+  | {kind:'tasks'; conversationId:string};
 
 /** claude.ai Artifact pages, which the computer renders and relays; the phone never opens claude.ai itself. */
 export function isArtifactUrl(value:string){return /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]{8,64}\/?(?:[?#].*)?$/.test(value);}
@@ -39,6 +41,7 @@ export function samePreviewTarget(a:PreviewTarget,b:PreviewTarget):boolean{
   if(a.kind==='image'&&b.kind==='image')return a.url===b.url;
   if(a.kind==='site'&&b.kind==='site')return a.machineId===b.machineId&&a.threadId===b.threadId&&a.url===b.url;
   if(a.kind==='artifact'&&b.kind==='artifact')return a.machineId===b.machineId&&a.url===b.url;
+  if(a.kind==='tasks'&&b.kind==='tasks')return a.conversationId===b.conversationId;
   return a.kind==='web'&&b.kind==='web'&&a.session.sessionId===b.session.sessionId;
 }
 

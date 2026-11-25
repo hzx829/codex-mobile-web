@@ -5,6 +5,7 @@ import type {Json} from '../src/shared/types';
 import {isArtifactUrl,lanHost,markdownFileUrl} from './preview-target';
 import {splitFollowups} from './followup';
 import {remarkFileCitations} from './file-citations';
+import {remarkAutoLinks} from './auto-links';
 import {markdownBlocks} from './markdown-blocks';
 const windowsFilePath=/^[a-z]:(?:[\\/]|%5c|%2f)/i;
 export function markdownUrlTransform(url:string,key:string,allowFileUrls:boolean) {
@@ -32,7 +33,7 @@ function localPreviewLink(value:string) {
 type MarkdownProps={text:string;openFile:(path:string)=>void;openPreview:(url:string)=>void;allowFileUrls:boolean};
 /** One top-level block. Finished blocks keep their rendering while a reply streams. */
 const MarkdownBlock=memo(function MarkdownBlock({text,openFile,openPreview,allowFileUrls}:MarkdownProps){
-  return <Markdown remarkPlugins={[remarkGfm,remarkFileCitations]} urlTransform={(url,key)=>markdownUrlTransform(url,key,allowFileUrls)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
+  return <Markdown remarkPlugins={[remarkGfm,remarkFileCitations,remarkAutoLinks]} urlTransform={(url,key)=>markdownUrlTransform(url,key,allowFileUrls)} components={{img:({alt,src})=>localMediaPath(src)?<button className="inline-link" type="button" onClick={()=>openFile(src!)}>[{/\.(mp4|m4v|webm|ogv|mov)(?:[?#]|$)/i.test(src!)?'视频':'图片'}：{alt||'打开文件'}]</button>:<span className="muted">[图片：{alt||'请在电脑查看'}]</span>,a:({href,children})=>{
     if(!href)return <span>{children}</span>;
     const previewUrl=localPreviewLink(href);
     if(previewUrl)return <button className="inline-link" type="button" onClick={()=>openPreview(previewUrl)}>{children} · 打开预览</button>;
