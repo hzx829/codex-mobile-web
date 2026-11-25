@@ -28,7 +28,7 @@ import {fileReference,isArtifactUrl,previewRoute,samePreviewTarget,type PreviewT
 import {ArtifactPanel} from './artifact-view';
 import {rememberPage,type PaneAction} from './artifact-pane';
 import {home,initialLocation,rememberLocation,parseLocation,type Route} from './route-state';
-import {useComposerAttachments} from './composer-attachments';
+import {clearDraftAttachments,useComposerAttachments} from './composer-attachments';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
 import {MenuItem,SheetPanel} from './sheet';
 import {PermissionButton,PermissionPicker,type PermissionOption} from './permission-picker';
@@ -97,9 +97,7 @@ function App(){
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Machine[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const [remoteListRevision,refreshRemoteList]=useState(0);
-  const [claudeNewCwd,setClaudeNewCwd]=useState<string|null>(null);
   const service=serviceOf(route),codexActive=service==='codex';
-  useEffect(()=>setClaudeNewCwd(null),[machine,service]);
   const lastCodex=useRef({machine,route:home});
   if(codexActive)lastCodex.current={machine,route};
   const codexRoute=codexActive?route:lastCodex.current.machine===machine?lastCodex.current.route:home;
@@ -327,7 +325,7 @@ function App(){
   useEffect(()=>{
     draftSave.current.flush();
     setStatusPanel(null);setModelPoint(null);setPermissionPoint(null);
-    attachments.reset();setUploadProgress(null);
+    setUploadProgress(null);
     setBrowserRequest(null);setBrowserUrl(load(previewUrlKey(machine,selected),defaultPreviewUrl));
     // Show the last known content at once; it stays marked as cached until the read below lands.
     const stored=selected&&codexSynced?storedView('codex',machine,selected,'turns'):null;
@@ -490,7 +488,7 @@ function App(){
     const result=await createFirstTurn((action,payload)=>call(action,payload),{cwd:newCwd,text,images,files,model,effort,approvalPolicy:approval,serviceTier,createId,sendId},id=>{
       createdThread=id;
       save(`draft:${machine}:${id}`,text);save(`operation:${machine}:${id}`,{opId:sendId,action:'turn.send',submittedText:text});
-      save(draftKey,'');setOperation(null);
+      save(draftKey,'');clearDraftAttachments(`codex:${scope}`);setOperation(null);
       setOptimistic(old=>old?.at===message.at?{...old,key:`${machine}:${id}`}:old);
       if(stillHere()&&current.current.newChat)navigate({...route,thread:id,newChat:false},true);
     },value=>{if(current.current.machine===machine&&current.current.selected===createdThread)setUploadProgress(value);},opId=>{
@@ -582,7 +580,7 @@ function App(){
   function logout(){
     // A member signing out also removes this device, so its token stops working everywhere.
     if(me&&teamDevice.current&&client.current?.ready)void client.current.team('team.devices.revoke',{deviceId:teamDevice.current}).catch(()=>{});
-    client.current?.close();save('connection','');setMe(null);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);void clearCache();void clearThreadStore();changeMachine('');}
+    client.current?.close();save('connection','');setMe(null);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);clearDraftAttachments();void clearCache();void clearThreadStore();changeMachine('');}
   async function copyText(text:string){
       if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
       else {
@@ -632,7 +630,7 @@ function App(){
   const currentModel={model:view?.model||info?.model,effort:view?.effort||(newChat?info?.effort:''),serviceTier:view?.serviceTier!==undefined?view.serviceTier:info?.serviceTier};
   const selection=resolveModelSelection(availableModels,{model,effort,serviceTier},currentModel);
   const modelInfo=selection.model,canImage=modelInfo?.inputModalities?.includes('image'),isFast=selection.isFast;
-  const attachments=useComposerAttachments({disabled:busy,imagesBlocked:canImage?undefined:'当前模型未确认图片能力',notify:setError,added:()=>setSheet(null)});
+  const attachments=useComposerAttachments({draftKey:`codex:${scope}`,disabled:busy,imagesBlocked:canImage?undefined:'当前模型未确认图片能力',notify:setError,added:()=>setSheet(null)});
   const {images,files,setImages,setFiles}=attachments,imageLoading=attachments.loading;
   const pick=useAttachmentPickers(chosen=>void attachments.add(chosen));
   useEffect(()=>{setPreviewState(old=>{let changed=false;const tabs=old.tabs.flatMap(tab=>{if(tab.target.kind!=='image')return [tab];const index=images.indexOf(tab.target.url);if(index<0){changed=true;return [];}const title=`待发送图片 ${index+1}/${images.length}`;if(title!==tab.target.title){changed=true;return [{...tab,target:{...tab.target,title}}];}return [tab];});if(!changed)return old;return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});},[images]);
@@ -705,9 +703,9 @@ function App(){
   const fileOptions=<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>;
   if(service==='antigravity'||service==='claude'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
-    const open=(next:string)=>{setClaudeNewCwd(null);if(next!==id){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
-    const creatingClaude=service==='claude'&&!id&&claudeNewCwd!==null,creatingAntigravity=service==='antigravity'&&!id&&claudeNewCwd!==null;
-    const created=(next:string)=>{setClaudeNewCwd(null);refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);};
+    const open=(next:string)=>{if(next!==id||route.newChat){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
+    const creatingClaude=service==='claude'&&!id&&route.newChat,creatingAntigravity=service==='antigravity'&&!id&&route.newChat;
+    const created=(next:string)=>{refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);};
     const forked=(next:string)=>{refreshRemoteList(value=>value+1);open(next);};
     async function claudeChange(action:RequestAction,payload:Json){
       const result=await call(action,{...payload,opId:operationId()});
@@ -725,16 +723,16 @@ function App(){
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
         listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>ownedBy(threads,me,onlyMine)} action={service==='claude'&&route.project?
           <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
-        onNew={project=>{setClaudeNewCwd(project);if(id)navigate(withConversation(route,''));}}
+        onNew={()=>{if(id||!route.newChat)navigate({...withConversation(route,''),newChat:true});}}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} showPage={showPage} previewError={error}
-        machine={machine} guest={guest} newCwd={id?null:claudeNewCwd} created={created} forked={forked}
+        machine={machine} guest={guest} newCwd={creatingClaude?route.project:null} created={created} forked={forked}
         showDiff={turn=>{if(turn.diff)showPreview({kind:'diff',threadId:`claude:${id}`,turnId:turn.id,text:turn.diff});}} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')} actions={claudeActions}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         machineName={machineName} connected={connected} conversationId={id} call={call} go={open} sync={connectorHas(activeMachine,'sync.claude')?syncLink:undefined}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         id||creatingAntigravity?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
-        machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open} newProject={id?null:claudeNewCwd} created={created} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')}
+        machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open} newProject={creatingAntigravity?route.project:null} created={created} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')}
         sync={connectorHas(activeMachine,'sync.antigravity')?syncLink:undefined}
         showTasks={()=>{if(id)showPreview({kind:'tasks',conversationId:id});}} tasksSlot={tasksSlot}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}

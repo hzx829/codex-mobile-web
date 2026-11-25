@@ -58,9 +58,15 @@ export function cachedProjects(machine:string){return projects.get(machine)||[];
 export function rememberProjects(machine:string,list:string[]){if(!machine)return;touch(projects,machine,list,STORED_LISTS);schedule();}
 
 /** Images given as data URLs can be megabytes each and are not stored; a refresh brings them back. References stay. */
-const inline=(url:string)=>url.startsWith('data:');
-export const hasInline=(turn:TurnView)=>Array.isArray(turn.items)&&turn.items.some(item=>item.images?.some(inline));
-export const withoutImages=(turn:TurnView)=>hasInline(turn)?{...turn,items:turn.items.map(item=>item.images?.some(inline)?{...item,images:item.images.filter(url=>!inline(url))}:item)}:turn;
+const inline=(url:unknown)=>typeof url==='string'&&url.startsWith('data:');
+export const hasInline=(entry:Json)=>
+  Array.isArray(entry?.items)?entry.items.some((item:Json)=>Array.isArray(item.images)&&item.images.some(inline))
+  :Array.isArray(entry?.images)&&entry.images.some(inline);
+export const withoutImages=<T extends Json>(entry:T):T=>{
+  if(!hasInline(entry))return entry;
+  if(Array.isArray(entry.items))return {...entry,items:entry.items.map((item:Json)=>Array.isArray(item.images)&&item.images.some(inline)?{...item,images:item.images.filter((url:unknown)=>!inline(url))}:item)};
+  return {...entry,images:entry.images.filter((url:unknown)=>!inline(url))};
+};
 /** What goes to IndexedDB: the latest turns or messages, without live state. */
 export function stored(key:string,view:Json):Json {
   const kind=parse(key).kind;
@@ -73,8 +79,9 @@ export function stored(key:string,view:Json):Json {
     const keptRevs=Object.fromEntries(kept.flatMap((turn,index)=>turn===turns.at(index-kept.length)&&revs[turn.id]?[[turn.id,revs[turn.id]]]:[]));
     return {...base,turns:kept,truncated:Boolean(base.truncated)||turns.length>STORED_TURNS,revs:keptRevs};
   }
-  const messages:Json[]=(base.messages||[]).slice(-STORED_MESSAGES),revs:Record<string,string>=base.revs&&typeof base.revs==='object'?base.revs:{};
-  return {...base,messages,revs:Object.fromEntries(messages.flatMap(message=>revs[message.id]?[[message.id,revs[message.id]]]:[]))};
+  const raw:Json[]=(base.messages||[]).slice(-STORED_MESSAGES),messages=raw.map(withoutImages);
+  const revs:Record<string,string>=base.revs&&typeof base.revs==='object'?base.revs:{};
+  return {...base,messages,revs:Object.fromEntries(messages.flatMap((message,index)=>message===raw[index]&&revs[message.id]?[[message.id,revs[message.id]]]:[]))};
 }
 function storedCodex(view:SessionView):SessionView {
   // Images are data URLs and can be megabytes each; a refresh brings them back. A synced view's revs (web/sync/engine.ts)

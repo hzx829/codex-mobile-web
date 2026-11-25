@@ -668,6 +668,92 @@ function mergeAntigravityIssue(
   return null;
 }
 
+const MAX_TRANSCRIPT_IMAGE_BYTES = 8 * 1024 * 1024;
+const TRANSCRIPT_IMAGE_CACHE_LIMIT = 64;
+const IMAGE_MIME_SET = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const IMAGE_EXT_MIME: Record<string, string> = {png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif'};
+const transcriptImageCache = new Map<string, {mtimeNs: bigint; size: bigint; url: string}>();
+
+function normalizeImageMime(mime: unknown, uri = ''): string {
+  if (typeof mime === 'string') {
+    const clean = mime.trim().toLowerCase().replace(/^image\/jpg$/, 'image/jpeg');
+    if (IMAGE_MIME_SET.has(clean)) return clean;
+  }
+  const ext = /\.([a-z0-9]+)(?:[?#].*)?$/i.exec(uri)?.[1]?.toLowerCase();
+  return ext ? IMAGE_EXT_MIME[ext] || '' : '';
+}
+
+function localMediaPath(uri: string): string {
+  if (/^file:/i.test(uri)) return localWorkspace(uri);
+  if (isAbsolute(uri) && !/^[\\/]{2}/.test(uri)) return uri;
+  return '';
+}
+
+function metadataImageItems(content: string): Json[] {
+  const meta = /<ADDITIONAL_METADATA>([\s\S]*?)<\/ADDITIONAL_METADATA>/.exec(content)?.[1];
+  if (!meta) return [];
+  const block = /The user has uploaded \d+ image\(s\):\s*\r?\n((?:\s*-\s+.+\r?\n?)+)/i.exec(meta)?.[1];
+  if (!block) return [];
+  const items: Json[] = [];
+  for (const rawLine of block.split(/\r?\n/)) {
+    const uri = /^\s*-\s+(.+?)\s*$/.exec(rawLine)?.[1];
+    if (uri && normalizeImageMime(undefined, uri)) items.push({uri});
+  }
+  return items;
+}
+
+async function readMediaImage(item: Json): Promise<string> {
+  if (!item || typeof item !== 'object') return '';
+  const uri = typeof item.uri === 'string' ? item.uri.trim() : '';
+  if (uri.startsWith('data:')) {
+    const match = /^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,([a-z0-9+/=\s]+)$/i.exec(uri);
+    if (!match) return '';
+    const mime = normalizeImageMime(match[1]);
+    const data = match[2].replace(/\s/g, '');
+    if (!mime || !data || data.length * 0.75 > MAX_TRANSCRIPT_IMAGE_BYTES) return '';
+    return `data:${mime};base64,${data}`;
+  }
+  const inline = typeof item.inline_data === 'string' ? item.inline_data : typeof item.inlineData === 'string' ? item.inlineData : '';
+  if (inline) {
+    const mime = normalizeImageMime(item.mime_type ?? item.mimeType, uri);
+    const data = inline.replace(/\s/g, '');
+    if (!mime || !data || data.length * 0.75 > MAX_TRANSCRIPT_IMAGE_BYTES) return '';
+    return `data:${mime};base64,${data}`;
+  }
+  if (!uri) return '';
+  const mime = normalizeImageMime(item.mime_type ?? item.mimeType, uri);
+  if (!mime) return '';
+  const path = localMediaPath(uri);
+  if (!path) return '';
+  const info = await stat(path, {bigint: true}).catch(() => null);
+  if (!info || !info.isFile() || info.size <= 0n || info.size > BigInt(MAX_TRANSCRIPT_IMAGE_BYTES)) return '';
+  const cacheKey = `${mime}:${path}`;
+  const cached = transcriptImageCache.get(cacheKey);
+  if (cached && cached.mtimeNs === info.mtimeNs && cached.size === info.size) {
+    transcriptImageCache.delete(cacheKey);
+    transcriptImageCache.set(cacheKey, cached);
+    return cached.url;
+  }
+  const bytes = await readFile(path).catch(() => null);
+  if (!bytes || !bytes.length || bytes.length > MAX_TRANSCRIPT_IMAGE_BYTES) return '';
+  const url = `data:${mime};base64,${bytes.toString('base64')}`;
+  transcriptImageCache.delete(cacheKey);
+  transcriptImageCache.set(cacheKey, {mtimeNs: info.mtimeNs, size: info.size, url});
+  while (transcriptImageCache.size > TRANSCRIPT_IMAGE_CACHE_LIMIT) {
+    transcriptImageCache.delete(transcriptImageCache.keys().next().value!);
+  }
+  return url;
+}
+
+async function resolveMediaImages(items: Json[]): Promise<string[]> {
+  if (!items.length) return [];
+  const urls = await Promise.all(items.map(readMediaImage));
+  return urls.filter(Boolean);
+}
+
+const sameImages = (a?: string[], b?: string[]) =>
+  (!a?.length && !b?.length) || (a?.length === b?.length && a!.every((url, index) => url === b![index]));
+
 async function transcript(path: string): Promise<{messages: AntigravityMessage[]; issue: AntigravityIssue | null; issueStep: number; clearStep: number}> {
   const file = await open(path, 'r').catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') throw error;
@@ -682,6 +768,7 @@ async function transcript(path: string): Promise<{messages: AntigravityMessage[]
     const lines = data.toString('utf8', 0, bytesRead).split('\n');
     if (start) lines.shift(); // The first line may start in the middle of a UTF-8 character.
     const result = new Map<string, AntigravityMessage>();
+    const mediaById = new Map<string, Json[]>();
     let issue: AntigravityIssue | null = null;
     let issueStep = -1;
     let clearStep = -1;
@@ -690,17 +777,27 @@ async function transcript(path: string): Promise<{messages: AntigravityMessage[]
       try { step = JSON.parse(line); } catch { continue; }
       if (!Number.isSafeInteger(step?.step_index)) continue;
       const id = String(step.step_index);
-      if (step.type === 'USER_INPUT' && typeof step.content === 'string') {
+      if (step.type === 'USER_INPUT' && (typeof step.content === 'string' || Array.isArray(step.media))) {
         issue = null;
         issueStep = -1;
         if (step.step_index > clearStep) clearStep = step.step_index;
-        const text = /^\s*<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>(?:\s*<ADDITIONAL_METADATA>|\s*$)/.exec(step.content)?.[1] ?? step.content;
+        const content = typeof step.content === 'string' ? step.content : '';
+        const text = /^\s*<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>(?:\s*<ADDITIONAL_METADATA>|\s*$)/.exec(content)?.[1] ?? content;
+        const media = Array.isArray(step.media) && step.media.length ? step.media : metadataImageItems(content);
+        if (media.length) mediaById.set(id, media);
+        else mediaById.delete(id);
         result.set(id, {id, role: 'user', text: text.trim()});
       } else if (step.type === 'PLANNER_RESPONSE') {
         issue = null;
         issueStep = -1;
         if (step.step_index > clearStep) clearStep = step.step_index;
-        if (typeof step.content === 'string' && step.content.trim()) result.set(id, {id, role: 'assistant', text: step.content});
+        const media = Array.isArray(step.media) && step.media.length ? step.media : [];
+        const hasText = typeof step.content === 'string' && Boolean(step.content.trim());
+        if (hasText || media.length) {
+          if (media.length) mediaById.set(id, media);
+          else mediaById.delete(id);
+          result.set(id, {id, role: 'assistant', text: hasText ? step.content : ''});
+        }
         const tools = Array.isArray(step.tool_calls) ? step.tool_calls.map((tool: Json) => tool?.name).filter((n: unknown) => typeof n === 'string') : [];
         if (tools.length) result.set(id + '-tools', {id: id + '-tools', role: 'tool', text: tools.join('、')});
       } else if (step.type === 'ERROR_MESSAGE') {
@@ -708,7 +805,15 @@ async function transcript(path: string): Promise<{messages: AntigravityMessage[]
         issueStep = step.step_index;
       }
     }
-    return {messages: [...result.values()].slice(-100), issue, issueStep, clearStep};
+    const kept = [...result.values()].slice(-100);
+    await Promise.all(kept.map(async message => {
+      const media = mediaById.get(message.id);
+      if (!media?.length) return;
+      const images = await resolveMediaImages(media);
+      if (images.length) message.images = images;
+    }));
+    const messages = kept.filter(message => message.role === 'tool' || Boolean(message.text) || Boolean(message.images?.length));
+    return {messages, issue, issueStep, clearStep};
   } finally { await file.close(); }
 }
 
@@ -720,6 +825,7 @@ type PendingCreated = {
   summary: Summary;
   project: string;
   prompt?: string;
+  images?: string[];
   config?: Json | null;
   permissionMode?: AntigravityPermissionMode;
   createdAt: number;
@@ -1219,13 +1325,13 @@ export class AntigravityBridge {
       } catch (error) {
         // The conversation exists either way: open it, and its history shows whether the message arrived.
         if (error instanceof BridgeError && error.uncertain) {
-          this.rememberCreated(id, {project, submitted: false, prompt, config, permissionMode});
+          this.rememberCreated(id, {project, submitted: false, prompt, images, config, permissionMode});
           return {conversationId: id, submitted: false, uncertain: true};
         }
         await this.hub(directory, 'DeleteCascadeTrajectory', {cascadeId: id}).catch(() => {});
         throw error;
       }
-      this.rememberCreated(id, {project, submitted: true, prompt, config, permissionMode});
+      this.rememberCreated(id, {project, submitted: true, prompt, images, config, permissionMode});
       this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
       this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: prompt});
       return {conversationId: id, submitted: true};
@@ -1278,6 +1384,7 @@ export class AntigravityBridge {
     project: string;
     submitted: boolean;
     prompt: string;
+    images?: string[];
     config: Json | null;
     permissionMode?: AntigravityPermissionMode;
   }) {
@@ -1299,6 +1406,7 @@ export class AntigravityBridge {
       summary,
       project: input.project,
       prompt: input.submitted ? input.prompt : undefined,
+      images: input.submitted && input.images?.length ? [...input.images] : undefined,
       config: input.config,
       permissionMode: input.permissionMode,
       createdAt: now,
@@ -1407,7 +1515,7 @@ export class AntigravityBridge {
     const issueFingerprint = hubIssue.issue ? JSON.stringify([hubIssue.issueStep, hubIssue.issue]) : `clear:${hubIssue.clearStep}`;
     const baseRevision = JSON.stringify([
       summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, cwd,
-      String(file?.mtimeNs), String(file?.size), pending?.prompt ? 1 : 0, taskLogStat, queueVersion, queueFingerprint,
+      String(file?.mtimeNs), String(file?.size), pending?.prompt || pending?.images?.length ? 1 : 0, taskLogStat, queueVersion, queueFingerprint,
     ]);
     const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint, taskFingerprint, issueFingerprint]);
     return {
@@ -1428,10 +1536,11 @@ export class AntigravityBridge {
     let items = tx.messages;
     const pending = this.pendingEntry(id);
     if (items.length) {
-      if (pending) pending.prompt = undefined;
-    } else if (pending?.prompt) {
-      const text = pending.prompt.trim();
-      if (text) items = [{id: '0', role: 'user', text}];
+      if (pending) {pending.prompt = undefined; pending.images = undefined;}
+    } else if (pending?.prompt || pending?.images?.length) {
+      const text = (pending.prompt || '').trim();
+      const images = pending.images?.length ? pending.images : undefined;
+      if (text || images) items = [{id: '0', role: 'user', text, ...(images ? {images} : {})}];
     }
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
     const records = this.ledger.senders('antigravity', id);
@@ -1493,6 +1602,7 @@ export class AntigravityBridge {
       let keep = 0;
       while (keep < items.length && items[keep].id === previous.messages[keep]?.id &&
              items[keep].text === previous.messages[keep].text && items[keep].role === previous.messages[keep].role &&
+             sameImages(items[keep].images, previous.messages[keep].images) &&
              // A message matched to its sender after the phone first got it is sent again with the name.
              items[keep].sender?.id === previous.messages[keep].sender?.id) keep++;
       return {...view, issue, base: known, keep, messages: items.slice(keep)};

@@ -67,12 +67,19 @@ const modeLabel=(mode:string)=>MODES.find(m=>m.id===mode)?.label||mode;
 const RECOMMENDED_EFFORT='medium';
 /** Turns one "load earlier" adds above the ones shown. */
 const EARLIER_PAGE=30;
-function load(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
+const memoryStore=new Map<string,string>();
+function load(key:string){
+  try{const value=localStorage.getItem(key);if(value!==null)return value;}catch{}
+  return memoryStore.get(key)||'';
+}
 /** The last model chosen for new sessions; "default" was a list entry before the list dropped it. */
 function storedModel(machine:string){const value=load(`claude:${machine}:model`);return value==='default'?'':value;}
 /** The model list last read from this computer, so the composer names the model before the list is read again. */
 function storedModels(machine:string):Json[]|null{try{const list=JSON.parse(load(`claude:${machine}:models`)||'null');return Array.isArray(list)?list:null;}catch{return null;}}
-function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
+function store(key:string,value:string){
+  if(value)memoryStore.set(key,value);else memoryStore.delete(key);
+  try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}
+}
 
 /** Claude Code sessions on the connected computer: live view, composer, approvals and questions. */
 export function ClaudeCodePanel(props:Props){
@@ -342,7 +349,7 @@ export function ClaudeCodePanel(props:Props){
   const status=!connected?(cached?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost):watchError||(pending&&busy?'正在等待电脑确认…':cached?'正在同步最新内容…':'');
   const canWrite=connected&&!busy&&!pending&&(creating?(!guest||Boolean(startPath)):Boolean(view)&&!cached);
   // Photos are compressed into the message; other files are uploaded to the project when it is sent.
-  const attachments=useComposerAttachments({disabled:!canWrite,notify:setError,added:()=>setAdding(false)});
+  const attachments=useComposerAttachments({draftKey:scope,disabled:!canWrite,notify:setError,added:()=>setAdding(false)});
   const {images,files,setImages,setFiles}=attachments,canSend=canWrite&&!attachments.loading&&!voiceBusy;
   const pick=useAttachmentPickers(chosen=>void attachments.add(chosen));
   const drafted=Boolean(draft.trim()||images.length||files.length);

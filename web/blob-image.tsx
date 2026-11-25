@@ -1,6 +1,6 @@
-import {useEffect,useState,type ImgHTMLAttributes} from 'react';
+import {useEffect,useState,useSyncExternalStore,type ImgHTMLAttributes} from 'react';
 import type {Json} from '../src/shared/types';
-import {blobSession,blobUploadTarget,putPart} from './blob';
+import {blobSession,blobUploadTarget,onBlobUploadTarget,putPart} from './blob';
 import {imageFile} from './attachments';
 
 /**
@@ -19,13 +19,15 @@ export function imageSource(url:string):string{
 
 /** An `<img>` that also shows references, once this device is signed in to the data channel. */
 export function BlobImage({src,alt,...rest}:ImgHTMLAttributes<HTMLImageElement>&{src:string}){
-  const ref=isImageRef(src),[ready,setReady]=useState(!ref);
+  const ref=isImageRef(src),target=useSyncExternalStore(onBlobUploadTarget,blobUploadTarget,blobUploadTarget);
+  const [ready,setReady]=useState(!ref);
   useEffect(()=>{
-    if(!ref)return;
-    let live=true;const target=blobUploadTarget();
-    if(target)void blobSession(target.token).then(ok=>{if(live&&ok)setReady(true);});
+    if(!ref){setReady(true);return;}
+    if(!target){setReady(false);return;}
+    let live=true;
+    void blobSession(target.token).then(ok=>{if(live&&ok)setReady(true);});
     return()=>{live=false;};
-  },[src]);
+  },[ref,src,target?.machine,target?.token]);
   const source=ready?imageSource(src):'';
   if(!source)return <span className="attachment image-pending" role="img" aria-label={alt||'图片'}>{alt||'图片'}</span>;
   return <img src={source} alt={alt} {...rest}/>;

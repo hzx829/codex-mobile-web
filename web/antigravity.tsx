@@ -53,8 +53,15 @@ export const ANTIGRAVITY_MODES:PermissionOption[]=[
 ];
 const modeLabel=(mode:string)=>ANTIGRAVITY_MODES.find(item=>item.id===mode)?.label||mode;
 
-function saved(key:string){try{return localStorage.getItem(key)||'';}catch{return '';}}
-function store(key:string,value:string){try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}}
+const memoryStore=new Map<string,string>();
+function saved(key:string){
+  try{const value=localStorage.getItem(key);if(value!==null)return value;}catch{}
+  return memoryStore.get(key)||'';
+}
+function store(key:string,value:string){
+  if(value)memoryStore.set(key,value);else memoryStore.delete(key);
+  try{if(value)localStorage.setItem(key,value);else localStorage.removeItem(key);}catch{}
+}
 function storedCatalog(machine:string):AntigravityCatalog|null{
   try{
     const parsed=JSON.parse(saved(`antigravity:${machine}:catalog`)||'null');
@@ -128,7 +135,15 @@ export function AntigravityPanel(props:Props){
   const {machine,connected,conversationId,call,go,inert,openFile,openPreview,previewError}=props;
   const creating=!conversationId;
   const key=`antigravity:${machine}:${conversationId||'new'}`;
-  const [projects,setProjects]=useState<{id:string;path:string;name?:string}[]|null>(null),[target,setTarget]=useState(props.newProject||'');
+  const [projects,setProjects]=useState<{id:string;path:string;name?:string}[]|null>(null);
+  const [target,setTargetState]=useState(()=>props.newProject||saved(`${key}:project`));
+  function setTarget(next:string|((old:string)=>string)){
+    setTargetState(old=>{
+      const value=typeof next==='function'?next(old):next;
+      if(creating)store(`${key}:project`,value);
+      return value;
+    });
+  }
   // A conversation opened before shows what it last held at once, marked `cached` until the read below replaces it.
   const cacheKey=threadKey('antigravity',machine,conversationId);
   const [view,setView]=useState<Json|null>(()=>creating?null:props.sync&&storedView('antigravity',machine,conversationId,'messages')||cachedView<Json>(cacheKey));
@@ -150,7 +165,8 @@ export function AntigravityPanel(props:Props){
   const request=useRef(call);request.current=call;
   // A saved conversation keeps its own model until changed here; the last choice seeds new conversations.
   const [model,setModel]=useState(()=>creating?saved(`antigravity:${machine}:model`):saved(`${key}:model`));
-  const [permissionMode,setPermissionMode]=useState('');
+  const [permissionMode,setPermissionModeState]=useState(()=>saved(`${key}:permissionMode`));
+  function setPermissionMode(value:string){setPermissionModeState(value);store(`${key}:permissionMode`,value);}
   const [defaultMode,setDefaultMode]=useState('');
   const [catalog,setCatalog]=useState<AntigravityCatalog|null>(()=>storedCatalog(machine));
   // Unknown (null) until the desktop's model list for the new conversation's project has been read.
@@ -177,10 +193,10 @@ export function AntigravityPanel(props:Props){
   const connectorImages=creating?createImages:view?Boolean(view.supportsImages):null;
   const modelImages=antigravityModelSupportsImages(catalog,model);
   const imagesBlockedReason=connectorImages===false?IMAGES_BLOCKED:modelImages===false?MODEL_IMAGES_BLOCKED:undefined;
-  const attachments=useComposerAttachments({disabled:busy||Boolean(pending),imagesBlocked:imagesBlockedReason,notify:setError,added:()=>setAdding(false)});
+  const attachments=useComposerAttachments({draftKey:key,disabled:busy||Boolean(pending),imagesBlocked:imagesBlockedReason,notify:setError,added:()=>setAdding(false)});
   const {images,files,setImages,setFiles}=attachments;
   const pick=useAttachmentPickers(chosen=>void attachments.add(chosen));
-  function sent(){edit('');setImages([]);setFiles([]);}
+  function sent(){edit('');setImages([]);setFiles([]);if(creating)setPermissionMode('');}
   const voice=useVoiceInput(props.voiceMode,key,connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
     request:(action,payload)=>request.current(action,payload),
@@ -251,7 +267,9 @@ export function AntigravityPanel(props:Props){
     if(!creating||!connected)return;
     request.current('antigravity.list',{}).then(page=>{
       if(!alive.current)return;
-      setProjects(page.projects||[]);setTarget(old=>old||page.projects?.[0]?.id||'');
+      const list=page.projects||[];
+      setProjects(list);
+      setTarget(old=>old&&(!list.length||list.some((item:{id:string})=>item.id===old))?old:list[0]?.id||'');
       if(page.defaultPermissionMode)setDefaultMode(page.defaultPermissionMode);
     }).catch(failed);
   },[creating,connected]);

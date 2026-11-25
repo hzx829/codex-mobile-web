@@ -62,9 +62,14 @@ test('what is stored keeps the latest Claude Code turns without images and the l
   assert.equal(claude.truncated,true,'The view offers to load what was left out.');
   assert.deepEqual(claude.turns.at(-1).items[0].images,[]);
   assert.deepEqual([claude.revision,claude.running],[undefined,false]);
-  const messages=Array.from({length:250},(_,i)=>({id:String(i),role:'assistant',text:'x'}));
-  const antigravity=stored(threadKey('antigravity','pc','a'),{id:'a',revision:'r',messages});
+  const ref='cmw-image:'+'a'.repeat(64);
+  const messages=Array.from({length:250},(_,i)=>i===248?{id:String(i),role:'user',text:'inline',images:['data:image/png;base64,AAAA']}:i===249?{id:String(i),role:'user',text:'ref',images:[ref]}:{id:String(i),role:'assistant',text:'x'});
+  const antigravity=stored(threadKey('antigravity','pc','a'),{id:'a',revision:'r',messages,revs:{'248':'rev-inline','249':'rev-ref'}});
   assert.equal(antigravity.messages.length,200);
   assert.equal(antigravity.messages[0].id,'50');
   assert.equal(antigravity.revision,undefined);
+  assert.deepEqual(antigravity.messages.at(-2).images,[]);
+  assert.deepEqual(antigravity.messages.at(-1).images,[ref]);
+  assert.equal(antigravity.revs['248'],undefined,'Inline images stripped from cache must not claim their rev.');
+  assert.equal(antigravity.revs['249'],'rev-ref','Content-addressed image refs keep their rev.');
 });

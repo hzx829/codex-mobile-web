@@ -50,6 +50,11 @@ test('synced turns carry references once the relay serves images, keeping their 
     const first = await hub2.open({service: 'claude', threadId: 't'}), second = await hub2.open({service: 'claude', threadId: 't', have: {}});
     assert.ok(isImageRef(first.entries[1].body.items[0].images[0]));
     assert.equal(first.entries[1].rev, second.entries[1].rev, 'The same turn keeps its rev.');
+    const message = {id: 'm1', role: 'user', text: 'look', images: [png(7)]};
+    const converted = withImageRefs(store, message);
+    assert.ok(isImageRef(converted.images[0]));
+    const plainMessage = {id: 'm2', role: 'user', text: 'plain'};
+    assert.equal(withImageRefs(store, plainMessage), plainMessage);
     hub.close();hub2.close();
   } finally {await removeTestTemp(dir);}
 });

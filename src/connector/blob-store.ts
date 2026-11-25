@@ -84,9 +84,16 @@ export class BlobStore {
   }
 }
 
-/** A turn-shaped entry with its images as references; the same object when it has no data URL images. */
+const hasDataImage = (images: unknown): images is string[] =>
+  Array.isArray(images) && images.some(url => typeof url === 'string' && url.startsWith('data:'));
+
+/** A turn- or message-shaped entry with its images as references; the same object when it has no data URL images. */
 export function withImageRefs(store: BlobStore, entry: Json): Json {
-  if (!Array.isArray(entry.items) || !entry.items.some((item: Json) => item.images?.some((url: unknown) => typeof url === 'string' && url.startsWith('data:')))) return entry;
   const ref = (url: string) => {try {return store.putDataUrl(url);} catch {return url;}};
-  return {...entry, items: entry.items.map((item: Json) => item.images?.length ? {...item, images: item.images.map(ref)} : item)};
+  if (Array.isArray(entry.items)) {
+    if (!entry.items.some((item: Json) => hasDataImage(item.images))) return entry;
+    return {...entry, items: entry.items.map((item: Json) => item.images?.length ? {...item, images: item.images.map(ref)} : item)};
+  }
+  if (hasDataImage(entry.images)) return {...entry, images: entry.images.map(ref)};
+  return entry;
 }

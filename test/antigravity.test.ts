@@ -1004,3 +1004,120 @@ test('newly created Antigravity conversation is immediately readable and syncabl
   // A genuinely unknown conversation still throws missing.
   await assert.rejects(bridge.handle('antigravity.read', {conversationId: randomUUID()}), (error: BridgeError) => error.code === 'missing');
 });
+
+test('Antigravity reads, syncs, and renders images from transcript media, metadata fallback, and newly created conversations', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-images-'));
+  const blobDir = join(dir, 'blobs');
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  const project = pathToFileURL(dir).href;
+  const id = randomUUID(), createdId = randomUUID();
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)').run(
+    id, 'Images', 'CASCADE_RUN_STATUS_IDLE', '2026-11-25T02:00:00.000Z', 4, 2, 't2', 0, JSON.stringify([project]),
+  );
+
+  const uploadedDir = join(dir, 'brain', id, '.user_uploaded');
+  const logs = join(dir, 'brain', id, '.system_generated', 'logs');
+  await mkdir(uploadedDir, {recursive: true});
+  await mkdir(logs, {recursive: true});
+  const pngBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const jpegBytes = Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8wABgAQEAX/2gAIAQEAAD8A0s8g/9k=', 'base64');
+  const img0 = join(uploadedDir, 'uploaded_media_0.png');
+  const img1 = join(uploadedDir, 'uploaded_media_1.jpg');
+  await writeFile(img0, pngBytes);
+  await writeFile(img1, jpegBytes);
+  const pngDataUrl = `data:image/png;base64,${pngBytes.toString('base64')}`;
+  const jpegDataUrl = `data:image/jpeg;base64,${jpegBytes.toString('base64')}`;
+
+  const line = (step: object) => JSON.stringify(step) + '\n';
+  await writeFile(join(logs, 'transcript_full.jsonl'),
+    line({
+      type: 'USER_INPUT',
+      step_index: 0,
+      content: `<USER_REQUEST>\n看这张图\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe user has uploaded 1 image(s):\n- ${img0.replace(/\\/g, '/')}\n</ADDITIONAL_METADATA>`,
+      media: [{mime_type: 'image/png', uri: img0.replace(/\\/g, '/')}],
+    }) +
+    line({type: 'PLANNER_RESPONSE', step_index: 1, content: '看到了'}) +
+    line({
+      type: 'USER_INPUT',
+      step_index: 2,
+      content: `<USER_REQUEST>\n再看第二张\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe user has uploaded 1 image(s):\n- ${img1.replace(/\\/g, '/')}\n</ADDITIONAL_METADATA>`,
+    }));
+
+  const bridge = new AntigravityBridge(dir, ledger, async (_dir, method) => {
+    if (method === 'GetCascadeModelConfigData') return {defaultOverrideModelConfig: {modelOrAlias: {model: 'MODEL_A'}}, clientModelConfigs: [{label: 'A', modelOrAlias: {model: 'MODEL_A'}}]};
+    if (method === 'StartCascade') return {cascadeId: createdId};
+    if (method === 'SendUserCascadeMessage') return {};
+    return {};
+  }, undefined, {queueIntervalMs: 60_000});
+
+  const {BlobStore, isImageRef} = await import('../src/connector/blob-store.js');
+  const {ThreadHub} = await import('../src/connector/thread-hub.js');
+  const store = new BlobStore(blobDir);
+  const hub = new ThreadHub(() => {});
+  hub.images = store;
+  hub.register('antigravity', bridge.syncSource);
+  t.after(async () => { hub.close(); bridge.close(); db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+
+  const view = await bridge.handle('antigravity.read', {conversationId: id});
+  assert.deepEqual(view.messages, [
+    {id: '0', role: 'user', text: '看这张图', images: [pngDataUrl]},
+    {id: '1', role: 'assistant', text: '看到了'},
+    {id: '2', role: 'user', text: '再看第二张', images: [jpegDataUrl]},
+  ]);
+
+  // ThreadHub replaces inline data URLs on Antigravity messages with content-addressed cmw-image:<sha256> refs.
+  const synced = await hub.open({service: 'antigravity', threadId: id});
+  assert.equal(synced.entries.length, 3);
+  assert.equal(synced.entries[0].body.images.length, 1);
+  assert.ok(isImageRef(synced.entries[0].body.images[0]));
+  assert.equal(await store.dataUrl(synced.entries[0].body.images[0]), pngDataUrl);
+  assert.ok(isImageRef(synced.entries[2].body.images[0]));
+  assert.equal(await store.dataUrl(synced.entries[2].body.images[0]), jpegDataUrl);
+
+  // Newly created conversation with images shows them immediately before the transcript flushes.
+  const created = await bridge.handle('antigravity.create', {
+    project, text: '新对话带图', images: [pngDataUrl], opId: `${Date.now()}:${randomUUID()}`,
+  });
+  assert.equal(created.state, 'accepted');
+  const createdView = await bridge.handle('antigravity.read', {conversationId: createdId});
+  assert.deepEqual(createdView.messages, [{id: '0', role: 'user', text: '新对话带图', images: [pngDataUrl]}]);
+
+  // AntigravityMessages renders both inline and synced image attachments (including image-only messages).
+  const html = renderToStaticMarkup(createElement(AntigravityMessages, {
+    messages: [
+      {id: '0', role: 'user', text: '看图', images: [pngDataUrl]},
+      {id: '1', role: 'user', text: '', images: [synced.entries[0].body.images[0]]},
+    ],
+    running: false,
+    openFile: () => {},
+    openPreview: () => {},
+    onFollowup: () => {},
+  }));
+  assert.match(html, /<img[^>]+src="data:image\/png;base64,[^>]+class="attachment"/);
+  assert.match(html, /class="attachment image-pending"/);
+});
+
+test('new chat routes for Antigravity and Claude Code survive history, reload, and app switches', () => {
+  const memory = new Map<string, string>();
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+  Object.defineProperty(globalThis, 'sessionStorage', {configurable: true, value: {
+    setItem: (k: string, v: string) => memory.set(k, v), getItem: (k: string) => memory.get(k) ?? null,
+  }});
+  try {
+    const id = randomUUID();
+    const agNew = {...home, project: 'file:///D:/work', newChat: true, antigravity: ''};
+    const claudeNew = {...home, project: 'D:/work', newChat: true, claude: ''};
+    assert.deepEqual(parseLocation({cmwRoute: agNew, cmwMachine: 'pc'}), {route: agNew, machine: 'pc'});
+    assert.deepEqual(parseLocation({cmwRoute: claudeNew, cmwMachine: 'pc'}), {route: claudeNew, machine: 'pc'});
+    // A saved conversation ID clears newChat when parsed.
+    assert.deepEqual(parseLocation({cmwRoute: {...agNew, antigravity: id}, cmwMachine: 'pc'}),
+      {route: {...agNew, newChat: false, antigravity: id}, machine: 'pc'});
+    // Switching to Codex and back to Antigravity restores the unsent new chat screen.
+    assert.deepEqual(switchRoute('pc', agNew, 'codex'), home);
+    assert.deepEqual(switchRoute('pc', home, 'antigravity'), agNew);
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'sessionStorage', original);
+    else Reflect.deleteProperty(globalThis, 'sessionStorage');
+  }
+});

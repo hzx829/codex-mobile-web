@@ -17,7 +17,7 @@ export function parseLocation(value:unknown):SavedLocation|null{
     if(typeof id!=='string'||id!==''&&!isConversation(id))return null;
     const service=SERVICE_IDS.find(item=>(SERVICES[item] as {field?:string}).field===field)!;
     const keepsProject=(SERVICES[service] as {keepsProject?:boolean}).keepsProject;
-    return {route:{...home,project:keepsProject?route.project:'',[field]:id},machine:state.cmwMachine};
+    return {route:{...home,project:keepsProject?route.project:'',newChat:id===''&&route.newChat,[field]:id},machine:state.cmwMachine};
   }
   if(route.chat!==undefined)return {route:home,machine:state.cmwMachine};
   return {route:{thread:route.thread,project:route.project,newChat:route.newChat},machine:state.cmwMachine};

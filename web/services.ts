@@ -57,7 +57,7 @@ export function supportedRoute(route: Route, available: readonly Service[] = SER
 
 export function withConversation(route: Route, id: string): Route {
   const field = spec(serviceOf(route)).field;
-  return field ? {...route, [field]: id} : route;
+  return field ? {...route, newChat: false, [field]: id} : route;
 }
 
 /** Thread owner key used by previews and file reads; Codex threads stay unprefixed. */

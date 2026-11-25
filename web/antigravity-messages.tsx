@@ -1,6 +1,7 @@
 import {memo, useMemo} from 'react';
 import type {AntigravityIssue, AntigravityMessage, MessageItem} from '../src/shared/types';
 import {groupItems} from './activity';
+import {BlobImage} from './blob-image';
 import {ActivityGroup} from './conversation';
 import {SafeMarkdown} from './content';
 import {IconButton} from './icon-button';
@@ -43,7 +44,8 @@ export const AntigravityMessages = memo(function AntigravityMessages({messages,r
     const first = group[0];
     if (first.role === 'activity') return <ActivityGroup key={first.id} items={group} running={running && index === groups.length-1} openFile={openFile}/>;
     const message=<article className={`message ${first.role}`}>
-      <SafeMarkdown allowFileUrls text={first.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>
+      {first.text&&<SafeMarkdown allowFileUrls text={first.text} openFile={openFile} openPreview={openPreview} onFollowup={onFollowup}/>}
+      {first.images?.map((url,i)=><BlobImage className="attachment" key={i} src={url} alt="附图" loading="lazy" decoding="async"/>)}
     </article>;
     return <div key={first.id} className={first.role==='user'?'user-entry':'turn'}>{first.role==='user'&&<SenderLabel sender={first.sender}/>}{message}
       {onCopy&&first.text&&<div className={first.role==='user'?'user-actions':'assistant-actions'}><IconButton icon="copy" label={first.role==='user'?'复制消息文字':'复制回复文字'} onClick={()=>onCopy(first.text)}/></div>}

@@ -32,8 +32,14 @@ export function blobUrl(machine:string,action:string,payload:Json,download=false
  */
 export type BlobUploadTarget={machine:string;token:string;images?:boolean};
 let uploadTarget:BlobUploadTarget|null=null;
-export function setBlobUploadTarget(target:BlobUploadTarget|null){uploadTarget=target;}
+const targetListeners=new Set<()=>void>();
+export function setBlobUploadTarget(target:BlobUploadTarget|null){
+  if(uploadTarget?.machine===target?.machine&&uploadTarget?.token===target?.token&&Boolean(uploadTarget?.images)===Boolean(target?.images))return;
+  uploadTarget=target;
+  for(const listener of targetListeners)listener();
+}
 export function blobUploadTarget(){return uploadTarget;}
+export function onBlobUploadTarget(listener:()=>void){targetListeners.add(listener);return()=>{targetListeners.delete(listener);};}
 
 /** The answer to one upload part, or why it failed; `status` 0 when the request did not get through. */
 export type PartAnswer={status:number;result?:Json;error?:{code?:string;message?:string}};

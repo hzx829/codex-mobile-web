@@ -1,9 +1,32 @@
-import {useRef,useState,type ClipboardEvent,type SetStateAction} from 'react';
+import {useEffect,useRef,useState,type ClipboardEvent,type SetStateAction} from 'react';
 import {clipboardFiles,imageFile,isImageFile,pastedImage,readAttachmentFiles,readImageFiles,type DraftFileAttachment} from './attachments';
 import {useFileDrop} from './file-drop';
 import {MAX_TOTAL_IMAGE_BYTES,imageBytes,validateImages} from '../src/shared/images';
 
+type StoredAttachments={images:string[];files:DraftFileAttachment[]};
+const draftAttachments=new Map<string,StoredAttachments>();
+const MAX_DRAFT_SCOPES=32;
+
+export function readDraftAttachments(key?:string):StoredAttachments{
+  if(!key)return {images:[],files:[]};
+  const saved=draftAttachments.get(key);
+  return saved?{images:[...saved.images],files:[...saved.files]}:{images:[],files:[]};
+}
+export function writeDraftAttachments(key:string|undefined,images:string[],files:DraftFileAttachment[]){
+  if(!key)return;
+  draftAttachments.delete(key);
+  if(!images.length&&!files.length)return;
+  draftAttachments.set(key,{images:[...images],files:[...files]});
+  while(draftAttachments.size>MAX_DRAFT_SCOPES)draftAttachments.delete(draftAttachments.keys().next().value!);
+}
+export function clearDraftAttachments(key?:string){
+  if(key)draftAttachments.delete(key);
+  else draftAttachments.clear();
+}
+
 type Options={
+  /** When set, unsent images and files stay in memory under this key across conversation switches. */
+  draftKey?:string;
   /** Nothing can be added now, e.g. while a message is being sent. */
   disabled:boolean;
   /** Why images cannot be added (the model does not take them); undefined when they can. */
@@ -20,11 +43,30 @@ type Options={
  * or a send in the meantime would otherwise work from stale lists. `reset` drops a reading in progress.
  */
 export function useComposerAttachments(options:Options){
-  const [images,setImageState]=useState<string[]>([]),[files,setFileState]=useState<DraftFileAttachment[]>([]),[loading,setLoading]=useState(false);
+  const [images,setImageState]=useState<string[]>(()=>readDraftAttachments(options.draftKey).images);
+  const [files,setFileState]=useState<DraftFileAttachment[]>(()=>readDraftAttachments(options.draftKey).files);
+  const [loading,setLoading]=useState(false);
+  const draftKeyRef=useRef(options.draftKey);
   const imagesRef=useRef(images),filesRef=useRef(files),reading=useRef<number|null>(null),sequence=useRef(0);
   const latest=useRef(options);latest.current=options;
-  function setImages(next:SetStateAction<string[]>){const value=typeof next==='function'?next(imagesRef.current):next;imagesRef.current=value;setImageState(value);}
-  function setFiles(next:SetStateAction<DraftFileAttachment[]>){const value=typeof next==='function'?next(filesRef.current):next;filesRef.current=value;setFileState(value);}
+  function setImages(next:SetStateAction<string[]>){
+    const value=typeof next==='function'?next(imagesRef.current):next;
+    imagesRef.current=value;setImageState(value);
+    writeDraftAttachments(draftKeyRef.current,value,filesRef.current);
+  }
+  function setFiles(next:SetStateAction<DraftFileAttachment[]>){
+    const value=typeof next==='function'?next(filesRef.current):next;
+    filesRef.current=value;setFileState(value);
+    writeDraftAttachments(draftKeyRef.current,imagesRef.current,value);
+  }
+  useEffect(()=>{
+    if(draftKeyRef.current===options.draftKey)return;
+    draftKeyRef.current=options.draftKey;
+    sequence.current++;reading.current=null;setLoading(false);
+    const next=readDraftAttachments(options.draftKey);
+    imagesRef.current=next.images;filesRef.current=next.files;
+    setImageState(next.images);setFileState(next.files);
+  },[options.draftKey]);
   async function add(selection:File[]){
     const {disabled,imagesBlocked,notify}=latest.current;
     if(disabled||!selection.length)return;
