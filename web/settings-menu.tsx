@@ -45,9 +45,6 @@ export function SidebarFooter({
         <span className="sidebar-footer-avatar"><Icon name="settings" size={15}/></span>}
       <span className="sidebar-footer-line">
         <strong>{me?me.name:'设置'}</strong>
-        <span className="sidebar-footer-sep" aria-hidden="true">·</span>
-        <i className={connected?'dot online':'dot'}/>
-        <span className="sidebar-footer-machine">{machineName}</span>
       </span>
       <span className="sidebar-footer-chevron"><Icon name="chevron" size={14}/></span>
     </button>

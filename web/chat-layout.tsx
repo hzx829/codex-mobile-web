@@ -8,7 +8,7 @@ export const workspaceName=(path:string)=>path.split(/[\\/]/).filter(Boolean).at
 export function HomeHeader({project,machineName,connected,relayOnline,back,backDisabled,chooseComputer,mobileSettings,onRefresh,refreshDisabled=false}:{project?:string;machineName:string;connected:boolean;relayOnline:boolean;back?:()=>void;backDisabled?:boolean;chooseComputer:()=>void;mobileSettings?:ReactNode;onRefresh?:()=>void;refreshDisabled?:boolean}){
   return <header className="home-header">
     {project&&back?<><IconButton icon="back" label="返回全部项目" className="round" disabled={backDisabled} onClick={back}/><h1>{project}</h1></>:
-      <button className="home-identity" aria-label="选择电脑" onClick={chooseComputer}><span className="home-computer"><Icon name="computer" size={19}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{relayOnline?'离线':'连接中…'}</small>}</span></button>}
+      <button className="home-identity" aria-label="选择电脑" onClick={chooseComputer}><span className="home-computer"><Icon name="computer" size={19}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{relayOnline?'离线':'连接中…'}</small>}<Icon name="chevron" size={13}/></span></button>}
     {(onRefresh||mobileSettings)&&<div className="home-header-actions">
       {onRefresh&&<IconButton icon="refresh" label="刷新项目与会话" className="round home-refresh" disabled={!connected||refreshDisabled} onClick={onRefresh}/>}
       {mobileSettings&&<span className="mobile-only-actions">{mobileSettings}</span>}
