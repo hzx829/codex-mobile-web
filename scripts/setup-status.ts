@@ -16,6 +16,8 @@ export type RelayStatus = {
   claudeSignIn?: 'yes' | 'no' | 'unknown';
   activeTasks?: ActiveTask[];
   pendingUsage?: number;
+  projectRoots?: string[];
+  defaultProjectRoot?: string;
 };
 
 /**

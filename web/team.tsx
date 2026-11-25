@@ -23,7 +23,7 @@ const ACTION_LABELS:Record<string,string>={
   'turn.stop':'停止任务','claude.stop':'停止任务','antigravity.stop':'停止任务','request.respond':'回应请求','claude.respond':'回应请求','antigravity.respond':'回应请求',
   'session.fork':'分叉会话','claude.fork':'分叉会话','session.rename':'重命名','claude.rename':'重命名',
   'session.archive':'归档','claude.archive':'归档','session.unarchive':'取消归档','session.resume':'恢复会话',
-  'project.create':'新建项目','claude.project.save':'保存项目设置','runtime.reload':'更新连接器',
+  'project.create':'新建项目','projects.create':'新建项目','claude.project.save':'保存项目设置','runtime.reload':'更新连接器',
 };
 const SERVICE_LABELS:Record<string,string>={codex:'Codex',claude:'Claude Code',antigravity:'Antigravity'};
 const STATE_LABELS:Record<string,string>={accepted:'',failed:'失败',uncertain:'待核实',queued:'已排队'};
@@ -249,7 +249,7 @@ function Activity({team,admin,machines,onOpenThread}:{team:TeamCall;admin:boolea
       const canOpen=Boolean(onOpenThread&&entry.threadId&&machines.has(entry.machineId)&&(entry.service==='codex'||entry.service==='claude'||entry.service==='antigravity'));
       return <div className="team-row activity" key={entry.id}>
         <span><b>{admin&&`${entry.userName} · `}{ACTION_LABELS[entry.action]||entry.action}{STATE_LABELS[entry.state]&&<em className={entry.state==='failed'?'danger':''}>{STATE_LABELS[entry.state]}</em>}</b>
-          <small>{SERVICE_LABELS[entry.service]||entry.service} · {machineLabel}{threadLabel&&<> · {canOpen?<button type="button" className="activity-thread-link" onClick={()=>onOpenThread!({machineId:entry.machineId,service:entry.service,threadId:entry.threadId})}>{threadLabel}</button>:threadLabel}</>}</small></span>
+          <small>{SERVICE_LABELS[entry.service]||entry.service} · {machineLabel}{threadLabel&&<> · {canOpen?<button type="button" className="activity-thread-link" onClick={()=>onOpenThread!({machineId:entry.machineId,service:entry.service,threadId:entry.threadId})}>{threadLabel}</button>:threadLabel}</>}{!threadLabel&&entry.detail&&<> · {entry.detail}</>}</small></span>
         <time>{relativeTime(entry.ts)}</time>
       </div>;
     })}

@@ -7,13 +7,15 @@ import { textKey, type SenderRecord } from './message-senders.js';
 
 export type UploadRecord=FileAttachment&{threadId:string;cwd:string};
 /** The team member the relay says sent a request; absent when the relay has no team. */
-export type Actor={userId:string;deviceId?:string;name?:string};
+export type ActorRole='owner'|'admin'|'member';
+export type Actor={userId:string;deviceId?:string;name?:string;role?:ActorRole};
 /** Set around each relay request, so every operation it starts records its sender without passing it through each app. */
 export const requestActor=new AsyncLocalStorage<Actor|undefined>();
 export function actorOf(value:unknown):Actor|undefined{
   const actor=value as Json|null|undefined;
   if(!actor||typeof actor.userId!=='string'||!actor.userId||actor.userId.length>100)return undefined;
-  return {userId:actor.userId,...typeof actor.deviceId==='string'?{deviceId:actor.deviceId.slice(0,100)}:{},...typeof actor.name==='string'?{name:actor.name.slice(0,100)}:{}};
+  const role=actor.role==='owner'||actor.role==='admin'||actor.role==='member'?actor.role:undefined;
+  return {userId:actor.userId,...typeof actor.deviceId==='string'?{deviceId:actor.deviceId.slice(0,100)}:{},...typeof actor.name==='string'?{name:actor.name.slice(0,100)}:{},...role?{role}:{}};
 }
 
 function canonical(v: any): string {
@@ -91,7 +93,8 @@ export class Ledger {
     // Who sent each message from the phone, so a session shows names next to messages from several members.
     this.db.exec(`CREATE TABLE IF NOT EXISTS message_senders (seq INTEGER PRIMARY KEY AUTOINCREMENT, service TEXT NOT NULL, thread_id TEXT NOT NULL,
         turn_id TEXT, kind TEXT NOT NULL, text_hash TEXT, user_id TEXT NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS message_senders_thread ON message_senders(service, thread_id, seq);`);
+      CREATE INDEX IF NOT EXISTS message_senders_thread ON message_senders(service, thread_id, seq);
+      CREATE TABLE IF NOT EXISTS claude_registered_projects (path TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);`);
     this.db.prepare('DELETE FROM message_senders WHERE created < ?').run(Date.now()-400*86400_000);
     this.db.exec("UPDATE operations SET state='uncertain' WHERE state='pending';");
     this.db.prepare(`DELETE FROM operations WHERE updated < ? ${QUEUE_TABLES.map(table=>`AND id NOT IN (SELECT id FROM ${table})`).join(' ')}`).run(Date.now()-7*86400_000);
@@ -135,6 +138,13 @@ export class Ledger {
   senders(service:string,threadId:string):SenderRecord[] {
     return this.db.prepare('SELECT turn_id,kind,text_hash,user_id,name FROM message_senders WHERE service=? AND thread_id=? ORDER BY seq').all(service,threadId)
       .map(row=>({turnId:row.turn_id===null?null:String(row.turn_id),kind:String(row.kind) as SenderRecord['kind'],textHash:row.text_hash===null?null:String(row.text_hash),sender:{id:String(row.user_id),name:String(row.name)}}));
+  }
+  registerClaudeProject(path:string,name:string) {
+    this.db.prepare('INSERT INTO claude_registered_projects (path,name,created_at) VALUES (?,?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name').run(path,name,Date.now());
+  }
+  claudeProjects():{path:string;name:string;createdAt:number}[] {
+    return this.db.prepare('SELECT path,name,created_at FROM claude_registered_projects ORDER BY created_at DESC, path ASC').all()
+      .map(row=>({path:String(row.path),name:String(row.name),createdAt:Number(row.created_at)}));
   }
   pendingUsage(limit=200):UsageEvent[] {return this.db.prepare('SELECT payload FROM usage_outbox ORDER BY created, id LIMIT ?').all(limit).map(row=>JSON.parse(String(row.payload)));}
   pendingUsageCount():number {return Number(this.db.prepare('SELECT count(*) AS n FROM usage_outbox').get()?.n||0);}

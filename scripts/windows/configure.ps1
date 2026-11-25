@@ -97,6 +97,8 @@ Add-Label '手机可访问的中继地址'
 $relay=New-Object System.Windows.Forms.TextBox;$relay.Dock='Top';$relay.Text=$settings.relayUrl;$layout.Controls.Add($relay)
 Add-Label '连接 Token（本机首次留空自动生成；公网填写服务器的 Token）'
 $token=New-Object System.Windows.Forms.TextBox;$token.Dock='Top';$token.UseSystemPasswordChar=$true;$token.Text=$settings.token;$layout.Controls.Add($token)
+Add-Label '团队项目根目录（可选，留空使用默认目录）'
+$projectRootDir=Add-Path $true;$projectRootDir.Text=$(if($settings.projectRoots -and $settings.projectRoots.Count -gt 0){$settings.projectRoots[0]}else{''})
 Add-Label 'Codex 程序（留空自动识别）'
 $bin=Add-Path $false;$bin.Text=$settings.codexBin
 Add-Label 'Codex 配置目录（留空沿用当前用户）'
@@ -107,7 +109,8 @@ $save.Add_Click({
   $save.Enabled=$false;$form.UseWaitCursor=$true
   try {
     Assert-Stopped
-    $payload=@{mode=$(if($modeBox.SelectedIndex -eq 1){'connector'}else{'all'});relayUrl=$relay.Text.Trim();token=$token.Text.Trim();codexBin=$bin.Text.Trim();codexHome=$codexDirectory.Text.Trim()} | ConvertTo-Json -Depth 5 -Compress
+    $rootsList=[string[]]@(if($projectRootDir.Text.Trim()){$projectRootDir.Text.Trim()})
+    $payload=@{mode=$(if($modeBox.SelectedIndex -eq 1){'connector'}else{'all'});relayUrl=$relay.Text.Trim();token=$token.Text.Trim();codexBin=$bin.Text.Trim();codexHome=$codexDirectory.Text.Trim();projectRoots=$rootsList} | ConvertTo-Json -Depth 5 -Compress
     $null=Invoke-Setup '--settings-stdin' $payload
     $form.DialogResult='OK';$form.Close()
   } catch {[void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'配置未保存')}

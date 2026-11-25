@@ -6,6 +6,7 @@ import {createInterface} from 'node:readline/promises';
 import {stdin,stdout} from 'node:process';
 import QRCode from 'qrcode';
 import {resolveCodex} from '../src/connector/app-server.js';
+import {defaultProjectRoot} from '../src/connector/workspace.js';
 import {defaultRelay,prepareSettings,savedSettings} from './setup-config.js';
 import {connectionPage} from './connection-page.js';
 import {relayStatus} from './setup-status.js';
@@ -17,7 +18,7 @@ try {
   const dir=resolve('.local'),file=join(dir,'config.json'),old=await savedSettings(file);
   if(args.includes('--defaults')) {
     // Consumed through redirected stdout by the local Windows form, never written to logs.
-    process.stdout.write(JSON.stringify({relayUrl:defaultRelay(),mode:'all',machineName:hostname(),...old,localRelay:defaultRelay(),defaultMachineName:hostname()}));
+    process.stdout.write(JSON.stringify({relayUrl:defaultRelay(),mode:'all',machineName:hostname(),projectRoots:[],...old,localRelay:defaultRelay(),defaultMachineName:hostname(),defaultProjectRoot:defaultProjectRoot()}));
   } else if(args.includes('--status')) {
     // Polled by the desktop window while it is open; prints JSON and never changes anything.
     process.stdout.write(JSON.stringify(await relayStatus(old)));

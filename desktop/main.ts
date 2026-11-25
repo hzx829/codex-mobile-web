@@ -3,7 +3,7 @@
 import QRCode from 'qrcode';
 
 type Mode = 'all' | 'connector' | 'relay';
-type Config = {mode?: Mode; relayUrl?: string; token?: string; machineName?: string; defaultMachineName?: string; codexBin?: string; codexHome?: string; claudeBin?: string; localRelay?: string};
+type Config = {mode?: Mode; relayUrl?: string; token?: string; machineName?: string; defaultMachineName?: string; projectRoots?: string[]; defaultProjectRoot?: string; codexBin?: string; codexHome?: string; claudeBin?: string; localRelay?: string};
 type Service = 'running' | 'partial' | 'stopped' | 'starting' | 'stopping' | 'saving';
 type HostState = {service: Service; configured: boolean; error?: string | null; autostart: boolean; teamNotify?: boolean; config?: Config | null};
 type ActiveTask = {service: 'codex' | 'claude' | 'antigravity'; threadId: string; actorName?: string; queued?: boolean};
@@ -20,9 +20,11 @@ type Health = {
   claudeSignIn?: 'yes' | 'no' | 'unknown';
   activeTasks?: ActiveTask[];
   pendingUsage?: number;
+  projectRoots?: string[];
+  defaultProjectRoot?: string;
 };
-type Settings = {mode: Mode; relayUrl: string; token: string; machineName: string; codexBin: string; codexHome: string; claudeBin: string};
-type PathField = 'codexBin' | 'codexHome' | 'claudeBin';
+type Settings = {mode: Mode; relayUrl: string; token: string; machineName: string; projectRoots: string[]; codexBin: string; codexHome: string; claudeBin: string};
+type PathField = 'codexBin' | 'codexHome' | 'claudeBin' | 'projectRoot';
 type FromHost =
   | {type: 'state'; state: HostState}
   | {type: 'health'; health: Health | null}
@@ -49,6 +51,7 @@ let state: HostState = {service: 'stopped', configured: true, autostart: false, 
 let health: Health | null = null;
 let screen: 'status' | 'settings' | null = null;
 let draftMode: Mode = 'all';
+let draftProjectRoots: string[] = [];
 let saving = false;
 let qrFor = '';
 let toastTimer = 0;
@@ -244,6 +247,59 @@ function renderTokenHint() {
   else setText('token-hint', '填写服务器共享 Token，或在团队「电脑」页生成的电脑专用 Token（cnt_…）。');
 }
 
+function rootKey(path: string) {
+  return path.trim().replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+}
+
+function renderProjectRootsHint() {
+  if (draftProjectRoots.length) {
+    setText('project-roots-hint', '首个目录将作为网页新建项目的默认位置；团队成员只能浏览和关联已配置目录及其子文件夹。');
+  } else {
+    const fallback = state.config?.defaultProjectRoot || health?.defaultProjectRoot || 'Documents\\Projects';
+    setText('project-roots-hint', `未配置时，团队成员仅能在默认目录（${fallback}）内新建和关联项目，不能浏览电脑其他位置。`);
+  }
+}
+
+function renderProjectRoots() {
+  const list = $('project-roots-list');
+  list.replaceChildren(...draftProjectRoots.map((dir, index) => {
+    const row = document.createElement('div');
+    row.className = 'root-row';
+    const pathEl = document.createElement('span');
+    pathEl.className = 'root-path mono';
+    pathEl.textContent = dir;
+    pathEl.title = dir;
+    row.appendChild(pathEl);
+    if (index === 0) {
+      const tag = document.createElement('span');
+      tag.className = 'root-tag';
+      tag.textContent = '默认';
+      row.appendChild(tag);
+    } else {
+      const promote = document.createElement('button');
+      promote.type = 'button';
+      promote.className = 'root-btn';
+      promote.textContent = '设为默认';
+      promote.addEventListener('click', () => {
+        draftProjectRoots = [dir, ...draftProjectRoots.filter((_, i) => i !== index)];
+        renderProjectRoots();
+      });
+      row.appendChild(promote);
+    }
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'root-btn danger';
+    remove.textContent = '移除';
+    remove.addEventListener('click', () => {
+      draftProjectRoots = draftProjectRoots.filter((_, i) => i !== index);
+      renderProjectRoots();
+    });
+    row.appendChild(remove);
+    return row;
+  }));
+  renderProjectRootsHint();
+}
+
 function renderSettingsChrome() {
   const first = !state.configured, running = state.service === 'running' || state.service === 'partial';
   $('welcome').hidden = !first;
@@ -262,11 +318,13 @@ function renderSettingsChrome() {
   ($('token') as HTMLInputElement).placeholder = isLocal ? '本机首次留空，自动生成' : '共享 Token 或电脑专用 Token（cnt_…）';
   ($('machineName') as HTMLInputElement).placeholder = state.config?.defaultMachineName || '例如：办公室主力机';
   renderTokenHint();
+  renderProjectRootsHint();
 }
 
 function openSettings() {
   const config = state.config || {};
   draftMode = config.mode || 'all';
+  draftProjectRoots = Array.isArray(config.projectRoots) ? config.projectRoots.filter(Boolean) : [];
   ($('relay') as HTMLInputElement).value = config.relayUrl || '';
   ($('token') as HTMLInputElement).value = config.token || '';
   ($('machineName') as HTMLInputElement).value = config.machineName || '';
@@ -275,6 +333,7 @@ function openSettings() {
   ($('claudeBin') as HTMLInputElement).value = config.claudeBin || '';
   ($('advanced') as HTMLDetailsElement).open = !!(config.codexBin || config.codexHome || config.claudeBin);
   $('save-error').hidden = true;
+  renderProjectRoots();
   show('settings');
 }
 
@@ -358,7 +417,15 @@ function receive(message: FromHost) {
   } else if (message.type === 'screen') {
     if (message.name === 'settings') openSettings(); else show('status');
   } else if (message.type === 'picked') {
-    ($(message.field) as HTMLInputElement).value = message.path;
+    if (message.field === 'projectRoot') {
+      const next = message.path.trim();
+      if (next && !draftProjectRoots.some(item => rootKey(item) === rootKey(next))) {
+        draftProjectRoots = [...draftProjectRoots, next];
+        renderProjectRoots();
+      }
+    } else {
+      ($(message.field) as HTMLInputElement).value = message.path;
+    }
   } else if (message.type === 'claudeSignIn') {
     signIn = message.state === 'started' ? 'started' : message.state === 'failed' ? 'failed' : 'idle';
     signInError = message.error || '';
@@ -410,13 +477,14 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('.segmented bu
   });
 }
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-pick]')) button.addEventListener('click', () => send({type: 'pick', field: button.dataset.pick as PathField}));
+$('add-project-root').addEventListener('click', () => send({type: 'pick', field: 'projectRoot'}));
 $('settings-form').addEventListener('submit', event => {
   event.preventDefault();
   if (saving) return;
   saving = true;
   $('save-error').hidden = true;
   const value = (id: string) => ($(id) as HTMLInputElement).value.trim();
-  send({type: 'save', settings: {mode: draftMode === 'relay' ? 'all' : draftMode, relayUrl: value('relay'), token: value('token'), machineName: value('machineName'), codexBin: value('codexBin'), codexHome: value('codexHome'), claudeBin: value('claudeBin')}});
+  send({type: 'save', settings: {mode: draftMode === 'relay' ? 'all' : draftMode, relayUrl: value('relay'), token: value('token'), machineName: value('machineName'), projectRoots: draftProjectRoots, codexBin: value('codexBin'), codexHome: value('codexHome'), claudeBin: value('claudeBin')}});
   render();
 });
 document.addEventListener('keydown', event => {
@@ -433,7 +501,7 @@ send({type: 'ready'});
 function mock(message: ToHost) {
   const params = new URLSearchParams(location.search);
   const team = params.has('team');
-  const config: Config = {mode: team ? 'connector' : 'all', relayUrl: team ? 'https://codex.example.com' : 'http://192.168.1.8:3340', token: team ? 'cnt_preview-token-not-real' : 'preview-token-not-real', machineName: '办公室主力机', defaultMachineName: 'DESKTOP-DEMO', localRelay: 'http://192.168.1.8:3340'};
+  const config: Config = {mode: team ? 'connector' : 'all', relayUrl: team ? 'https://codex.example.com' : 'http://192.168.1.8:3340', token: team ? 'cnt_preview-token-not-real' : 'preview-token-not-real', machineName: '办公室主力机', defaultMachineName: 'DESKTOP-DEMO', defaultProjectRoot: 'C:\\Users\\Demo\\Documents\\Projects', projectRoots: [], localRelay: 'http://192.168.1.8:3340'};
   const later = (fn: () => void, ms = 900) => setTimeout(fn, ms);
   const update = (patch: Partial<HostState>) => receive({type: 'state', state: {...state, ...patch}});
   if (message.type === 'ready') {
@@ -451,7 +519,9 @@ function mock(message: ToHost) {
     receive({type: 'claudeSignIn', state: 'started'});
     later(() => receive(params.has('signin-fails') ? {type: 'claudeSignIn', state: 'failed', error: '连接器未在线'} : {type: 'claudeSignIn', state: 'done'}), 1800);
   } else if (message.type === 'autostart') update({autostart: message.enabled});
-  else if (message.type === 'save') {
+  else if (message.type === 'pick' && message.field === 'projectRoot') {
+    receive({type: 'picked', field: 'projectRoot', path: `D:\\TeamWork\\Workspace-${draftProjectRoots.length + 1}`});
+  } else if (message.type === 'save') {
     update({service: 'saving'});
     later(() => {update({service: 'running', configured: true, config: {...config, ...message.settings}}); receive({type: 'saveResult', ok: true});});
   }

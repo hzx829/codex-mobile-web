@@ -86,6 +86,27 @@ function localWorkspace(value: unknown) {
   if(typeof value!=='string')return '';
   try {const url=new URL(value);return url.host?'':fileURLToPath(url);} catch {return '';}
 }
+/** Encodes a local path using Antigravity desktop's URI spelling (`file:///c%3A/Users/...`). */
+export function toAntigravityFileUri(absPath: string): string {
+  const norm = absPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const win = /^([A-Za-z]):(?:\/(.*))?$/.exec(norm);
+  if (win) {
+    const drive = win[1].toLowerCase();
+    const rest = (win[2] || '').split('/').filter(Boolean).map(seg => encodeURIComponent(seg)).join('/');
+    return rest ? `file:///${drive}%3A/${rest}` : `file:///${drive}%3A`;
+  }
+  const rest = norm.split('/').filter(Boolean).map(seg => encodeURIComponent(seg)).join('/');
+  return `file:///${rest}`;
+}
+const AG_PROJECT_UUID_NS = Buffer.from('8d3f2a6c4c114d5e9c712a5f1d8c9e0b', 'hex');
+/** RFC 4122 UUIDv5 derived deterministically from an operation ID so retried `CreateProject` calls reuse the same project UUID. */
+export function deterministicProjectUuid(seed: string): string {
+  const hash = createHash('sha1').update(AG_PROJECT_UUID_NS).update(seed, 'utf8').digest();
+  hash[6] = (hash[6] & 0x0f) | 0x50;
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+  const hex = hash.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
 const sameFolder = (a: string, b: string) => Boolean(a) && a.replace(/[\\/]+$/, '').toLowerCase() === b.replace(/[\\/]+$/, '').toLowerCase();
 function singleWorkspace(value: string) {
   try {const roots=JSON.parse(value);return Array.isArray(roots)&&roots.length===1?localWorkspace(roots[0]):'';} catch {return '';}
@@ -1001,7 +1022,7 @@ export class AntigravityBridge {
   private catalogInflight?: Promise<ReturnType<typeof parseAntigravityModels>>;
   private permissionCache?: {at: number; value: AntigravityPermissionMode | undefined};
   private permissionInflight?: Promise<AntigravityPermissionMode | undefined>;
-  private projectsCache?: {at: number; dirMtimeNs: bigint | null; value: {id: string; name: string; path: string}[]};
+  private projectsCache?: {at: number; dirMtimeNs: bigint | null; value: {id: string; name: string; path: string; uri: string; archived: boolean}[]};
   private trajectoriesCache?: {at: number; summaries: Record<string, Json>};
   private trajectoriesInflight?: Promise<Record<string, Json> | null>;
   private conversationMetaCache = new Map<string, {trajectoryId?: string; permissionMode?: AntigravityPermissionMode; at: number}>();
@@ -1293,7 +1314,7 @@ export class AntigravityBridge {
   private daemonDir() { return join(this.root, 'daemon'); }
 
   /** Desktop projects (`~/.gemini/config/projects`); a new conversation needs its project's ID to show under that project. */
-  private async desktopProjects(): Promise<{id: string; name: string; path: string}[]> {
+  private async desktopProjects(): Promise<{id: string; name: string; path: string; uri: string; archived: boolean}[]> {
     const dirInfo = await stat(this.projectsDir, {bigint: true}).catch(() => null);
     const dirMtimeNs = dirInfo?.mtimeNs ?? null;
     const now = Date.now();
@@ -1301,17 +1322,64 @@ export class AntigravityBridge {
       return this.projectsCache.value;
     }
     const names = await readdir(this.projectsDir).catch(() => [] as string[]);
-    const projects = await Promise.all(names.filter(name => name.endsWith('.json')).map(async name => {
+    const projects = await Promise.all(names.filter(name => name.endsWith('.json') && name !== 'outside-of-project.json').map(async name => {
       try {
         const project = JSON.parse(await readFile(join(this.projectsDir, name), 'utf8'));
         const resources = Array.isArray(project?.projectResources?.resources) ? project.projectResources.resources : [];
-        const roots = resources.map((item: Json) => localWorkspace(item?.folderUri ?? item?.gitFolder?.folderUri)).filter(Boolean);
-        return typeof project.id === 'string' && roots.length === 1 ? [{id: project.id, name: typeof project.name === 'string' ? project.name : '', path: roots[0] as string}] : [];
+        const entries = resources
+          .map((item: Json) => {
+            const rawUri = item?.folderUri ?? item?.gitFolder?.folderUri;
+            const localPath = localWorkspace(rawUri);
+            return localPath && typeof rawUri === 'string' ? {path: localPath, uri: rawUri.replace(/\/+$/, '')} : null;
+          })
+          .filter((item: {path: string; uri: string} | null): item is {path: string; uri: string} => Boolean(item));
+        return typeof project.id === 'string' && project.id && project.id !== 'outside-of-project' && entries.length === 1
+          ? [{id: project.id, name: typeof project.name === 'string' ? project.name : '', path: entries[0].path, uri: entries[0].uri, archived: project.archived === true}]
+          : [];
       } catch { return []; }
     }));
     const value = projects.flat();
     this.projectsCache = {at: now, dirMtimeNs, value};
     return value;
+  }
+
+  /** Registers a local directory as an Antigravity project via Hub `ResolveFolder` + idempotent `CreateProject`. */
+  async registerProject(opId: string, input: {name: string; path: string}): Promise<{project: {id: string; projectId: string; name: string; path: string; uri: string}}> {
+    const name = textRequired(input.name, '项目名称', 80);
+    const folderUri = toAntigravityFileUri(input.path);
+    const directory = this.daemonDir();
+    const resolved = await this.hub(directory, 'ResolveFolder', {folderUri});
+    if (resolved?.resourceType === 'FOLDER_TYPE_NON_EXISTENT') {
+      throw new BridgeError('invalid', 'Antigravity 无法识别该目录，请确认文件夹已存在');
+    }
+    const resource: Json = resolved?.resourceType === 'FOLDER_TYPE_GIT_FOLDER'
+      ? {gitFolder: {folderUri, allowWrite: true}}
+      : {folderUri};
+    const projectId = deterministicProjectUuid(`${opId}:antigravity`);
+    try {
+      await this.hub(directory, 'CreateProject', {
+        backend: 'BACKEND_TYPE_LOCAL',
+        project: {
+          id: projectId,
+          name,
+          isWorkspaceOnly: false,
+          settings: {},
+          projectResources: {resources: [resource]},
+        },
+      });
+    } catch (error) {
+      if (!(error instanceof BridgeError) || error.code !== 'already_exists') throw error;
+      const existing = await this.hub(directory, 'ReadProject', {id: projectId});
+      const existingResources: Json[] = Array.isArray(existing?.project?.projectResources?.resources) ? existing.project.projectResources.resources : [];
+      const existingPath = existingResources
+        .map(item => localWorkspace(item?.folderUri ?? item?.gitFolder?.folderUri))
+        .find(Boolean);
+      if (existing?.project?.id !== projectId || (existingPath && !sameFolder(existingPath, input.path))) {
+        throw error;
+      }
+    }
+    this.projectsCache = undefined;
+    return {project: {id: folderUri, projectId, name, path: input.path, uri: folderUri}};
   }
 
   /** Settings of the latest message in this project (else anywhere), which the desktop sends with every message. */
@@ -1613,7 +1681,10 @@ export class AntigravityBridge {
         this.latestConfig(path),
         model ? this.modelCatalog() : Promise.resolve(null),
       ]);
-      const desktop = projects.find(item => sameFolder(item.path, path));
+      const explicitProjectId = typeof p.projectId === 'string' && p.projectId.trim() ? p.projectId.trim() : undefined;
+      const desktop = explicitProjectId
+        ? projects.find(item => item.id === explicitProjectId) || {id: explicitProjectId}
+        : projects.find(item => !item.archived && sameFolder(item.path, path));
       let baseConfig = model && catalog ? this.applyModel(latest, model, catalog.models) : latest;
       if (!hasConfiguredModel(baseConfig)) baseConfig = await this.withDefaultModel(baseConfig);
       const config = this.withPermission(baseConfig, permissionMode);
@@ -2031,48 +2102,79 @@ export class AntigravityBridge {
       const includeProjects = !offset && !search;
       const [named, defaultPermissionMode] = includeProjects
         ? await Promise.all([this.desktopProjects(), this.defaultPermissionMode()])
-        : [[] as {id: string; name: string; path: string}[], this.permissionCache?.value];
-      return this.index(db=>{
-        const rows=db.prepare(`SELECT conversation_id AS id, title, status, last_modified_time AS modified FROM conversation_summaries
-          WHERE (? IS NULL OR EXISTS (SELECT 1 FROM ${workspaceEntries} AS workspace WHERE workspace.value=?))
-          AND (? IS NULL OR instr(lower(coalesce(nullif(title,''),'未命名对话')),lower(?))>0)
-          ORDER BY last_modified_time DESC, conversation_id LIMIT 51 OFFSET ?`).all(project,project,search,search,offset);
-        const projects=includeProjects?db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text' ORDER BY uri`).all().flatMap(({uri})=>{
-          const path=localWorkspace(uri),name=named.find(item=>sameFolder(item.path,path))?.name;return path?[{id:uri,path,...(name?{name}:{})}]:[];
-        }):undefined;
-        const seenIds = new Set(rows.map(row => String(row.id)));
-        const extra: {id: string; title: string; running: boolean; updatedAt: number}[] = [];
-        for (const pendingId of [...this.pendingCreated.keys()]) {
-          const pending = this.pendingEntry(pendingId);
-          if (!pending) continue;
-          if (seenIds.has(pendingId)) {
-            pending.seenInDb = true;
-            continue;
-          }
-          if (offset || pending.seenInDb) continue;
-          if (project && pending.project !== project) continue;
-          const title = pending.summary.title || '未命名对话';
-          if (search && !title.toLowerCase().includes(search.toLowerCase())) continue;
-          extra.push({
-            id: pendingId,
-            title,
-            running: pending.summary.status === active,
-            updatedAt: Date.parse(pending.summary.modified) || pending.createdAt,
-          });
+        : [[] as {id: string; name: string; path: string; uri: string; archived: boolean}[], this.permissionCache?.value];
+      const mergeListedProjects = (dbUris: unknown[]) => {
+        const listed: {id: string; path: string; name?: string}[] = [];
+        for (const rawUri of dbUris) {
+          if (typeof rawUri !== 'string') continue;
+          const path = localWorkspace(rawUri);
+          if (!path) continue;
+          const match = named.find(item => sameFolder(item.path, path));
+          if (match?.archived) continue;
+          const name = match?.name;
+          listed.push({id: rawUri, path, ...(name ? {name} : {})});
         }
-        extra.sort((a, b) => b.updatedAt - a.updatedAt);
-        const listed = [
-          ...extra,
-          ...rows.map(row => ({id: row.id, title: row.title || '未命名对话',
-            running: row.status === active, updatedAt: Date.parse(String(row.modified)) || 0})),
-        ];
-        return {
-          data: listed.slice(0, 50),
-          hasMore: listed.length > 50,
-          projects,
-          ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
-        };
-      });
+        // Include empty desktop projects that do not have any conversation yet, skipping archived ones.
+        for (const item of named) {
+          if (item.archived) continue;
+          if (listed.some(existing => sameFolder(existing.path, item.path))) continue;
+          listed.push({id: item.uri, path: item.path, ...(item.name ? {name: item.name} : {})});
+        }
+        return listed;
+      };
+      try {
+        return this.index(db=>{
+          const rows=db.prepare(`SELECT conversation_id AS id, title, status, last_modified_time AS modified FROM conversation_summaries
+            WHERE (? IS NULL OR EXISTS (SELECT 1 FROM ${workspaceEntries} AS workspace WHERE workspace.value=?))
+            AND (? IS NULL OR instr(lower(coalesce(nullif(title,''),'未命名对话')),lower(?))>0)
+            ORDER BY last_modified_time DESC, conversation_id LIMIT 51 OFFSET ?`).all(project,project,search,search,offset);
+          const projects=includeProjects?mergeListedProjects(
+            db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text' ORDER BY uri`).all().map(({uri})=>uri),
+          ):undefined;
+          const seenIds = new Set(rows.map(row => String(row.id)));
+          const extra: {id: string; title: string; running: boolean; updatedAt: number}[] = [];
+          for (const pendingId of [...this.pendingCreated.keys()]) {
+            const pending = this.pendingEntry(pendingId);
+            if (!pending) continue;
+            if (seenIds.has(pendingId)) {
+              pending.seenInDb = true;
+              continue;
+            }
+            if (offset || pending.seenInDb) continue;
+            if (project && pending.project !== project) continue;
+            const title = pending.summary.title || '未命名对话';
+            if (search && !title.toLowerCase().includes(search.toLowerCase())) continue;
+            extra.push({
+              id: pendingId,
+              title,
+              running: pending.summary.status === active,
+              updatedAt: Date.parse(pending.summary.modified) || pending.createdAt,
+            });
+          }
+          extra.sort((a, b) => b.updatedAt - a.updatedAt);
+          const listed = [
+            ...extra,
+            ...rows.map(row => ({id: row.id, title: row.title || '未命名对话',
+              running: row.status === active, updatedAt: Date.parse(String(row.modified)) || 0})),
+          ];
+          return {
+            data: listed.slice(0, 50),
+            hasMore: listed.length > 50,
+            projects,
+            ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
+          };
+        });
+      } catch (error) {
+        if (includeProjects && named.some(item => !item.archived)) {
+          return {
+            data: [],
+            hasMore: false,
+            projects: mergeListedProjects([]),
+            ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
+          };
+        }
+        throw error;
+      }
     }
     if (action === 'antigravity.operation') return this.ledger.read(textRequired(p.opId, '操作标识', 100));
     if (action === 'antigravity.file.uploadStart' || action === 'antigravity.file.uploadChunk') {

@@ -395,6 +395,11 @@ sealed class TrayContext : ApplicationContext {
         dialog.Description = "选择 Codex 配置目录";
         if (dialog.ShowDialog(window) == DialogResult.OK) path = dialog.SelectedPath;
       }
+    } else if (field == "projectRoot") {
+      using (FolderBrowserDialog dialog = new FolderBrowserDialog()) {
+        dialog.Description = "选择团队项目根目录";
+        if (dialog.ShowDialog(window) == DialogResult.OK) path = dialog.SelectedPath;
+      }
     }
     if (path == null) return;
     Dictionary<string, object> message = new Dictionary<string, object>();
@@ -533,6 +538,7 @@ sealed class TrayContext : ApplicationContext {
     }
     Dictionary<string, object> payload = new Dictionary<string, object>();
     foreach (string key in new[] {"mode", "relayUrl", "token", "machineName", "codexBin", "codexHome", "claudeBin"}) payload[key] = settings.ContainsKey(key) ? settings[key] : "";
+    if (settings.ContainsKey("projectRoots")) payload["projectRoots"] = settings["projectRoots"];
     ProcessResult saved = await RunNode(new[] {"--settings-stdin"}, json.Serialize(payload), 30000);
     SetIdle();
     if (saved.Code != 0) {

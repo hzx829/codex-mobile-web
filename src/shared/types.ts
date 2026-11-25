@@ -14,7 +14,40 @@ export const bridgeServices = ['codex', 'antigravity', 'claude'] as const;
 export type BridgeService = typeof bridgeServices[number];
 /** `protocol` and `features`: what the computer's connector reported (src/shared/protocol.ts); older connectors and relays leave them out. */
 export type Machine = {id: string; name: string; guest?: boolean; services?: BridgeService[]; protocol?: number; features?: string[]};
-export type RequestAction = AntigravityAction | ClaudeAction | 'project.create' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe' | 'voice.stream.open' | 'voice.stream.audio' | 'voice.stream.close' | 'voice.stream.cancel' | 'sync.open' | 'sync.page';
+export type ProjectInfo = {
+  id: string;
+  name: string;
+  path: string;
+  roots?: string[];
+  uri?: string;
+  projectId?: string;
+  owner?: TeamMember | null;
+};
+export type ProjectRootInfo = {
+  path: string;
+  label: string;
+  isDefault: boolean;
+  configured: boolean;
+};
+export type ProjectBrowseEntry = {
+  name: string;
+  path: string;
+  isGit: boolean;
+};
+export type ProjectCreateServiceOutcome = {
+  ok: boolean;
+  project?: ProjectInfo;
+  notice?: string;
+  error?: {code: string; message: string};
+};
+export type ProjectCreateResult = {
+  path: string;
+  created: boolean;
+  gitInit?: boolean;
+  gitNotice?: string;
+  results: Partial<Record<BridgeService, ProjectCreateServiceOutcome>>;
+};
+export type RequestAction = AntigravityAction | ClaudeAction | 'project.create' | 'projects.roots' | 'projects.browse' | 'projects.create' | 'info' | 'runtime.reload' | 'sessions.list' | 'session.read' | 'session.status' | 'session.create' | 'session.fork' | 'session.resume' | 'session.rename' | 'session.archive' | 'session.unarchive' | 'turn.send' | 'turn.cancelQueued' | 'turn.withdrawQueued' | 'turn.steerQueued' | 'turn.edit' | 'turn.stop' | 'request.respond' | 'operation.read' | 'file.read' | 'file.download' | 'file.uploadStart' | 'file.uploadChunk' | 'preview.start' | 'preview.stop' | 'voice.transcribe' | 'voice.stream.open' | 'voice.stream.audio' | 'voice.stream.close' | 'voice.stream.cancel' | 'sync.open' | 'sync.page';
 export interface BridgeRequest { id: string; action: RequestAction; payload: Json; machineId?: string }
 /** `sender`: the team member who sent a user message from the phone, when the connector recorded it. */
 export interface MessageItem { id: string; type: string; role: string; text: string; files?: string[]; images?: string[]; sender?: TeamMember }

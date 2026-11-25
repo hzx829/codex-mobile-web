@@ -2,7 +2,7 @@
 
 测试环境：Windows Antigravity App 2.33.0.0，`language_server.exe` 的 SHA-256 以 `EB6D986DFC5A859C` 开头，codex-mobile-web `81295f9`。这些接口没有公开文档，Antigravity 升级后要重新核对。
 
-目的：确认手机端能不能新建、查看、改名、删除 Antigravity 项目。结论是可以，桌面 Hub 自己就有一套项目接口，不需要直接改 `~/.gemini/config/projects/*.json`。目前手机端还没有接入。Codex 的对应记录见 [Codex 项目接口实测](../codex/PROJECT-API.md)。
+目的：确认手机端能不能新建、查看、改名、删除 Antigravity 项目。结论是可以，桌面 Hub 自己就有一套项目接口，不需要直接改 `~/.gemini/config/projects/*.json`。目前手机端已接入新建/关联项目与列表合并（过滤已归档项目），改名与移除/归档入口留待后续版本。Codex 的对应记录见 [Codex 项目接口实测](../codex/PROJECT-API.md)。
 
 ## 调用方式
 
@@ -62,20 +62,25 @@ Project {
 4. **删项目不删文件夹，但会删对话。** 删除后项目文件和列表项消失，磁盘上的文件夹和文件都还在。删除前用 `StartCascade`（带 `projectEnvConfig.projectId`）在项目里开了一条空对话，项目删除后，这条对话的 `conversations/<id>.db`、`brain/<id>/` 和摘要索引里的记录全部消失。
 5. **新建项目时自动补的字段。** 只传 `id`、`name`、`projectResources`，服务端会补上 `permissionGrants: {v2Migrated: true}`。桌面端自己建的项目还会带 `isWorkspaceOnly: false` 和 `settings: {}`。
 6. **对话不记在项目里。** 新开的对话没有写进 `projectConversations`，归属靠对话自己的 `workspace_uris` 和 `projectEnvConfig`。
+7. **`archived: true` 软归档实测（2026-11-25 补充，Hub `language_server.exe` SHA-256 `73CE9A24...`）**：
+   - 调用 `UpdateProject({project: {id, archived: true}, rename: false})` 返回 `200 {}`，仅更新 `archived: true` 与 `updatedAt`，其余字段（`name`、`projectResources`、`permissionGrants`、`settings`、`isWorkspaceOnly`）均原样保留。
+   - 项目内已有对话**不会被删除**（`GetAllCascadeTrajectories` 仍保留，`conversations/<id>.db` 未受影响）。
+   - `ListProjects` 仍会返回已归档项目的 ID；`ReadProject` / `ReadProjects` 与磁盘 JSON 会携带 `"archived": true`，连接器列表据此过滤隐藏。
+   - 可通过 `UpdateProject({project: {id, archived: false}, rename: false})` 完整恢复，磁盘 JSON 的 `archived` 字段被移除；同 UUID 重复 `CreateProject` 返回 `409 already_exists`。
 
 ## 接入时要遵守的规则
 
-- 新建时一定生成 UUID 放进 `project.id`，任何情况下都不要省略。
+- 新建时一定生成 UUID 放进 `project.id`，任何情况下都不要省略（推荐使用确定性 UUIDv5 配合 `opId` 实现幂等重试）。
 - 文件夹地址按桌面端的写法生成（`file:///c%3A/...`），新建前用 `ResolveFolder` 确认文件夹存在、看是不是 Git 仓库。
 - 改名只传 `{id, name}` 就够了。
-- 删除会连带删除项目里的对话历史，手机上必须明确提示。`archived` 字段可能更适合当作"移除"，但它在桌面端的效果还没测。
+- 删除会连带删除项目里的对话历史，手机上必须明确提示；软移除优先使用 `UpdateProject({project: {id, archived: true}, rename: false})` 并过滤 `archived === true` 的项目。
 - 写入后可以靠 `ProjectUpdatesStream` 或 `ReadProject` 确认结果，不要因为返回 `{}` 就判定成功或失败。
 
 ## 没有验证的
 
 - 桌面侧栏是否随推送立即刷新：推送事件确认发出了，但侧栏的画面没看到。
-- 有内容的对话会不会随项目一起删：实测只用了没发过消息的空对话，按现象推测也会删。
-- `rename` 开关和 `archived` 字段的作用。
+- 有内容的对话会不会随 `DeleteProject` 一起删：实测只用了没发过消息的空对话，按现象推测也会删。
+- `rename` 开关的实际作用。
 - 删掉孤儿文件 `.json` 之后，Hub 内存里是否还留着那个空 ID 项目；`ListProjects` 看不到它，重启 Antigravity 应该能清掉。
 
 ## 测试过程与清理

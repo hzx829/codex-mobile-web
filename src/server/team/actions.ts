@@ -9,6 +9,8 @@ export const serviceOf = (action: string): Service => action.startsWith('claude.
 export const CREATE_ACTIONS = new Set(['session.create', 'session.fork', 'claude.create', 'claude.fork', 'antigravity.create']);
 /** Session lists and reads, which the relay marks with each session's owner. */
 export const LIST_ACTIONS = new Set(['sessions.list', 'claude.list', 'antigravity.list']);
+/** Responses whose `projects` array gets team creator attribution. */
+export const PROJECT_LIST_ACTIONS = new Set(['info', 'claude.list', 'antigravity.list']);
 export const READ_ACTIONS = new Set(['session.read', 'claude.read', 'antigravity.read', 'sync.open']);
 /** Replies whose messages may name their sender; the relay shows each member's current name. */
 export const SENDER_ACTIONS = new Set([...READ_ACTIONS, 'claude.watch', 'antigravity.watch', 'sync.page']);
@@ -36,7 +38,7 @@ export function refreshSenderNames(store: TeamStore, result: Json) {
 export const SEND_ACTIONS = ['session.create', 'turn.send', 'turn.steerQueued', 'turn.edit', 'claude.create', 'claude.send', 'claude.steerQueued', 'claude.edit', 'antigravity.create', 'antigravity.send', 'antigravity.steerQueued'];
 /** Requests that change something on a computer; each one is written to the activity log. */
 export const MUTATION_ACTIONS = new Set([
-  'project.create', 'runtime.reload', 'session.create', 'session.fork', 'session.resume', 'session.rename', 'session.archive', 'session.unarchive',
+  'project.create', 'projects.create', 'runtime.reload', 'session.create', 'session.fork', 'session.resume', 'session.rename', 'session.archive', 'session.unarchive',
   'turn.send', 'turn.cancelQueued', 'turn.withdrawQueued', 'turn.steerQueued', 'turn.edit', 'turn.stop', 'request.respond',
   'claude.create', 'claude.send', 'claude.stop', 'claude.respond', 'claude.project.save', 'claude.fork', 'claude.rename', 'claude.archive', 'claude.edit',
   'claude.steerQueued', 'claude.withdrawQueued', 'claude.cancelQueued',

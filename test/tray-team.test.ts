@@ -1,8 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {once} from 'node:events';
-import {mkdtemp, stat} from 'node:fs/promises';
-import {hostname, tmpdir} from 'node:os';
+import {mkdtemp, mkdir, realpath, stat, writeFile} from 'node:fs/promises';
+import {homedir, hostname, tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {WebSocket} from 'ws';
 import {LocalControlServer, LOCAL_CONTROL_FILE, fetchLocalStatus, localBridgeRequest} from '../src/connector/local-control.js';
@@ -148,5 +148,43 @@ test('ledger pendingUsageCount tracks unacknowledged team usage turns', () => {
     assert.equal(ledger.pendingUsageCount(), 0);
   } finally {
     ledger.close();
+  }
+});
+
+test('prepareSettings validates, deduplicates, and clears projectRoots safely', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-tray-roots-'));
+  const rootA = join(dir, 'work-a');
+  const rootB = join(dir, 'work-b');
+  const filePath = join(dir, 'not-a-dir.txt');
+  await mkdir(rootA, {recursive: true});
+  await mkdir(rootB, {recursive: true});
+  await writeFile(filePath, 'x');
+  const realA = await realpath(rootA);
+  const realB = await realpath(rootB);
+  const token = 'cnt_0123456789abcdef0123456789abcdef';
+  try {
+    const saved = await prepareSettings({
+      mode: 'connector',
+      relayUrl: 'https://relay.example',
+      token,
+      projectRoots: [rootA, rootB, rootA],
+    });
+    assert.deepEqual(saved.projectRoots, [realA, realB]);
+
+    // Omitting projectRoots keeps previous configuration.
+    const kept = await prepareSettings({mode: 'connector', relayUrl: 'https://relay.example', token}, saved);
+    assert.deepEqual(kept.projectRoots, [realA, realB]);
+
+    // Explicit empty array clears projectRoots.
+    const cleared = await prepareSettings({mode: 'connector', relayUrl: 'https://relay.example', token, projectRoots: []}, saved);
+    assert.equal(cleared.projectRoots, undefined);
+
+    // Rejects missing directories, regular files, relative paths, and protected paths like homedir().
+    await assert.rejects(() => prepareSettings({mode: 'connector', relayUrl: 'https://relay.example', token, projectRoots: [join(dir, 'missing')]}), /找不到/);
+    await assert.rejects(() => prepareSettings({mode: 'connector', relayUrl: 'https://relay.example', token, projectRoots: [filePath]}), /文件夹/);
+    await assert.rejects(() => prepareSettings({mode: 'connector', relayUrl: 'https://relay.example', token, projectRoots: ['relative/dir']}), /绝对目录/);
+    await assert.rejects(() => prepareSettings({mode: 'connector', relayUrl: 'https://relay.example', token, projectRoots: [homedir()]}), /用户主目录/);
+  } finally {
+    await removeTestTemp(dir);
   }
 });

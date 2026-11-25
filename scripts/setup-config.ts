@@ -3,6 +3,8 @@ import {resolve} from 'node:path';
 import {hostname,networkInterfaces} from 'node:os';
 import {randomBytes,randomUUID} from 'node:crypto';
 import {resolveCodex} from '../src/connector/app-server.js';
+import {assertSafeProjectPath} from '../src/connector/workspace.js';
+import {mergeProjectPaths} from '../src/shared/project-paths.js';
 
 export async function savedSettings(file:string):Promise<any> {
   try {
@@ -61,6 +63,22 @@ export async function prepareSettings(input:any,old:any={}) {
       if(!entry.isFile()||(process.platform==='win32'&&!/\.exe$/i.test(path)))throw new Error('请选择 Claude Code 可执行文件（claude.exe）');
       config.claudeBin=path;
     }
+  }
+  if(input.projectRoots!==undefined) {
+    const rawList=typeof input.projectRoots==='string'?[input.projectRoots]:Array.isArray(input.projectRoots)?input.projectRoots:null;
+    if(!rawList||rawList.some((item:unknown)=>typeof item!=='string'))throw new Error('项目根目录配置无效');
+    const validated:string[]=[];
+    for(const item of rawList) {
+      const trimmed=item.trim();
+      if(!trimmed)continue;
+      const canonical=await assertSafeProjectPath(trimmed,{dataDir:resolve('.local')});
+      const entry=await stat(canonical).catch(()=>{throw new Error(`找不到项目根目录：${trimmed}`);});
+      if(!entry.isDirectory())throw new Error(`项目根目录必须是文件夹：${trimmed}`);
+      validated.push(canonical);
+    }
+    const merged=mergeProjectPaths(validated);
+    if(merged.length)config.projectRoots=merged;
+    else delete config.projectRoots;
   }
   if(mode==='all') {
     if(url.protocol!=='http:')throw new Error('本机中继使用 HTTP 地址；HTTPS 公网中继请选择“连接自己的中继”');

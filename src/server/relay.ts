@@ -13,7 +13,8 @@ import { isSyncService } from '../shared/sync.js';
 import { BlobChannel } from './blob.js';
 import { VOICE_REQUEST_TIMEOUT_MS } from '../shared/voice.js';
 import { TeamError, type TeamStore } from './team/store.js';
-import { CREATE_ACTIONS, LIST_ACTIONS, MUTATION_ACTIONS, READ_ACTIONS, SENDER_ACTIONS, SEND_ACTIONS, createdThread, handleTeam, publicUser, refreshSenderNames, serviceOf, threadOf, type Member } from './team/actions.js';
+import { CREATE_ACTIONS, LIST_ACTIONS, MUTATION_ACTIONS, PROJECT_LIST_ACTIONS, READ_ACTIONS, SENDER_ACTIONS, SEND_ACTIONS, createdThread, handleTeam, publicUser, refreshSenderNames, serviceOf, threadOf, type Member } from './team/actions.js';
+import { projectPathKey } from '../shared/project-paths.js';
 
 /** `member`: the signed-in person on a phone once the relay has a team; absent with the shared Token. */
 /** `watch.service`: the app of the open thread; Codex when absent (pages before sync.open). */
@@ -111,10 +112,31 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
   function teamRecord(r:Route,message:Json){
     const member=r.member;if(!team||!member)return;
     const service=r.action.startsWith('sync.')&&isSyncService(r.payload.service)?r.payload.service:serviceOf(r.action),result=message.error?undefined:message.result;
+    const projectKeyOf=(item:Json)=>typeof item?.path==='string'&&item.path?projectPathKey(item.path):typeof item?.id==='string'?item.id:'';
     try{
       if(MUTATION_ACTIONS.has(r.action)){
         const state=message.error?(message.error.uncertain?'uncertain':'failed'):typeof result?.state==='string'?result.state:'accepted';
-        team.addActivity({userId:member.user.id,deviceId:member.device.id,machineId:r.machineId,service,action:r.action,threadId:threadOf(r.payload,result)??null,opId:typeof r.payload.opId==='string'?r.payload.opId:null,state});
+        let detail:string|null=null;
+        let recordedService=service;
+        if(r.action==='projects.create'){
+          const name=typeof r.payload.name==='string'?r.payload.name.trim().slice(0,80):'';
+          const modeLabel=r.payload.mode==='existing'?'已有目录':'新建目录';
+          const outcomes=result?.results&&typeof result.results==='object'?result.results as Record<string,Json>:null;
+          const labels:Record<string,string>={codex:'Codex',claude:'Claude Code',antigravity:'Antigravity'};
+          const targetServices=outcomes?Object.keys(outcomes).filter(svc=>outcomes[svc]?.ok):Array.isArray(r.payload.services)?r.payload.services.filter((s:unknown)=>typeof s==='string'):[];
+          if(targetServices.length&&['codex','claude','antigravity'].includes(targetServices[0]))recordedService=targetServices[0] as 'codex'|'claude'|'antigravity';
+          const appNames=targetServices.map((s:string)=>labels[s]||s).join(' / ');
+          detail=[name,modeLabel,appNames].filter(Boolean).join(' · ').slice(0,200)||null;
+          if(outcomes&&state==='accepted'){
+            for(const [svc,outcome] of Object.entries(outcomes)){
+              if((svc==='codex'||svc==='claude'||svc==='antigravity')&&outcome?.ok&&outcome.project){
+                const key=projectKeyOf(outcome.project);
+                if(key)team.recordProject(r.machineId,svc,key,String(outcome.project.name||name||key),member.user.id);
+              }
+            }
+          }
+        }
+        team.addActivity({userId:member.user.id,deviceId:member.device.id,machineId:r.machineId,service:recordedService,action:r.action,threadId:threadOf(r.payload,result)??null,opId:typeof r.payload.opId==='string'?r.payload.opId:null,state,detail});
       }
       const created=CREATE_ACTIONS.has(r.action)?createdThread(r.action,r.payload,result):undefined;
       if(created)team.recordThread(r.machineId,service,created.id,member.user.id,created.parent);
@@ -123,6 +145,14 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         const owners=team.owners(r.machineId,service,items.map((item:Json)=>item.id));
         for(const item of items)item.owner=owners.get(item.id)??null;
         team.touchThreads(r.machineId,service,items.filter((item:Json)=>item.owner));
+      }
+      if(PROJECT_LIST_ACTIONS.has(r.action)&&Array.isArray(result?.projects)){
+        const items=result.projects.filter((item:Json)=>item&&typeof item==='object');
+        const owners=team.projectOwners(r.machineId,service,items.map(projectKeyOf));
+        for(const item of items){
+          const key=projectKeyOf(item);
+          item.owner=key?owners.get(key)??null:null;
+        }
       }
       const read=READ_ACTIONS.has(r.action)&&result&&typeof result==='object'?threadOf(r.payload):undefined;
       if(read){
@@ -249,7 +279,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         const traced=m.trace===true;
         routes.set(routeId,{phone:ws,connector,id:m.id,action:m.action,sessionId:m.payload.sessionId,threadId:m.payload.threadId,timer,machineId:m.machineId,payload:m.payload,member:p.member,...traced?{tracedAt:performance.now()}:{}});
         // The relay alone says who sent a request; anything the phone claims is replaced.
-        const actor=p.member?{userId:p.member.user.id,deviceId:p.member.device.id,name:p.member.user.name}:undefined;
+        const actor=p.member?{userId:p.member.user.id,deviceId:p.member.device.id,name:p.member.user.name,role:p.member.user.role}:undefined;
         send(connector,{type:'request',id:routeId,action:m.action,payload:m.payload,...actor?{actor}:{},...traced?{trace:true}:{}},DENSE_ACTIONS.has(m.action));
       } else if(p.role==='connector'&&m.type==='response') {
         if(routes.get(m.id)?.connector===ws)finish(m.id,m);

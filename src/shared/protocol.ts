@@ -38,6 +38,8 @@ export const CONNECTOR_FEATURES = [
   'blob.upload',
   /** Images in synced messages are references (cmw-image:<sha256>) loaded through it; images to send are uploaded first. */
   'blob.image',
+  /** Supports creating and browsing projects across enabled services (`projects.roots`, `projects.browse`, `projects.create`). */
+  'projects.create',
 ] as const;
 export type ConnectorFeature = typeof CONNECTOR_FEATURES[number];
 

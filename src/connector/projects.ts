@@ -5,7 +5,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {projectPathKey,windowsProjectPath} from '../shared/project-paths.js';
 import {BridgeError,type Json} from '../shared/types.js';
 
-export interface Project {path:string;name:string}
+export interface Project {id?:string;path:string;name:string;roots?:string[];recencyAt?:number|null}
 export function projectCatalog(state:Json,config:Json):Project[] {
   const projects:Project[]=[],seen=new Set<string>();
   function add(path:unknown,label?:unknown) {
@@ -21,6 +21,34 @@ export function projectCatalog(state:Json,config:Json):Project[] {
   for(const path of Object.keys(config.projects||{}))add(path);
   return projects;
 }
+export async function runtimeProjects(rpc:(method:string,params?:Json,timeoutMs?:number)=>Promise<Json>):Promise<Project[]> {
+  const projects:Project[]=[],seen=new Set<string>();
+  let cursor:string|null=null;
+  for(let page=0;page<20;page++){
+    const res=await rpc('project/list',{limit:100,sortKey:'position',...(cursor?{cursor}:{})},8000);
+    const data:Json[]=Array.isArray(res?.data)?res.data:[];
+    for(const item of data){
+      if(!item||typeof item.id!=='string'||!item.id||seen.has(item.id))continue;
+      const roots=(Array.isArray(item.roots)?item.roots:[])
+        .map((r:Json)=>typeof r?.path==='string'?r.path:'')
+        .filter((p:string)=>Boolean(p)&&isAbsolute(p));
+      if(!roots.length)continue;
+      seen.add(item.id);
+      const path=roots[0];
+      const name=typeof item.name==='string'&&item.name.trim()?item.name.trim():path.split(/[\\/]/).filter(Boolean).at(-1)||path;
+      projects.push({
+        id:item.id,
+        path,
+        name,
+        ...(roots.length>1?{roots}:{}),
+        ...(item.recencyAt===null||typeof item.recencyAt==='number'?{recencyAt:item.recencyAt}:{}),
+      });
+    }
+    cursor=typeof res?.nextCursor==='string'&&res.nextCursor?res.nextCursor:null;
+    if(!cursor)break;
+  }
+  return projects;
+}
 export async function nativeProjects(config:Json,home=process.env.CODEX_HOME||join(homedir(),'.codex')) {
   let state:Json={};
   try{state=JSON.parse(await readFile(join(home,'.codex-global-state.json'),'utf8'));}
@@ -34,20 +62,34 @@ export function indexedProjectPaths(home=process.env.CODEX_HOME||join(homedir(),
   finally {db.close();}
 }
 
-export function indexedSessions(options:{cwd?:string;archived:boolean;search?:string;cursor?:string},home=process.env.CODEX_HOME||join(homedir(),'.codex')) {
+function cwdAliases(path:string):string[] {
+  const cwd=normalize(process.platform==='win32'?windowsProjectPath(path):path);
+  let other=cwd;
+  if(process.platform==='win32'){
+    if(/^[a-z]:\\/i.test(cwd))other='\\\\?\\'+cwd;
+    else if(/^\\\\[^?.]/.test(cwd))other='\\\\?\\UNC\\'+cwd.slice(2);
+  }
+  return other===cwd?[cwd]:[cwd,other];
+}
+
+export function indexedSessions(options:{cwd?:string;roots?:string[];projectId?:string;archived:boolean;search?:string;cursor?:string},home=process.env.CODEX_HOME||join(homedir(),'.codex')) {
   const offset=options.cursor?Number(/^db:(\d+)$/.exec(options.cursor)?.[1]):0;
   if(!Number.isSafeInteger(offset)||offset<0)throw new BridgeError('invalid','会话分页标识无效');
   const db=new DatabaseSync(join(home,'state_5.sqlite'),{readOnly:true});
   try {
     const where=["archived = ?","COALESCE(NULLIF(name,''),NULLIF(title,''),NULLIF(preview,'')) IS NOT NULL"],args:any[]=[options.archived?1:0];
-    if(options.cwd){
-      const cwd=normalize(process.platform==='win32'?windowsProjectPath(options.cwd):options.cwd);
-      let other=cwd;
-      if(process.platform==='win32'){
-        if(/^[a-z]:\\/i.test(cwd))other='\\\\?\\'+cwd;
-        else if(/^\\\\[^?.]/.test(cwd))other='\\\\?\\UNC\\'+cwd.slice(2);
-      }
-      where.push('(cwd = ? COLLATE NOCASE OR cwd = ? COLLATE NOCASE)');args.push(cwd,other);
+    const hasProjectIdCol=options.projectId?db.prepare('PRAGMA table_info(threads)').all().some(col=>col.name==='project_id'):false;
+    const filterPaths=[...(options.roots||[]),...(options.cwd?[options.cwd]:[])].filter(Boolean);
+    const uniqueAliases=[...new Set(filterPaths.flatMap(cwdAliases))];
+    if(hasProjectIdCol&&options.projectId&&uniqueAliases.length){
+      const cwdMatch=uniqueAliases.map(()=>'cwd = ? COLLATE NOCASE').join(' OR ');
+      where.push(`(project_id = ? OR (project_id IS NULL AND (${cwdMatch})))`);
+      args.push(options.projectId,...uniqueAliases);
+    }else if(hasProjectIdCol&&options.projectId){
+      where.push('project_id = ?');args.push(options.projectId);
+    }else if(uniqueAliases.length){
+      const cwdMatch=uniqueAliases.map(()=>'cwd = ? COLLATE NOCASE').join(' OR ');
+      where.push(`(${cwdMatch})`);args.push(...uniqueAliases);
     }
     if(options.search){where.push("instr(COALESCE(NULLIF(name,''),NULLIF(title,''),preview,''), ?) > 0");args.push(options.search);}
     const rows=db.prepare(`SELECT id,COALESCE(NULLIF(name,''),NULLIF(title,''),preview,'') AS title,cwd,model,model_provider AS provider,updated_at AS updatedAt

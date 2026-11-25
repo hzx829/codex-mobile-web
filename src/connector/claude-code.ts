@@ -1,4 +1,4 @@
-import {readdir, readFile, stat} from 'node:fs/promises';
+import {readdir, readFile, stat, writeFile} from 'node:fs/promises';
 import {step, stepSync} from './trace.js';
 import type {ThreadSource} from './thread-hub.js';
 import {createHash} from 'node:crypto';
@@ -6,6 +6,7 @@ import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {BridgeError, MAX_FRAME, textRequired, type Json, type TurnView} from '../shared/types.js';
+import {projectPathKey} from '../shared/project-paths.js';
 import {checkProjectPath, downloadProjectFile, openProjectDownload, guestWorkspace, projectDirectory, readProjectFile, workspaceProjects} from './project.js';
 import {imageBytes, validateImages} from '../shared/images.js';
 import type {Ledger} from './ledger.js';
@@ -501,6 +502,47 @@ export class ClaudeCodeBridge {
     return withAttachmentLinks(this.ledger, scope, text, files);
   }
 
+  /** Registers a folder so empty Claude Code projects appear immediately before their first session. */
+  async registerProject(_opId: string, input: {name: string; path: string; initClaudeMd?: string}): Promise<{project: {id: string; name: string; path: string}}> {
+    const path = await projectDirectory(input.path);
+    const name = textRequired(input.name, '项目名称', 80);
+    this.ledger?.registerClaudeProject(path, name);
+    if (typeof input.initClaudeMd === 'string' && input.initClaudeMd.trim()) {
+      const rootMd = join(path, 'CLAUDE.md'), nestedMd = join(path, '.claude', 'CLAUDE.md');
+      const hasMd = await stat(rootMd).then(s => s.isFile(), () => false) || await stat(nestedMd).then(s => s.isFile(), () => false);
+      if (!hasMd) {
+        const text = instructionsInput(input.initClaudeMd);
+        if (text) await writeFile(rootMd, text.endsWith('\n') ? text : text + '\n', {encoding: 'utf8', flag: 'wx'}).catch(() => {});
+      }
+    }
+    this.catalog = undefined;
+    return {project: {id: path, name, path}};
+  }
+
+  private async listedProjects(sessionPaths: string[]): Promise<{id: string; path: string; name?: string}[]> {
+    if (guestWorkspace()) {
+      return (await workspaceProjects(sessionPaths)).map(item => ({...item, id: item.path}));
+    }
+    const registered = this.ledger?.claudeProjects() || [];
+    const alive: {id: string; path: string; name?: string}[] = [];
+    const seen = new Set<string>();
+    for (const item of registered) {
+      const ok = await stat(item.path).then(info => info.isDirectory(), () => false);
+      if (!ok) continue;
+      const key = projectPathKey(item.path);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      alive.push({id: item.path, path: item.path, ...(item.name ? {name: item.name} : {})});
+    }
+    for (const path of sessionPaths) {
+      const key = projectPathKey(path);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      alive.push({id: path, path});
+    }
+    return alive;
+  }
+
   async handle(action: string, p: Json): Promise<Json> {
     if (action === 'claude.list') {
       const offset = Number.isSafeInteger(p.offset) && p.offset >= 0 ? p.offset : 0;
@@ -509,12 +551,10 @@ export class ClaudeCodeBridge {
       const project = requested && guestWorkspace() ? await projectDirectory(requested) : requested;
       const search = p.search ? textRequired(p.search, '搜索内容', 200).toLowerCase() : '';
       const all = await this.all(p.refresh === true && !offset);
-      const matches = all.filter(info => (!project || info.cwd === project) && (!search || title(info).toLowerCase().includes(search)));
+      const matches = all.filter(info => (!project || (info.cwd && projectPathKey(info.cwd) === projectPathKey(project))) && (!search || title(info).toLowerCase().includes(search)));
       const page = matches.slice(offset, offset + PAGE);
       const paths = [...new Set(all.map(info => info.cwd).filter((cwd): cwd is string => Boolean(cwd)))];
-      const projects = !offset && !search
-        ? guestWorkspace() ? (await workspaceProjects(paths)).map(item => ({...item, id: item.path})) : paths.map(path => ({id: path, path}))
-        : undefined;
+      const projects = !offset && !search ? await this.listedProjects(paths) : undefined;
       const peers = guestWorkspace() ? new Map<string, PeerStatus>() : await this.peerStatuses();
       const elsewhere = async (info: SessionInfo) => {const peer = peers.get(info.sessionId);return peer ? peer.status !== 'idle' : !guestWorkspace() && await this.listedElsewhere(info);};
       const data = await Promise.all(page.map(async info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,

@@ -1,9 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { mergeProjectPaths } from './project-paths.js';
 
 export type ConnectorToken = {token: string; machineId: string};
 export type GuestPaths = {root: string; codexHome: string; claudeConfig: string; workspace: string};
 export const machineIdPattern = /^[a-zA-Z0-9_-]{1,80}$/;
+
+export function normalizeProjectRoots(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const raw = value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())).map(item => resolve(item.trim()));
+  return mergeProjectPaths(raw);
+}
 
 export function connectorTokens(value: unknown): ConnectorToken[] {
   if (value === undefined) return [];
@@ -30,5 +37,6 @@ export function readConfig() {
   const root = resolve(process.env.BRIDGE_GUEST_ROOT || (guest && typeof c.guestRoot === 'string' ? c.guestRoot : 'guest'));
   const guestPaths: GuestPaths | undefined = guest ? {root, codexHome: join(root, 'codex-home'),
     claudeConfig: join(root, 'claude-config'), workspace: join(root, 'workspace')} : undefined;
-  return {...c,token,guest,guestPaths,port:Number(process.env.PORT||c.port||3340),host:process.env.HOST||c.host||'127.0.0.1',relayUrl:process.env.RELAY_URL||c.relayUrl||'http://127.0.0.1:3340',dataDir:resolve(process.env.BRIDGE_DATA||'.local'),configFile:file};
+  const projectRoots = normalizeProjectRoots(c.projectRoots);
+  return {...c,token,guest,guestPaths,projectRoots,port:Number(process.env.PORT||c.port||3340),host:process.env.HOST||c.host||'127.0.0.1',relayUrl:process.env.RELAY_URL||c.relayUrl||'http://127.0.0.1:3340',dataDir:resolve(process.env.BRIDGE_DATA||'.local'),configFile:file};
 }

@@ -14,12 +14,14 @@ export type HubMethod =
   | 'GetCascadeModelConfigData' | 'GetTrajectoryTurns'
   | 'GetPermissionSettings' | 'UpdateConversationAnnotations'
   | 'GetAllCascadeTrajectories' | 'GetCascadeTrajectorySteps' | 'HandleCascadeUserInteraction'
+  | 'ListProjects' | 'ReadProject' | 'ReadProjects' | 'CreateProject' | 'UpdateProject' | 'ResolveFolder'
   | 'SendAudioChunk' | 'EndAudioSession';
 export type HubStreamMethod = 'StreamAudioTranscription';
 
 const READ_METHODS = new Set<HubMethod>([
   'GetCascadeModelConfigData', 'GetTrajectoryTurns',
   'GetPermissionSettings', 'GetAllCascadeTrajectories', 'GetCascadeTrajectorySteps',
+  'ListProjects', 'ReadProject', 'ReadProjects', 'ResolveFolder',
 ]);
 
 const ENDPOINT_CACHE_TTL_MS = 5_000;
@@ -272,6 +274,11 @@ export function createHubClient(options: HubClientOptions = {}): HubClient {
         }, res => {
           responseStarted = true;
           res.on('error', reject);
+          if (res.statusCode === 409) {
+            res.resume();
+            reject(new BridgeError('already_exists', '目标项目已存在'));
+            return;
+          }
           if ([401, 403, 404, 405, 415].includes(res.statusCode || 0)) {
             res.resume();
             if (res.statusCode === 401 || res.statusCode === 403) invalidate(dir);

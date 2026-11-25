@@ -8,10 +8,10 @@ import type {MenuPoint} from './popover';
 import {SessionListLoader} from './session-list-loader';
 import {cachedList,listKey,rememberList} from './session-cache';
 import {useStableEvent} from './use-event';
-import {isTeamAdmin,mergeMembers,OwnerFilterControl,ownerFilterLabel,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
+import {isTeamAdmin,mergeMembers,OwnerBadge,OwnerFilterControl,ownerFilterLabel,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
 import type {Json,RequestAction} from '../src/shared/types';
 
-type Project={id:string;path:string;name?:string};
+type Project={id:string;path:string;name?:string;owner?:{id:string;name:string}|null};
 type Thread={id:string;title:string;updatedAt:number;running:boolean;cwd?:string;owner?:{id:string;name:string}|null};
 /** Session actions an app supports beyond pinning and copying the ID, which every app gets. */
 export type ThreadActions={rename?:(name:string)=>Promise<void>;archive?:()=>Promise<void>;duplicate?:()=>Promise<void>};
@@ -23,6 +23,8 @@ type Props={
   listAction?:RequestAction;appName?:string;
   /** Starts a new conversation in the shown project (its list id); omitted for apps that cannot create one. */
   onNew?:(project:string)=>void;
+  /** Opens the unified project creation dialog when the connector supports `projects.create`. */
+  onCreateProject?:()=>void;
   selected:string;project:string;machine:string;machineName:string;connected:boolean;relayOnline:boolean;inert:boolean;revision:number;switcher:ReactNode;action?:ReactNode;identity?:ReactNode;
   projectsCollapsed?:boolean;onToggleProjects?:()=>void;
   me?:TeamUser|null;roster?:TeamMemberRef[];ownerFilter?:OwnerFilter;onOwnerFilterChange?:(next:OwnerFilter)=>void;
@@ -32,7 +34,7 @@ type Props={
   filter?:(threads:Json[])=>Json[];
   call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseProject:(id:string)=>void;chooseComputer:()=>void;more:()=>void;
 };
-export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',filter,projectsCollapsed=false,onToggleProjects,me=null,roster=[],ownerFilter='all',onOwnerFilterChange,claimOwner,identity,onNew,selected,project,machine,machineName,connected,relayOnline,inert,revision,switcher,action,copyText,threadActions,call,open,chooseProject,chooseComputer,more}:Props){
+export function AntigravitySidebar({listAction='antigravity.list',appName='Antigravity',filter,projectsCollapsed=false,onToggleProjects,me=null,roster=[],ownerFilter='all',onOwnerFilterChange,claimOwner,identity,onNew,onCreateProject,selected,project,machine,machineName,connected,relayOnline,inert,revision,switcher,action,copyText,threadActions,call,open,chooseProject,chooseComputer,more}:Props){
   const [search,setSearch]=useState(''),[query,setQuery]=useState(''),[projects,setProjects]=useState<Project[]>([]);
   const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean}|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
@@ -90,8 +92,15 @@ export function AntigravitySidebar({listAction='antigravity.list',appName='Antig
     {!project&&!query&&switcher}
     <div className="home-content">
       {action}
-      {!project&&!query&&shownProjects.length>0&&<ProjectsSection collapsed={projectsCollapsed} onToggle={()=>onToggleProjects?.()}>{shownProjects.map(item=>
-        <button className="project-row" key={item.id} title={item.path} onClick={()=>chooseProject(item.id)}><Icon name="folder"/><span>{item.name||workspaceName(item.path)}</span></button>)}</ProjectsSection>}
+      {!project&&!query&&(shownProjects.length>0||onCreateProject)&&<ProjectsSection collapsed={projectsCollapsed} onToggle={()=>onToggleProjects?.()}
+        action={onCreateProject&&<IconButton icon="plus" label="新建项目" className="section-action" disabled={!connected} onClick={onCreateProject}/>}>
+        {shownProjects.map(item=>
+          <button className="project-row" key={item.id} title={item.path} onClick={()=>chooseProject(item.id)}>
+            <Icon name="folder"/><span>{item.name||workspaceName(item.path)}</span>
+            {item.owner&&<OwnerBadge owner={item.owner}/>}
+          </button>)}
+        {!shownProjects.length&&<p className="empty-projects">还没有项目，点右上角 + 新建。</p>}
+      </ProjectsSection>}
       <section className="recent-section">{!groups.length&&(filterControl?<div className="section-head"><h2>{heading}</h2>{filterControl}</div>:<h2>{heading}</h2>)}
         {groups.map((group,index)=><div className="thread-group" key={group.key}>{index===0&&filterControl?<div className="section-head"><h2>{group.label}</h2>{filterControl}</div>:<h2>{group.label}</h2>}<nav aria-label={group.label}>{group.threads.map(item=>{
           const thread={...item,status:item.running?{type:'active'}:undefined};

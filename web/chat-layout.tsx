@@ -17,13 +17,16 @@ export function ChatSearch({value,change}:{value:string;change:(value:string)=>v
   return <label className="search-pill"><Icon name="search"/><input aria-label="搜索聊天" placeholder="搜索聊天…" value={value} maxLength={200} onChange={event=>change(event.target.value)}/>{value&&<IconButton icon="close" label="清除搜索" onClick={()=>change('')}/>}</label>;
 }
 
-export function ProjectsSection({collapsed,onToggle,children}:{collapsed:boolean;onToggle:()=>void;children:ReactNode}){
+export function ProjectsSection({collapsed,onToggle,action,children}:{collapsed:boolean;onToggle:()=>void;action?:ReactNode;children:ReactNode}){
   return <section className={`project-section${collapsed?' collapsed':''}`}>
-    <h2 className="section-heading">
-      <button type="button" className="section-toggle" aria-expanded={!collapsed} title={collapsed?'展开项目':'收起项目'} onClick={onToggle}>
-        <span>项目</span><Icon name="chevron" size={13}/>
-      </button>
-    </h2>
+    <div className="project-section-head">
+      <h2 className="section-heading">
+        <button type="button" className="section-toggle" aria-expanded={!collapsed} title={collapsed?'展开项目':'收起项目'} onClick={onToggle}>
+          <span>项目</span><Icon name="chevron" size={13}/>
+        </button>
+      </h2>
+      {action}
+    </div>
     {!collapsed&&children}
   </section>;
 }

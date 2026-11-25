@@ -37,6 +37,10 @@ type Props={
   machine:string;machineName:string;connected:boolean;conversationId:string;inert:boolean;previewError:string;guest?:boolean;
   /** Where a new session starts: a project folder or '' to choose; null while a saved session is open. */
   newCwd:string|null;created:(id:string)=>void;
+  /** Opens the unified project creation dialog when supported by the connector. */
+  onCreateProject?:()=>void;
+  /** Incremented when projects change so the new-chat selector reloads. */
+  projectsRevision?:number;
   /** Opens a session copied from this one. */
   forked:(id:string)=>void;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;
@@ -54,7 +58,7 @@ type Props={
 const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
 const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:TurnView)=>turn.items.filter(item=>item.role==='user').map(item=>item.id)):[];
 function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
-type Place={id:string;path:string};
+type Place={id:string;path:string;name?:string};
 const OTHER='__other';
 /** Names, descriptions and order as Claude Code's desktop app shows them. */
 const MODES:PermissionOption[]=[
@@ -132,10 +136,11 @@ export function ClaudeCodePanel(props:Props){
     if(!view.cached&&!props.sync)rememberView(cacheKey,view);
   },[view]);
   const cached=Boolean(view?.cached);
+  useEffect(()=>{if(creating&&newCwd)setTarget(newCwd);},[creating,newCwd]);
   useEffect(()=>{
     if(!creating||!connected)return;
-    request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setDefaultMode(page.defaultPermissionMode||'');setTarget(old=>old||list[0]?.id||(guest?'':OTHER));}).catch(failed);
-  },[creating,connected,guest]);
+    request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setDefaultMode(page.defaultPermissionMode||'');setTarget(old=>old||list[0]?.id||(guest||props.onCreateProject?'':OTHER));}).catch(failed);
+  },[creating,connected,guest,props.projectsRevision,props.onCreateProject]);
   useEffect(()=>{
     if(!connected||!view?.revision||syncing)return;
     let active=true,inflight=false,timer:ReturnType<typeof setTimeout>;
@@ -404,12 +409,13 @@ export function ClaudeCodePanel(props:Props){
     <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={()=>{const el=scroll.current!;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;if(el.scrollTop<160&&!earlierError)void loadEarlier();}}><div className="timeline-content">
       {creating?<div className="new-chat-welcome"><h1>交给 Claude Code</h1>
         <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} onChange={e=>setTarget(e.target.value)}>
-          {!target&&<option value="">{guest?'选择或新建项目':'正在读取项目…'}</option>}
-          {places.map(place=><option key={place.id} value={place.id}>{workspaceName(place.path)}</option>)}
+          {!target&&<option value="">{guest||props.onCreateProject?'选择或新建项目':'正在读取项目…'}</option>}
+          {places.map(place=><option key={place.id} value={place.id}>{place.name||workspaceName(place.path)}</option>)}
           {chosen&&!places.includes(chosen as Place)&&<option value={chosen.id}>{workspaceName(chosen.path)}</option>}
-          {!guest&&<option value={OTHER}>其他文件夹…</option>}
+          {!guest&&!props.onCreateProject&&<option value={OTHER}>其他文件夹…</option>}
         </select></label>
-        {guest?<details className="other-project" open={!startPath||undefined}><summary>新建项目</summary>
+        {props.onCreateProject?<button type="button" className="create-project-inline" disabled={!connected||busy} onClick={props.onCreateProject}><Icon name="plus" size={16}/><span>新建或关联项目</span></button>
+          :guest?<details className="other-project" open={!startPath||undefined}><summary>新建项目</summary>
           <GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setPlaces(old=>old.some(item=>item.id===path)?old:[...old,{id:path,path}]);setTarget(path);}}/>
         </details>:target===OTHER&&<label className="claude-project"><input autoFocus aria-label="文件夹路径" placeholder="电脑上的完整路径" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>}
         {startPath&&<p className="muted">{startPath}</p>}</div>:<>

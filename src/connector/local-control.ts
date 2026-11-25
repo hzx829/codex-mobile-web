@@ -29,6 +29,8 @@ export interface LocalControlStatus {
   claudeSignIn?: 'yes' | 'no' | 'unknown';
   activeTasks: ActiveTask[];
   pendingUsage: number;
+  projectRoots?: string[];
+  defaultProjectRoot?: string;
 }
 
 export interface LocalControlRecord {

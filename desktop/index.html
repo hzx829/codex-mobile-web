@@ -122,6 +122,15 @@
         <small>留空默认使用本机主机名。</small>
       </label>
 
+      <div class="field">
+        <span class="field-label">项目根目录（团队可新建与浏览的目录）</span>
+        <div id="project-roots-list" class="root-list"></div>
+        <div class="root-actions">
+          <button id="add-project-root" type="button" class="chip">添加目录…</button>
+        </div>
+        <small id="project-roots-hint"></small>
+      </div>
+
       <details id="advanced" class="advanced">
         <summary><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>高级：Codex、Claude Code 程序路径（留空自动识别）</summary>
         <div class="advanced-body">

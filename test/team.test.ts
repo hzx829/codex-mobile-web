@@ -137,7 +137,7 @@ test('a team relay signs in members, stamps who sent each request and records ow
     const id='req-forged';const reply=waitFrame(bo.ws,frame=>frame.id===id);
     bo.ws.send(JSON.stringify({type:'request',id,machineId:'pc-a',action:'session.create',payload:{opId:'1:op',cwd:'C:/p'},actor:{userId:owner.id}}));
     assert.equal((await reply).result.threadId,'thread-1');
-    assert.deepEqual(pcA.seen.at(-1).actor,{userId:member.id,deviceId:bo.ready.device.id,name:'Bo'});
+    assert.deepEqual(pcA.seen.at(-1).actor,{userId:member.id,deviceId:bo.ready.device.id,name:'Bo',role:'member'});
 
     const list=await relay.request(ada.ws,'pc-a','sessions.list');
     assert.deepEqual(list.result.data.map((item:any)=>item.owner),[{id:member.id,name:'Bo'},null]);
@@ -291,4 +291,79 @@ test('sidebar owner filtering, member colors, and other-owner composer hints beh
   assert.equal(otherOwnerHint({id:'u2',name:'Bo'},'u1','在 Mac 上继续…'),'Bo 的会话 · 在 Mac 上继续…');
   assert.equal(otherOwnerHint({id:'u1',name:'Ada'},'u1','在 Mac 上继续…'),'在 Mac 上继续…');
   assert.equal(otherOwnerHint(null,'u1','在 Mac 上继续…'),'在 Mac 上继续…');
+});
+
+test('relay stamps actor.role, records multi-service project ownership and activity detail, and injects owner on project lists', async () => {
+  const {dir, store} = await tempStore();
+  const {hello, team, request, connector, close} = await startRelay(store);
+  try {
+    const owner = store.createUser({name: 'Ada', role: 'owner'});
+    const member = store.createUser({name: 'Bo', role: 'member', machines: ['pc-a']});
+    const ownerToken = store.redeemInvite(store.createInvite(owner.id, null).code, 'Ada phone').token;
+    const memberToken = store.redeemInvite(store.createInvite(member.id, null).code, 'Bo phone').token;
+
+    const projPath = process.platform === 'win32' ? 'D:\\Team\\my-app' : '/team/my-app';
+    const agUri = process.platform === 'win32' ? 'file:///d%3A/Team/my-app' : 'file:///team/my-app';
+    const pc = await connector('pc-a', req => {
+      if (req.action === 'projects.create') {
+        return {
+          path: projPath,
+          created: true,
+          results: {
+            codex: {ok: true, project: {id: 'cx-1', name: 'My App', path: projPath}},
+            claude: {ok: true, project: {id: projPath, name: 'My App', path: projPath}},
+            antigravity: {ok: true, project: {id: agUri, projectId: 'ag-uuid', name: 'My App', path: projPath}},
+          },
+        };
+      }
+      if (req.action === 'info') {
+        return {roots: [projPath], projects: [{id: 'cx-1', name: 'My App', path: projPath}]};
+      }
+      if (req.action === 'claude.list') {
+        return {data: [], hasMore: false, projects: [{id: projPath, name: 'My App', path: projPath}]};
+      }
+      if (req.action === 'antigravity.list') {
+        return {data: [], hasMore: false, projects: [{id: agUri, name: 'My App', path: projPath}]};
+      }
+      return {};
+    });
+
+    const ownerPhone = await hello({role: 'phone', token: ownerToken});
+    const memberPhone = await hello({role: 'phone', token: memberToken});
+
+    // Member invokes projects.create (even if trying to spoof actor.role, relay overwrites with authentic role).
+    const created = await request(memberPhone.ws, 'pc-a', 'projects.create', {
+      mode: 'new',
+      name: 'My App',
+      services: ['codex', 'claude', 'antigravity'],
+      opId: `${Date.now()}:00000000-0000-4000-8000-000000000099`,
+      actor: {role: 'owner'},
+    });
+    assert.equal(created.result.path, projPath);
+    assert.equal(pc.seen[0].actor.role, 'member');
+    assert.equal(pc.seen[0].actor.userId, member.id);
+
+    // Owner sees Bo's attribution on Codex info, Claude list, and Antigravity list.
+    const infoRes = await request(ownerPhone.ws, 'pc-a', 'info', {});
+    assert.deepEqual(infoRes.result.projects[0].owner, {id: member.id, name: 'Bo'});
+    const claudeRes = await request(ownerPhone.ws, 'pc-a', 'claude.list', {});
+    assert.deepEqual(claudeRes.result.projects[0].owner, {id: member.id, name: 'Bo'});
+    const agRes = await request(ownerPhone.ws, 'pc-a', 'antigravity.list', {});
+    assert.deepEqual(agRes.result.projects[0].owner, {id: member.id, name: 'Bo'});
+
+    // Activity audit includes structured detail with project name, mode, and registered apps.
+    const act = await team(ownerPhone.ws, 'team.activity', {});
+    const entry = act.result.entries.find((e: any) => e.action === 'projects.create');
+    assert.ok(entry);
+    assert.equal(entry.userId, member.id);
+    assert.match(entry.detail, /My App/);
+    assert.match(entry.detail, /新建目录/);
+    assert.match(entry.detail, /Codex/);
+    assert.match(entry.detail, /Claude Code/);
+    assert.match(entry.detail, /Antigravity/);
+  } finally {
+    await close();
+    store.close();
+    await removeTestTemp(dir);
+  }
 });

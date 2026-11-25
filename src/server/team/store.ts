@@ -11,7 +11,7 @@ export interface Device {id: string; userId: string; name: string; createdAt: nu
 export interface Owner {id: string; name: string}
 /** One row per day, member, computer, app and model; `userId` is null for turns started on the computer itself. */
 export interface UsageRow {day: string; userId: string | null; machineId: string; service: Service; model: string; turns: number; inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null; reasoningTokens: number | null}
-export interface Activity {id: number; ts: number; userId: string; userName: string; deviceId: string | null; machineId: string; service: Service; action: string; threadId: string | null; threadTitle?: string | null; state: string}
+export interface Activity {id: number; ts: number; userId: string; userName: string; deviceId: string | null; machineId: string; service: Service; action: string; threadId: string | null; threadTitle?: string | null; detail?: string | null; state: string}
 
 /** One invite stays usable for a day; it only turns into a device token, which the browser keeps. */
 export const INVITE_TTL_MS = 24 * 3600_000;
@@ -54,8 +54,10 @@ export class TeamStore {
       CREATE TABLE IF NOT EXISTS machine_access (user_id TEXT NOT NULL REFERENCES users(id), machine_id TEXT NOT NULL, PRIMARY KEY(user_id, machine_id));
       CREATE TABLE IF NOT EXISTS threads (machine_id TEXT NOT NULL, service TEXT NOT NULL, thread_id TEXT NOT NULL, owner_id TEXT REFERENCES users(id),
         parent_thread_id TEXT, title TEXT, created_at INTEGER NOT NULL, updated_at INTEGER, PRIMARY KEY(machine_id, service, thread_id));
+      CREATE TABLE IF NOT EXISTS projects (machine_id TEXT NOT NULL, service TEXT NOT NULL, project_id TEXT NOT NULL, name TEXT NOT NULL,
+        owner_id TEXT REFERENCES users(id), created_at INTEGER NOT NULL, PRIMARY KEY(machine_id, service, project_id));
       CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, user_id TEXT NOT NULL, device_id TEXT,
-        machine_id TEXT NOT NULL, service TEXT NOT NULL, action TEXT NOT NULL, thread_id TEXT, op_id TEXT, state TEXT NOT NULL);
+        machine_id TEXT NOT NULL, service TEXT NOT NULL, action TEXT NOT NULL, thread_id TEXT, op_id TEXT, state TEXT NOT NULL, detail TEXT);
       CREATE INDEX IF NOT EXISTS activity_ts ON activity(ts);
       CREATE INDEX IF NOT EXISTS activity_user ON activity(user_id, ts);
       CREATE INDEX IF NOT EXISTS activity_thread ON activity(machine_id, service, thread_id, ts);
@@ -64,6 +66,9 @@ export class TeamStore {
         output_tokens INTEGER, reasoning_tokens INTEGER, PRIMARY KEY(event_id, model));
       CREATE INDEX IF NOT EXISTS usage_ts ON usage(ts);
       CREATE INDEX IF NOT EXISTS usage_user ON usage(user_id, ts);`);
+    if (!this.db.prepare('PRAGMA table_info(activity)').all().some(col => col.name === 'detail')) {
+      this.db.exec('ALTER TABLE activity ADD COLUMN detail TEXT');
+    }
     for (const table of ['activity', 'usage']) this.db.prepare(`DELETE FROM ${table} WHERE ts < ?`).run(Date.now() - ACTIVITY_DAYS * 86400_000);
   }
 
@@ -255,9 +260,28 @@ export class TeamStore {
     }
   }
 
+  /** The first record wins: a retried create never moves a project to someone else. */
+  recordProject(machineId: string, service: Service, projectId: string, name: string, ownerId: string) {
+    this.db.prepare(`INSERT INTO projects (machine_id, service, project_id, name, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(machine_id, service, project_id) DO UPDATE SET name=excluded.name, owner_id=COALESCE(projects.owner_id, excluded.owner_id)`)
+      .run(machineId, service, projectId, name.slice(0, 120), ownerId, Date.now());
+  }
+
+  projectOwners(machineId: string, service: Service, projectIds: string[]): Map<string, Owner> {
+    const owners = new Map<string, Owner>();
+    const read = this.db.prepare(`SELECT p.project_id, u.id, u.name FROM projects p JOIN users u ON u.id=p.owner_id
+      WHERE p.machine_id=? AND p.service=? AND p.project_id=?`);
+    for (const id of new Set(projectIds)) {
+      if (!id) continue;
+      const row = read.get(machineId, service, id);
+      if (row) owners.set(id, {id: String(row.id), name: String(row.name)});
+    }
+    return owners;
+  }
+
   addActivity(entry: Omit<Activity, 'id' | 'ts' | 'userName'> & {opId?: string | null}) {
-    this.db.prepare('INSERT INTO activity (ts, user_id, device_id, machine_id, service, action, thread_id, op_id, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(Date.now(), entry.userId, entry.deviceId, entry.machineId, entry.service, entry.action, entry.threadId, entry.opId ?? null, entry.state);
+    this.db.prepare('INSERT INTO activity (ts, user_id, device_id, machine_id, service, action, thread_id, op_id, state, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(Date.now(), entry.userId, entry.deviceId, entry.machineId, entry.service, entry.action, entry.threadId, entry.opId ?? null, entry.state, entry.detail ?? null);
   }
 
   lastSender(machineId: string, service: Service, threadId: string, actions: string[]): Owner | undefined {
@@ -278,7 +302,9 @@ export class TeamStore {
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ${limit}`).all(...values)
       .map(row => ({id: Number(row.id), ts: Number(row.ts), userId: String(row.user_id), userName: String(row.user_name), deviceId: row.device_id === null ? null : String(row.device_id),
         machineId: String(row.machine_id), service: row.service as Service, action: String(row.action), threadId: row.thread_id === null ? null : String(row.thread_id),
-        threadTitle: row.thread_title === null || row.thread_title === undefined ? null : String(row.thread_title), state: String(row.state)}));
+        threadTitle: row.thread_title === null || row.thread_title === undefined ? null : String(row.thread_title),
+        detail: row.detail === null || row.detail === undefined ? null : String(row.detail),
+        state: String(row.state)}));
   }
 
   /**

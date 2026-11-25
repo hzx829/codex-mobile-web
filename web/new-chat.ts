@@ -5,7 +5,7 @@ type Call=(action:RequestAction,payload:Json)=>Promise<any>;
 export async function createFirstTurn(call:Call,input:Json,onCreated:(threadId:string)=>void,progress?:(value:UploadProgress)=>void,onSending?:(opId:string)=>void) {
   let stage:'create'|'send'='create',threadId:string|undefined,sent=false;
   try {
-    const created=await call('session.create',{cwd:input.cwd,model:input.model||undefined,approvalPolicy:input.approvalPolicy||undefined,opId:input.createId});
+    const created=await call('session.create',{cwd:input.cwd,projectId:input.projectId||undefined,model:input.model||undefined,approvalPolicy:input.approvalPolicy||undefined,opId:input.createId});
     if(created.state!=='accepted')return {stage,result:created};
     threadId=created.threadId;stage='send';onCreated(threadId!);
     const session=typeof created.generation==='string'&&created.generation

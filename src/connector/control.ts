@@ -8,7 +8,8 @@ import { codexRetryText, desktopTurns, normalizeSession, normalizeTurn, turnPage
 import { LiveDiff, RuntimeLive, type LiveFrame } from './live.js';
 import { approvalResult } from './approvals.js';
 import { createGuestProject, guestWorkspace, projectDirectory, readProjectFile, downloadProjectFile, openProjectDownload, workspaceProjects } from './project.js';
-import { nativeProjects, indexedSessions, indexedProjectPaths } from './projects.js';
+import { nativeProjects, runtimeProjects, indexedSessions, indexedProjectPaths, type Project } from './projects.js';
+import { projectPathKey } from '../shared/project-paths.js';
 import { indexedTurnHasWriter, readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor, type TurnView } from '../shared/types.js';
 import {imageBytes} from '../shared/images.js';
@@ -206,23 +207,32 @@ export class Control extends EventEmitter {
       const config=await this.runtime.rpc('config/read',{includeLayers:false,cwd});
       const models=await readModels(this.runtime);
       const c=config.config||{};
-      let projects;
+      let projects:Project[],projectApi=false;
       if(guestWorkspace()){
         let paths:string[]=[];
         try {paths=indexedProjectPaths();}catch(error){
           if((error as {errcode?:number}).errcode!==14)throw error; // The app-server may still be creating the state DB.
         }
         projects=await workspaceProjects(paths);
-      }else projects=await this.projects(c);
-      return {projects,roots:projects.map(p=>p.path),desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',serviceTier:c.service_tier??null,models:models.data||[],runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},generation:this.generation};
+      }else{
+        try {
+          projects=await runtimeProjects((method,params,timeoutMs)=>this.runtime.rpc(method,params,timeoutMs));
+          projectApi=true;
+        } catch {
+          projects=await this.projects(c);
+        }
+      }
+      return {projects,roots:projects.map(p=>p.path),projectApi,desktopOnline:Boolean(this.desktop.clientId),model:c.model||'',provider:c.model_provider||'openai',effort:c.model_reasoning_effort||'',approvalPolicy:c.approval_policy||'',serviceTier:c.service_tier??null,models:models.data||[],runtime:{bin:this.runtime.bin,version:this.runtime.version,bundleHash:this.bundleHash},generation:this.generation};
     }
     if(req.action==='sessions.list') {
       const requested=p.cwd?textRequired(p.cwd,'目录'):undefined;
       const cwd=requested&&guestWorkspace()?await projectDirectory(requested):requested;
+      const projectId=typeof p.projectId==='string'&&p.projectId.trim()?p.projectId.trim():undefined;
+      const roots=Array.isArray(p.roots)?p.roots.filter((item:unknown):item is string=>typeof item==='string'&&Boolean(item.trim())):undefined;
       const search=p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined;
       if(p.refresh===true)await this.runtime.rpc('thread/list',{limit:1,useStateDbOnly:false},3000).catch(()=>{});
       // The desktop-owned thread can block app-server thread/list; the state index remains readable.
-      const page=this.listSessions({cwd,archived:Boolean(p.archived),search,cursor:p.cursor});
+      const page=this.listSessions({cwd,...(projectId?{projectId}:{}),...(roots?.length?{roots}:{}),archived:Boolean(p.archived),search,cursor:p.cursor});
       const threads=guestWorkspace()?await Promise.all(page.data.map(async thread=>{
         const path=await projectDirectory(thread.cwd).catch(()=>undefined);
         return path?{...thread,cwd:path}:null;
@@ -501,11 +511,47 @@ export class Control extends EventEmitter {
     if(!replaced)input.unshift({type:'text',text,text_elements:[]});
     return {input,numTurns:turns.length-index};
   }
+  /** Registers a project in Codex via app-server `project/create` (or returns the folder directly in guest mode). */
+  async registerProject(opId:string,input:{name:string;path:string}):Promise<{project:{id:string;name:string;path:string;roots:string[]};notice?:string}> {
+    const path=await projectDirectory(input.path);
+    const name=textRequired(input.name,'项目名称',80);
+    if(guestWorkspace()){
+      this.emit('change',null);
+      return {project:{id:path,name,path,roots:[path]}};
+    }
+    try {
+      const res=await this.runtime.rpc('project/create',{name,roots:[{path}],idempotencyKey:`${opId}:codex`},10_000);
+      const created=res?.project;
+      if(!created||typeof created.id!=='string'||!created.id)throw new BridgeError('uncertain','Codex 未返回新建项目信息，请刷新项目列表核实',true);
+      const roots=(Array.isArray(created.roots)?created.roots:[]).map((r:Json)=>String(r?.path||'')).filter(Boolean);
+      const primary=roots[0]||path;
+      this.emit('change',null);
+      return {
+        project:{id:created.id,name:String(created.name||name),path:primary,roots:roots.length?roots:[primary]},
+        notice:'Codex 桌面侧栏可能需要切换窗口或重启后才显示新项目',
+      };
+    } catch(error) {
+      if(error instanceof BridgeError){
+        if(/unknown|not found|method not found|unsupported/i.test(error.message)){
+          throw new BridgeError('unsupported','当前电脑的 Codex 版本过旧，不支持创建项目，请更新 Codex 后重试');
+        }
+        throw error;
+      }
+      throw new BridgeError('unavailable','无法连接本机 Codex 服务，请确认 Codex 可正常运行');
+    }
+  }
   private async mutate(action:string,p:Json):Promise<Json> {
     if(action==='session.create') {
       const cwd=await projectDirectory(textRequired(p.cwd,'项目目录'));
       const options:Json={cwd,historyMode:'legacy'};if(p.model)options.model=textRequired(p.model,'模型',200);
       const policy=approvalPolicy(p.approvalPolicy);if(policy)options.approvalPolicy=policy;
+      let projectId=typeof p.projectId==='string'&&p.projectId.trim()?p.projectId.trim():undefined;
+      if(!projectId&&!guestWorkspace()){
+        const list=await runtimeProjects((method,params,timeoutMs)=>this.runtime.rpc(method,params,timeoutMs)).catch(()=>[] as Project[]);
+        const key=projectPathKey(cwd);
+        projectId=list.find(item=>item.id&&(projectPathKey(item.path)===key||(item.roots||[]).some(r=>projectPathKey(r)===key)))?.id;
+      }
+      if(projectId)options.projectId=projectId;
       const r=await this.runtime.rpc('thread/start',options);
       this.loaded.add(r.thread.id);this.ledger.claim(r.thread.id);this.settings.set(r.thread.id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy||policy,sessionId:r.thread.sessionId||r.thread.id});
       this.newThreads.set(r.thread.id,{...r.thread,turns:[]});

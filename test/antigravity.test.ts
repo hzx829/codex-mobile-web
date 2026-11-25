@@ -12,7 +12,7 @@ import {fileReference} from '../web/preview-target.js';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
-import {AntigravityBridge,parseAntigravityModels,extractAntigravityRequests,extractAntigravityBackgroundTasks,extractAntigravityIssue} from '../src/connector/antigravity.js';
+import {AntigravityBridge,deterministicProjectUuid,toAntigravityFileUri,parseAntigravityModels,extractAntigravityRequests,extractAntigravityBackgroundTasks,extractAntigravityIssue} from '../src/connector/antigravity.js';
 import {createHubClient} from '../src/connector/antigravity-hub.js';
 import {createServer} from 'node:http';
 import {connect as connectTcp} from 'node:net';
@@ -1287,4 +1287,76 @@ test('Antigravity caches Hub metadata, skips extra list RPCs on pagination/searc
   const pushed = frames.find(f => (f.entries || []).some((e: any) => e.id === '2'));
   assert.ok(pushed, 'Appending transcript should push a live frame.');
   assert.deepEqual(pushed.entries.map((e: any) => e.id), ['2']);
+});
+
+test('Antigravity formats file URIs, generates deterministic UUIDv5, registers projects via Hub, merges empty desktop projects, and hides archived ones', async t => {
+  assert.equal(toAntigravityFileUri('C:\\Users\\Alice\\My App'), 'file:///c%3A/Users/Alice/My%20App');
+  assert.equal(toAntigravityFileUri('/work/my app'), 'file:///work/my%20app');
+  const uuid1 = deterministicProjectUuid('op-1:antigravity');
+  const uuid2 = deterministicProjectUuid('op-1:antigravity');
+  assert.equal(uuid1, uuid2);
+  assert.match(uuid1, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-ag-create-'));
+  const projectsDir = join(dir, 'projects');
+  const gitFolder = join(dir, 'repo-git');
+  const plainFolder = join(dir, 'repo-plain');
+  await mkdir(projectsDir, {recursive: true});
+  await mkdir(gitFolder, {recursive: true});
+  await mkdir(plainFolder, {recursive: true});
+  const ledger = new Ledger(':memory:');
+  t.after(async () => { ledger.close(); await rm(dir, {recursive: true, force: true}); });
+
+  // One active empty project, one archived project, and the special outside-of-project file.
+  await writeFile(join(projectsDir, 'outside-of-project.json'), JSON.stringify({id: 'outside-of-project', name: 'Outside'}));
+  await writeFile(join(projectsDir, 'active-empty.json'), JSON.stringify({
+    id: 'active-empty', name: '空项目', projectResources: {resources: [{folderUri: toAntigravityFileUri(plainFolder)}]},
+  }));
+  await writeFile(join(projectsDir, 'archived-proj.json'), JSON.stringify({
+    id: 'archived-proj', name: '已归档', archived: true, projectResources: {resources: [{folderUri: toAntigravityFileUri(gitFolder)}]},
+  }));
+
+  const calls: {method: string; body: any}[] = [];
+  let conflictCreate = false;
+  const bridge = new AntigravityBridge(dir, ledger, async (_d, method, body) => {
+    calls.push({method, body});
+    if (method === 'ResolveFolder') {
+      if (String(body.folderUri).includes('repo-git')) return {resourceType: 'FOLDER_TYPE_GIT_FOLDER', vcsType: 'VCS_TYPE_GIT'};
+      if (String(body.folderUri).includes('missing')) return {resourceType: 'FOLDER_TYPE_NON_EXISTENT'};
+      return {resourceType: 'FOLDER_TYPE_LOCAL_FOLDER'};
+    }
+    if (method === 'CreateProject') {
+      if (conflictCreate) throw new BridgeError('already_exists', 'exists');
+      await writeFile(join(projectsDir, `${body.project.id}.json`), JSON.stringify(body.project));
+      return {};
+    }
+    if (method === 'ReadProject') {
+      return {project: {id: body.id, name: 'Git Repo'}};
+    }
+    return {};
+  }, projectsDir);
+
+  // Even without conversation_summaries.db, antigravity.list surfaces active desktop projects and filters archived/outside.
+  const initial = await bridge.handle('antigravity.list', {});
+  assert.deepEqual(initial.projects.map((p: any) => p.name), ['空项目']);
+
+  // Registering a git folder maps to gitFolder resource and appears immediately in antigravity.list.
+  const op = `${Date.now()}:${randomUUID()}`;
+  const created = await bridge.registerProject(op, {name: 'Git Repo', path: gitFolder});
+  assert.equal(created.project.projectId, deterministicProjectUuid(`${op}:antigravity`));
+  const createCall = calls.find(c => c.method === 'CreateProject')!;
+  assert.equal(createCall.body.backend, 'BACKEND_TYPE_LOCAL');
+  assert.equal(createCall.body.project.projectResources.resources[0].gitFolder.folderUri, toAntigravityFileUri(gitFolder));
+
+  const after = await bridge.handle('antigravity.list', {});
+  assert.ok(after.projects.some((p: any) => p.name === 'Git Repo' && p.id === toAntigravityFileUri(gitFolder)));
+
+  // Idempotent 409 already_exists recovers via ReadProject.
+  conflictCreate = true;
+  const recovered = await bridge.registerProject(op, {name: 'Git Repo', path: gitFolder});
+  assert.equal(recovered.project.projectId, created.project.projectId);
+  assert.equal(calls.at(-1)?.method, 'ReadProject');
+
+  // Non-existent folder is rejected before CreateProject.
+  await assert.rejects(() => bridge.registerProject(`${Date.now()}:${randomUUID()}`, {name: 'Missing', path: join(dir, 'missing')}), /无法识别该目录/);
 });

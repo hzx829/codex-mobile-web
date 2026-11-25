@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
-import {mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve,join} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
@@ -133,4 +133,58 @@ test('paginated history uses the local index when turn listing is unavailable',a
     const resume=await control.handle({id:'resume',action:'session.resume',payload:{threadId:'paged',confirmIdle:true,opId:`${Date.now()}:${randomUUID()}`}});
     assert.equal(resume.state,'failed');assert.equal(resume.error.code,'unsupported');
   } finally {control.close();}
+});
+
+test('Codex prefers runtime project/list, creates projects with idempotencyKey, and matches project_id alongside legacy cwd', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'cmw-codex-proj-'));
+  await mkdir(join(home, 'alpha'), {recursive: true});
+  await mkdir(join(home, 'beta'), {recursive: true});
+  const rootA = await realpath(join(home, 'alpha')), rootB = await realpath(join(home, 'beta'));
+  const db = new DatabaseSync(join(home, 'state_5.sqlite'));
+  db.exec('CREATE TABLE threads (id TEXT,name TEXT,title TEXT,preview TEXT,cwd TEXT,project_id TEXT,model TEXT,model_provider TEXT,updated_at INTEGER,archived INTEGER)');
+  const insert = db.prepare('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?)');
+  insert.run('t-assigned', null, '已关联', '已关联', rootB, 'proj-1', 'm', 'openai', 200, 0);
+  insert.run('t-legacy', null, '旧会话', '旧会话', rootA, null, 'm', 'openai', 100, 0);
+  insert.run('t-other', null, '其他项目', '其他项目', rootB, 'proj-2', 'm', 'openai', 300, 0);
+  db.close();
+
+  class Runtime extends EventEmitter {
+    calls: any[] = []; requests = new Map();
+    async rpc(method: string, params: any) {
+      this.calls.push({method, params});
+      if (method === 'project/list') return {data: [{id: 'proj-1', name: 'Alpha', roots: [{path: rootA}], recencyAt: 999}], nextCursor: null};
+      if (method === 'project/create') return {project: {id: 'proj-new', name: params.name, roots: params.roots}};
+      if (method === 'config/read') return {config: {model: 'gpt-5', model_provider: 'openai'}};
+      if (method === 'model/list') return {data: []};
+      throw Error(method);
+    }
+    close() {}
+  }
+  class Desktop extends EventEmitter { clientId = ''; states = new Map(); async follow() { throw Error('not active'); } close() {} }
+  const runtime = new Runtime();
+  const control = new Control(new Ledger(':memory:'), runtime as any, new Desktop() as any, async () => [{path: rootB, name: 'Fallback'}]);
+  let changes = 0;
+  control.on('change', () => { changes++; });
+  try {
+    const matched = indexedSessions({cwd: rootA, projectId: 'proj-1', roots: [rootA], archived: false}, home);
+    assert.deepEqual(matched.data.map(t => t.id), ['t-assigned', 't-legacy']);
+
+    const info = await control.handle({id: 'i1', action: 'info', payload: {}});
+    assert.equal(info.projectApi, true);
+    assert.equal(info.projects[0].id, 'proj-1');
+    assert.equal(info.projects[0].name, 'Alpha');
+
+    const created = await control.registerProject('123:abc', {name: 'NewProj', path: rootB});
+    assert.equal(created.project.id, 'proj-new');
+    assert.equal(created.project.path, rootB);
+    assert.match(created.notice || '', /桌面侧栏/);
+    assert.equal(changes, 1);
+    assert.deepEqual(runtime.calls.find(c => c.method === 'project/create'), {
+      method: 'project/create',
+      params: {name: 'NewProj', roots: [{path: rootB}], idempotencyKey: '123:abc:codex'},
+    });
+  } finally {
+    control.close();
+    await removeTestTemp(home);
+  }
 });

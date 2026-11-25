@@ -77,6 +77,10 @@ type Props={
   conversationId:string;call:(action:RequestAction,payload?:Json)=>Promise<any>;go:(id:string)=>void;
   /** Without a conversation: the project (list id) a new conversation starts in, '' to choose one; `created` opens the new conversation. */
   newProject?:string|null;created?:(id:string)=>void;
+  /** Opens the unified project creation dialog when supported by the connector. */
+  onCreateProject?:()=>void;
+  /** Incremented when projects change so the new-chat selector reloads. */
+  projectsRevision?:number;
   machineName:string;showFiles:()=>void;showImage:(url:string,title:string)=>void;copyText:(text:string)=>Promise<void>;clearPreviewError:()=>void;
   /** Voice provider chosen for Antigravity; `chooseVoice` opens this app's voice settings. */
   voiceMode:VoiceProvider;chooseVoice:()=>void;
@@ -138,7 +142,7 @@ export function AntigravityPanel(props:Props){
   const {machine,connected,conversationId,call,go,inert,openFile,openPreview,previewError}=props;
   const creating=!conversationId;
   const key=`antigravity:${machine}:${conversationId||'new'}`;
-  const [projects,setProjects]=useState<{id:string;path:string;name?:string}[]|null>(null);
+  const [projects,setProjects]=useState<{id:string;path:string;name?:string;projectId?:string}[]|null>(null);
   const [target,setTargetState]=useState(()=>props.newProject||saved(`${key}:project`));
   function setTarget(next:string|((old:string)=>string)){
     setTargetState(old=>{
@@ -282,6 +286,7 @@ export function AntigravityPanel(props:Props){
   useEffect(()=>{
     if(!syncing)void refresh(true);
   },[connected]);
+  useEffect(()=>{if(creating&&props.newProject)setTarget(props.newProject);},[creating,props.newProject]);
   useEffect(()=>{
     if(!creating||!connected)return;
     request.current('antigravity.list',{}).then(page=>{
@@ -291,7 +296,7 @@ export function AntigravityPanel(props:Props){
       setTarget(old=>old&&(!list.length||list.some((item:{id:string})=>item.id===old))?old:list[0]?.id||'');
       if(page.defaultPermissionMode)setDefaultMode(page.defaultPermissionMode);
     }).catch(failed);
-  },[creating,connected]);
+  },[creating,connected,props.projectsRevision]);
   useEffect(()=>{
     if(!connected||!view?.revision||syncing)return;
     let active=true,inflight=false;
@@ -372,8 +377,9 @@ export function AntigravityPanel(props:Props){
     setSubmitting(true);
     const opId=operationId();remember(opId);
     try{
+      const selectedMeta=projects?.find(item=>item.id===target);
       const result=await request.current('antigravity.create',{
-        project:target,text:sentText.trim()?sentText:'',...(sentImages.length?{images:sentImages}:{}),...attached,opId,
+        project:target,...(selectedMeta?.projectId?{projectId:selectedMeta.projectId}:{}),text:sentText.trim()?sentText:'',...(sentImages.length?{images:sentImages}:{}),...attached,opId,
         ...(model?{model}:{}),
         ...(permissionMode?{permissionMode}:{}),
       });
@@ -529,7 +535,9 @@ export function AntigravityPanel(props:Props){
         <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} disabled={Boolean(pending)} onChange={e=>setTarget(e.target.value)}>
           {!target&&<option value="">{!projects?'正在读取项目…':'桌面上还没有项目'}</option>}
           {projects?.map(item=><option key={item.id} value={item.id}>{projectName(item)}</option>)}
-        </select></label></div>}
+        </select></label>
+        {props.onCreateProject&&<button type="button" className="create-project-inline" disabled={!connected||Boolean(pending)} onClick={props.onCreateProject}><Icon name="plus" size={16}/><span>新建或关联项目</span></button>}
+      </div>}
       {view&&<SenderScope senders={senders}><AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/></SenderScope>}
       {pendingShown&&<PendingMessage message={pendingShown} openFile={openFile} openPreview={openPreview} onFollowup={followup}/>}
       {!view&&!pendingShown&&(busy||settling||syncedForPanel?.phase==='syncing'&&!syncedForPanel.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}

@@ -149,6 +149,21 @@ test('Claude Code projects are folders: list, settings and new sessions', async 
     assert.deepEqual(start.systemPrompt, {type: 'preset', preset: 'claude_code'});
     assert.equal(start.additionalDirectories, undefined);assert.equal(start.mcpServers, undefined);assert.equal(start.settingSources, undefined);
     await assert.rejects(bridge.handle('claude.create', {projectId: 'p_0000000000000000', text: '你好', opId: opId()}), /项目目录/);
+
+    // Registering an empty folder makes it appear in claude.list immediately and writes CLAUDE.md only when absent.
+    const fresh = join(root, 'empty-app');
+    await mkdir(fresh);
+    const freshReal = await realpath(fresh);
+    const reg = await bridge.registerProject(opId(), {name: '空项目', path: freshReal, initClaudeMd: '# Team Rules'});
+    assert.equal(reg.project.id, freshReal);
+    assert.equal(reg.project.name, '空项目');
+    assert.equal(await readFile(join(freshReal, 'CLAUDE.md'), 'utf8'), '# Team Rules\n');
+    const afterReg = await bridge.handle('claude.list', {refresh: true});
+    assert.deepEqual(afterReg.projects.find((p: any) => p.id === freshReal), {id: freshReal, path: freshReal, name: '空项目'});
+
+    // Re-registering does not overwrite an existing CLAUDE.md.
+    await bridge.registerProject(opId(), {name: '空项目改名', path: freshReal, initClaudeMd: '# Overwrite Attempt'});
+    assert.equal(await readFile(join(freshReal, 'CLAUDE.md'), 'utf8'), '# Team Rules\n');
   } finally {
     bridge?.close();ledger.close();
     await removeTestTemp(root);

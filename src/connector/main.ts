@@ -19,6 +19,7 @@ import { ArtifactViewer } from './claude-artifacts.js';
 import { GUEST_ENTRYPOINT, NoDesktop, preflight, returnLogins, useGuestHomes } from './guest.js';
 import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './guest-checks.js';
 import { setWorkspace } from './project.js';
+import { WorkspaceManager, createProjectsHandler, defaultProjectRoot } from './workspace.js';
 import { recordClaudeTurn } from './usage-meter.js';
 import { ClaudeVoiceAuth, ClaudeVoiceStreams } from './claude-voice.js';
 import { traced } from './trace.js';
@@ -120,7 +121,22 @@ if(!guest){
 }
 const useCodex=available.includes('codex');
 if(useCodex)hub.register('codex',control.syncSource);
+const workspace=new WorkspaceManager({projectRoots:config.projectRoots,dataDir:config.dataDir});
+const handleProjects=createProjectsHandler({
+  workspace,
+  ledger,
+  availableServices:available,
+  registrars:{
+    ...(useCodex?{codex:(opId,input)=>control.registerProject(opId,input)}:{}),
+    ...(claudeCodeBridge?{claude:(opId,input)=>claudeCodeBridge!.registerProject(opId,input)}:{}),
+    ...(antigravityBridge?{antigravity:(opId,input)=>antigravityBridge!.registerProject(opId,input)}:{}),
+  },
+  onChanged:()=>{control.emit('change',null);},
+});
 const services=new ServiceRouter(bridges,request=>{
+  if(request.action==='projects.roots'||request.action==='projects.browse'||request.action==='projects.create'){
+    return handleProjects(request.action,request.payload,requestActor.getStore());
+  }
   if(guest&&(request.action==='runtime.reload'||request.action.startsWith('antigravity.')||request.action.startsWith('claude.')))
     throw new BridgeError('unsupported','借用电脑暂不支持此操作');
   if(!useCodex&&!['project.create','operation.read'].includes(request.action))
@@ -287,6 +303,8 @@ const localControl=new LocalControlServer({
       ...claudeSignIn?{claudeSignIn}:{},
       activeTasks,
       pendingUsage:ledger.pendingUsageCount(),
+      projectRoots:config.projectRoots||[],
+      defaultProjectRoot:defaultProjectRoot(),
     };
   },
   handleRequest:(action,payload)=>services.handle({id:'local',action:action as BridgeRequest['action'],payload}),

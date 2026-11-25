@@ -174,6 +174,15 @@ svg { flex-shrink: 0; }
 .pick { display: flex; gap: 8px; }
 .pick input { height: 40px; font-size: 13px; border-radius: 10px; }
 .pick .chip { height: 40px; border-radius: 10px; }
+.root-list { display: flex; flex-direction: column; gap: 6px; }
+.root-list:empty { display: none; }
+.root-row { display: flex; align-items: center; gap: 6px; padding: 7px 8px 7px 12px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--input); }
+.root-path { flex: 1; min-width: 0; font-size: 12.5px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.root-tag { font-size: 11px; padding: 2px 7px; border-radius: 999px; background: var(--seg); color: var(--fg-2); flex: 0 0 auto; }
+.root-btn { font-size: 12px; color: var(--fg-2); padding: 4px 8px; border-radius: 7px; flex: 0 0 auto; }
+.root-btn:hover { background: var(--seg); color: var(--fg); }
+.root-btn.danger:hover { background: var(--err-bg); color: var(--err); }
+.root-actions { display: flex; gap: 8px; align-items: center; }
 
 .overlay { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: center; justify-content: center; padding: 28px; animation: fade .12s ease; }
 .dialog { width: 100%; max-width: 420px; background: var(--card); border-radius: 16px; padding: 22px; box-shadow: 0 18px 50px rgba(0, 0, 0, .22); display: flex; flex-direction: column; gap: 10px; }
