@@ -270,11 +270,13 @@ export function AntigravityPanel(props:Props){
     alive.current=true;
     const flush=()=>draftSave.current.flush();
     const hidden=()=>{if(document.visibilityState==='hidden')flush();};
+    window.addEventListener('beforeunload',flush);
     window.addEventListener('pagehide',flush);
     document.addEventListener('visibilitychange',hidden);
     return()=>{
       alive.current=false;
       flush();
+      window.removeEventListener('beforeunload',flush);
       window.removeEventListener('pagehide',flush);
       document.removeEventListener('visibilitychange',hidden);
       clearTimeout(settleTimer.current);

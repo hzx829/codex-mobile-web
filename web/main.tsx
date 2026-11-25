@@ -32,7 +32,7 @@ import {fileReference,isArtifactUrl,previewRoute,samePreviewTarget,type PreviewT
 import {ArtifactPanel} from './artifact-view';
 import {rememberPage,type PaneAction} from './artifact-pane';
 import {home,initialLocation,rememberLocation,parseLocation,type Route} from './route-state';
-import {clearDraftAttachments,useComposerAttachments} from './composer-attachments';
+import {clearDraftAttachments,flushDraftAttachments,loadDraftAttachments,useComposerAttachments} from './composer-attachments';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
 import {MenuItem,SheetPanel} from './sheet';
 import {PermissionButton,PermissionPicker,type PermissionOption} from './permission-picker';
@@ -117,7 +117,7 @@ function App(){
   const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
   const [view,setView]=useState<SessionView|null>(null),[loading,setLoading]=useState(false),[loadingOlder,setLoadingOlder]=useState(false),[historyError,setHistoryError]=useState('');
   const viewRef=useRef(view);useLayoutEffect(()=>{viewRef.current=view;},[view]);
-  const [draft,setDraft]=useState(''),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[approval,setApproval]=useState(''),[newCwd,setNewCwd]=useState('');
+  const [draft,setDraft]=useState<string>(()=>String(load(`draft:${savedLocation.machine}:${savedLocation.route.thread}`,'')||'')),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[approval,setApproval]=useState(''),[newCwd,setNewCwd]=useState<string>(savedLocation.route.project||'');
   const [optimistic,setOptimistic]=useState<OptimisticMessage|null>(null),optimisticRef=useRef(optimistic);optimisticRef.current=optimistic;
   const everOnline=useRef(false);if(status==='online')everOnline.current=true;
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
@@ -441,9 +441,9 @@ function App(){
     return()=>clearTimeout(timer);
   },[optimistic,view,scope]);
   useEffect(()=>{
-    const flush=()=>{draftSave.current.flush();void flushCache();void flushThreadStore();},hidden=()=>{if(document.visibilityState==='hidden')flush();};
-    window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',hidden);
-    return()=>{flush();window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',hidden);};
+    const flush=()=>{draftSave.current.flush();void flushDraftAttachments();void flushCache();void flushThreadStore();},hidden=()=>{if(document.visibilityState==='hidden')flush();};
+    window.addEventListener('beforeunload',flush);window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',hidden);
+    return()=>{flush();window.removeEventListener('beforeunload',flush);window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',hidden);};
   },[]);
   useEffect(()=>{if(!codexSynced)void refreshSession();},[connected,codexActive,codexSynced]);
   useEffect(()=>{
@@ -1185,4 +1185,4 @@ function App(){
 // UpdateBanner moves an open page to a new release once the worker has it.
 if(import.meta.env.PROD&&'serviceWorker' in navigator)window.addEventListener('load',()=>{navigator.serviceWorker.register('/sw.js').catch(()=>{});});
 // The stored cache is read first (bounded by a short timeout) so the first paint can show it.
-void Promise.all([loadCache(),loadThreadStore()]).finally(()=>createRoot(document.getElementById('root')!).render(<><App/><UpdateBanner/></>));
+void Promise.all([loadCache(),loadThreadStore(),loadDraftAttachments()]).finally(()=>createRoot(document.getElementById('root')!).render(<><App/><UpdateBanner/></>));

@@ -1,7 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {DraftSave} from '../web/draft-save.js';
-import {clearDraftAttachments,readDraftAttachments,writeDraftAttachments} from '../web/composer-attachments.js';
+import 'fake-indexeddb/auto';
+import {DraftSave,flushAllDrafts,hasPendingDrafts} from '../web/draft-save.js';
+import {clearDraftAttachments,flushDraftAttachments,hasDraftAttachments,readDraftAttachments,writeDraftAttachments} from '../web/composer-attachments.js';
 
 test('typing coalesces writes; flush and thread changes preserve the latest draft exactly once',t=>{
   t.mock.timers.enable({apis:['setTimeout']});
@@ -26,4 +27,35 @@ test('draft attachments stay per conversation across switches and clear when sen
   assert.deepEqual(readDraftAttachments('antigravity:pc:new'),{images:[],files:[]});
   clearDraftAttachments();
   assert.deepEqual(readDraftAttachments('antigravity:pc:other'),{images:[],files:[]});
+});
+
+test('flushAllDrafts flushes every pending composer draft immediately before hot-deploy reload',t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const saved:[string,string][]=[];
+  const a=new DraftSave((key,text)=>saved.push([key,text]));
+  const b=new DraftSave((key,text)=>saved.push([key,text]));
+  assert.equal(hasPendingDrafts(),false);
+  a.write('codex:pc:t1','unfinished codex thought');
+  b.write('antigravity:pc:c1','unfinished ag thought');
+  assert.equal(hasPendingDrafts(),true);
+  assert.equal(saved.length,0);
+  flushAllDrafts();
+  assert.equal(hasPendingDrafts(),false);
+  assert.deepEqual(saved,[['codex:pc:t1','unfinished codex thought'],['antigravity:pc:c1','unfinished ag thought']]);
+});
+
+test('draft attachments persist to IndexedDB and survive reload',async()=>{
+  clearDraftAttachments();
+  await flushDraftAttachments();
+  assert.equal(hasDraftAttachments(),false);
+  writeDraftAttachments('codex:pc:t1',['data:image/png;base64,CC=='],[{id:'f2',name:'notes.pdf',size:42}]);
+  assert.equal(hasDraftAttachments(),true);
+  await flushDraftAttachments();
+  // Simulate reloading into a fresh module memory map by calling a separate read via IndexedDB
+  const {loadDraftAttachments:reloadDrafts,readDraftAttachments:readAfter}=await import(`../web/composer-attachments.js?reload=${Date.now()}`);
+  assert.deepEqual(readAfter('codex:pc:t1'),{images:[],files:[]});
+  await reloadDrafts();
+  assert.deepEqual(readAfter('codex:pc:t1'),{images:['data:image/png;base64,CC=='],files:[{id:'f2',name:'notes.pdf',size:42}]});
+  clearDraftAttachments();
+  await flushDraftAttachments();
 });

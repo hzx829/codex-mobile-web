@@ -32,9 +32,9 @@ export class UpdateWatch{
   show(){this.shown=this.now();this.touched=false;}
   /** A tap, key or scroll: from now on, ask before reloading. */
   touch(){this.touched=true;}
-  decide(current:unknown,{visible,lastReload}:{visible:boolean;lastReload:number}):UpdateAction{
+  decide(current:unknown,{visible,lastReload,dirty=false}:{visible:boolean;lastReload:number;dirty?:boolean}):UpdateAction{
     if(!outdated(this.own,current))return 'none';
-    const now=this.now(),quiet=visible&&!this.touched&&now-this.shown<QUIET_RELOAD_MS&&now-lastReload>=RELOAD_GUARD_MS;
+    const now=this.now(),quiet=visible&&!this.touched&&!dirty&&now-this.shown<QUIET_RELOAD_MS&&now-lastReload>=RELOAD_GUARD_MS;
     return quiet?'reload':'offer';
   }
 }

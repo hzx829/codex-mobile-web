@@ -7,6 +7,69 @@ type StoredAttachments={images:string[];files:DraftFileAttachment[]};
 const draftAttachments=new Map<string,StoredAttachments>();
 const MAX_DRAFT_SCOPES=32;
 
+// Persist unsent composer images & files in IndexedDB so hot-deploy / manual page reloads never lose them.
+const DRAFT_DB='codex-mobile-web-drafts',DRAFT_STORE='attachments',DRAFT_DB_VERSION=1;
+let draftDb:Promise<IDBDatabase>|null=null;
+let writeQueue:Promise<void>=Promise.resolve();
+
+function openDraftDb():Promise<IDBDatabase>{
+  draftDb??=new Promise<IDBDatabase>((resolve,reject)=>{
+    if(typeof indexedDB==='undefined'){reject(Error('IndexedDB unavailable'));return;}
+    const request=indexedDB.open(DRAFT_DB,DRAFT_DB_VERSION);
+    request.onupgradeneeded=()=>{
+      const db=request.result;
+      if(!db.objectStoreNames.contains(DRAFT_STORE))db.createObjectStore(DRAFT_STORE);
+    };
+    request.onsuccess=()=>{const db=request.result;db.onversionchange=()=>{db.close();draftDb=null;};db.onclose=()=>{draftDb=null;};resolve(db);};
+    request.onerror=()=>reject(request.error);
+    request.onblocked=()=>reject(Error('IndexedDB blocked'));
+  });
+  draftDb.catch(()=>{draftDb=null;});
+  return draftDb;
+}
+const txDone=(tx:IDBTransaction)=>new Promise<void>((resolve,reject)=>{tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);});
+const reqResult=<T>(request:IDBRequest<T>)=>new Promise<T>((resolve,reject)=>{request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
+
+function enqueuePersist(op:(store:IDBObjectStore)=>void){
+  if(typeof indexedDB==='undefined')return;
+  writeQueue=writeQueue.then(async()=>{
+    try{
+      const db=await openDraftDb(),tx=db.transaction(DRAFT_STORE,'readwrite');
+      op(tx.objectStore(DRAFT_STORE));
+      await txDone(tx);
+    }catch{/* Private browsing or storage unavailable: stay in memory. */}
+  });
+}
+
+/** Hydrates saved composer images/files from IndexedDB before first render so reloads keep attachments intact. */
+export async function loadDraftAttachments(timeout=250):Promise<void>{
+  if(typeof indexedDB==='undefined')return;
+  const read=async()=>{
+    const db=await openDraftDb(),tx=db.transaction(DRAFT_STORE,'readonly'),store=tx.objectStore(DRAFT_STORE);
+    const [keys,values]=await Promise.all([reqResult(store.getAllKeys()),reqResult(store.getAll())]);
+    keys.forEach((rawKey,index)=>{
+      const key=String(rawKey),val=values[index] as Partial<StoredAttachments>|undefined;
+      if(!val||draftAttachments.has(key))return;
+      const images=Array.isArray(val.images)?val.images.filter((item):item is string=>typeof item==='string'):[];
+      const files=Array.isArray(val.files)?val.files.filter((item):item is DraftFileAttachment=>Boolean(item&&typeof item==='object'&&typeof item.id==='string'&&typeof item.name==='string')):[];
+      if(images.length||files.length)draftAttachments.set(key,{images,files});
+    });
+    while(draftAttachments.size>MAX_DRAFT_SCOPES)draftAttachments.delete(draftAttachments.keys().next().value!);
+  };
+  try{await Promise.race([read(),new Promise<void>(resolve=>setTimeout(resolve,timeout))]);}catch{}
+}
+
+/** Waits for any queued attachment persistence to finish (called before a hot-deploy page reload). */
+export async function flushDraftAttachments(timeout=400):Promise<void>{
+  try{await Promise.race([writeQueue,new Promise<void>(resolve=>setTimeout(resolve,timeout))]);}catch{}
+}
+
+/** True when any conversation has unsent images or files waiting in the composer. */
+export function hasDraftAttachments():boolean{
+  for(const entry of draftAttachments.values())if(entry.images.length||entry.files.length)return true;
+  return false;
+}
+
 export function readDraftAttachments(key?:string):StoredAttachments{
   if(!key)return {images:[],files:[]};
   const saved=draftAttachments.get(key);
@@ -15,17 +78,35 @@ export function readDraftAttachments(key?:string):StoredAttachments{
 export function writeDraftAttachments(key:string|undefined,images:string[],files:DraftFileAttachment[]){
   if(!key)return;
   draftAttachments.delete(key);
-  if(!images.length&&!files.length)return;
-  draftAttachments.set(key,{images:[...images],files:[...files]});
-  while(draftAttachments.size>MAX_DRAFT_SCOPES)draftAttachments.delete(draftAttachments.keys().next().value!);
+  if(!images.length&&!files.length){
+    enqueuePersist(store=>store.delete(key));
+    return;
+  }
+  const copy:StoredAttachments={images:[...images],files:[...files]};
+  draftAttachments.set(key,copy);
+  const evicted:string[]=[];
+  while(draftAttachments.size>MAX_DRAFT_SCOPES){
+    const oldest=draftAttachments.keys().next().value!;
+    draftAttachments.delete(oldest);
+    evicted.push(oldest);
+  }
+  enqueuePersist(store=>{
+    store.put(copy,key);
+    for(const oldKey of evicted)store.delete(oldKey);
+  });
 }
 export function clearDraftAttachments(key?:string){
-  if(key)draftAttachments.delete(key);
-  else draftAttachments.clear();
+  if(key){
+    draftAttachments.delete(key);
+    enqueuePersist(store=>store.delete(key));
+  }else{
+    draftAttachments.clear();
+    enqueuePersist(store=>store.clear());
+  }
 }
 
 type Options={
-  /** When set, unsent images and files stay in memory under this key across conversation switches. */
+  /** When set, unsent images and files stay under this key across conversation switches and page reloads. */
   draftKey?:string;
   /** Nothing can be added now, e.g. while a message is being sent. */
   disabled:boolean;

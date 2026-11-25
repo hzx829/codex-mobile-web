@@ -39,4 +39,5 @@ test('an outdated page reloads by itself only right after it is shown and before
   watch.show();
   assert.equal(watch.decide(next,{...quiet,lastReload:now-1000}),'offer','one automatic reload per minute, so it never loops');
   assert.equal(watch.decide(next,{...quiet,lastReload:now-RELOAD_GUARD_MS}),'reload');
+  assert.equal(watch.decide(next,{...quiet,lastReload:now-RELOAD_GUARD_MS,dirty:true}),'offer','never auto-reload while user has unsent input or attachments');
 });
