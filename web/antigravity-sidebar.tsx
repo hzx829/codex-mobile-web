@@ -58,9 +58,8 @@ export function AntigravitySidebar({
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const loader=useRef(new SessionListLoader());
 
-  // Expanded project keys persist per app and computer.
-  const [expandedList,setExpandedList]=useState<string[]>(()=>loadExpandedProjects(service,machine));
-  const expandedKeys=useMemo(()=>new Set(expandedList),[expandedList]);
+  // Expanded project keys persist per app and computer; null means first visit (auto-expand first project).
+  const [expandedList,setExpandedList]=useState<string[]|null>(()=>loadExpandedProjects(service,machine));
   const [projectPages,setProjectPages]=useState<Record<string,ProjectPage>>({});
   const projectReqSeq=useRef<Record<string,number>>({});
 
@@ -104,6 +103,11 @@ export function AntigravitySidebar({
     name:item.name||workspaceName(item.path),
     owner:item.owner,
   })),[shownProjects]);
+
+  const effectiveExpanded=useMemo(()=>{
+    if(expandedList!==null)return new Set(expandedList);
+    return projectItems[0]?new Set([projectItems[0].key]):new Set<string>();
+  },[expandedList,projectItems]);
 
   const allLoadedThreads=useMemo(()=>{
     const extra=Object.values(projectPages).flatMap(entry=>entry.items);
@@ -150,7 +154,7 @@ export function AntigravitySidebar({
   const refreshExpanded=useStableEvent(()=>{
     if(!connected)return;
     for(const item of projectItems){
-      if(expandedKeys.has(item.key))loadProject(item,false);
+      if(effectiveExpanded.has(item.key))loadProject(item,false);
     }
   });
 
@@ -179,17 +183,17 @@ export function AntigravitySidebar({
     return()=>activeLoader.invalidate();
   },[connected,key,revision,load]);
 
-  // Load any persisted expanded projects once the project list arrives.
+  // Load any expanded projects once the project list arrives.
   const loadedExpandedFor=useRef(new Set<string>());
   useEffect(()=>{
     if(!connected)return;
     for(const item of projectItems){
-      if(expandedKeys.has(item.key)&&!loadedExpandedFor.current.has(item.key)){
+      if(effectiveExpanded.has(item.key)&&!loadedExpandedFor.current.has(item.key)){
         loadedExpandedFor.current.add(item.key);
         loadProject(item,false);
       }
     }
-  },[connected,projectItems,expandedKeys,loadProject]);
+  },[connected,projectItems,effectiveExpanded,loadProject]);
 
   // Auto-expand a freshly created project.
   useEffect(()=>{
@@ -197,8 +201,9 @@ export function AntigravitySidebar({
     const target=projectItems.find(item=>item.key===autoExpandKey||item.id===autoExpandKey);
     if(!target)return;
     setExpandedList(old=>{
-      if(old.includes(target.key))return old;
-      const next=[...old,target.key];
+      const base=old??[...effectiveExpanded];
+      if(base.includes(target.key))return base;
+      const next=[...base,target.key];
       saveExpandedProjects(service,machine,next);
       return next;
     });
@@ -209,9 +214,10 @@ export function AntigravitySidebar({
   },[autoExpandKey,projectItems,service,machine,connected,loadProject]);
 
   function toggleExpand(project:ProjectItem){
-    const opening=!expandedKeys.has(project.key);
+    const opening=!effectiveExpanded.has(project.key);
     setExpandedList(old=>{
-      const next=opening?[...old,project.key]:old.filter(k=>k!==project.key);
+      const base=old??[...effectiveExpanded];
+      const next=opening?[...new Set([...base,project.key])]:base.filter(k=>k!==project.key);
       saveExpandedProjects(service,machine,next);
       return next;
     });
@@ -224,7 +230,7 @@ export function AntigravitySidebar({
   const projectThreadsMap=useMemo<Record<string,ProjectThreadsState>>(()=>{
     const map:Record<string,ProjectThreadsState>={};
     for(const item of projectItems){
-      if(!expandedKeys.has(item.key))continue;
+      if(!effectiveExpanded.has(item.key))continue;
       const entry=projectPages[item.key];
       const cache=listKey(listAction,machine,item.id||item.path);
       const rawItems=entry?.items?.length?entry.items
@@ -240,23 +246,51 @@ export function AntigravitySidebar({
       };
     }
     return map;
-  },[projectItems,expandedKeys,projectPages,listAction,machine,service,items,preferences,filter]);
+  },[projectItems,effectiveExpanded,projectPages,listAction,machine,service,items,preferences,filter]);
 
   const refreshAll=()=>{load();refreshExpanded();};
-  const heading=query?'搜索结果':'最近';
-  const groups=groupThreads(visible,preferences,heading);
+  const projectKeySet=useMemo(()=>new Set(projectItems.map(p=>p.key)),[projectItems]);
+  const pinnedThreads=useMemo(()=>{
+    if(query)return [] as Thread[];
+    const seen=new Set<string>(),out:Thread[]=[];
+    for(const item of [...visible,...Object.values(projectPages).flatMap(p=>filter?filter(p.items) as Thread[]:p.items)]){
+      if(preferences[item.id]?.pinned&&!seen.has(item.id)){seen.add(item.id);out.push(item);}
+    }
+    return out;
+  },[query,visible,projectPages,filter,preferences]);
+
+  // Projects are the primary grouping (like Codex & Claude Code); only show a flat list for search, empty projects, or unassigned Claude sessions.
+  const unassignedThreads=useMemo(()=>{
+    if(query||!projectItems.length)return visible;
+    if(service==='claude')return visible.filter(t=>!t.cwd||!projectKeySet.has(projectPathKey(t.cwd)));
+    return [] as Thread[];
+  },[query,projectItems.length,visible,service,projectKeySet]);
+
+  const showFlatSection=Boolean(query||!projectItems.length||unassignedThreads.length>0);
+  const heading=query?'搜索结果':projectItems.length?'其他会话':'最近';
+  const groups=groupThreads(unassignedThreads,preferences,heading);
   const filterControl=me&&onOwnerFilterChange?<OwnerFilterControl me={me} value={ownerFilter} members={members} change={onOwnerFilterChange}/>:null;
+  const showProjectsTree=!query&&(projectItems.length>0||Boolean(onCreateProject));
 
   return <aside className="home-panel" inert={inert}>
     <HomeHeader machineName={machineName} connected={connected} relayOnline={relayOnline}
       chooseComputer={chooseComputer} mobileSettings={mobileSettings}/>
     {!query&&switcher}
     <div className="home-content">
-      {!query&&(projectItems.length>0||onCreateProject)&&<ProjectTree
+      {!query&&pinnedThreads.length>0&&<section className="pinned-section">
+        <h2>置顶</h2>
+        <nav aria-label="置顶">{pinnedThreads.map(item=>{
+          const thread={...item,status:item.running?{type:'active'}:undefined};
+          return <ThreadRow key={item.id} thread={thread} selected={selected===item.id} preference={preferences[item.id]}
+            time={relativeTime(item.updatedAt)} open={()=>open(item.id)} menu={point=>setMenu({thread,point})}/>;
+        })}</nav>
+      </section>}
+
+      {showProjectsTree&&<ProjectTree
         service={service}
         machine={machine}
         projects={projectItems}
-        expandedKeys={expandedKeys}
+        expandedKeys={effectiveExpanded}
         onToggleExpand={toggleExpand}
         projectThreads={projectThreadsMap}
         onLoadMore={project=>loadProject(project,true)}
@@ -267,6 +301,7 @@ export function AntigravitySidebar({
         onThreadMenu={(thread,point)=>setMenu({thread,point})}
         onNewChat={onNew?project=>onNew(project.id||project.path):undefined}
         onCreateProject={onCreateProject}
+        headerAction={filterControl}
         onEditProject={onEditProject}
         onClaudeSettings={service==='claude'?onClaudeSettings:undefined}
         onRemoveProject={onRemoveProject}
@@ -276,18 +311,23 @@ export function AntigravitySidebar({
         onToggleProjects={()=>onToggleProjects?.()}
         connected={connected}
         canManageProjects={canManageProjects}
+        ownerFiltered={ownerFiltered}
       />}
-      <section className="recent-section">{!groups.length&&(filterControl?<div className="section-head"><h2>{heading}</h2>{filterControl}</div>:<h2>{heading}</h2>)}
-        {groups.map((group,index)=><div className="thread-group" key={group.key}>{index===0&&filterControl?<div className="section-head"><h2>{group.label}</h2>{filterControl}</div>:<h2>{group.label}</h2>}<nav aria-label={group.label}>{group.threads.map(item=>{
+
+      {showFlatSection&&<section className="recent-section">
+        {!groups.length&&(!showProjectsTree&&filterControl?<div className="section-head"><h2>{heading}</h2>{filterControl}</div>:<h2>{heading}</h2>)}
+        {groups.map((group,index)=><div className="thread-group" key={group.key}>{index===0&&!showProjectsTree&&filterControl?<div className="section-head"><h2>{group.label}</h2>{filterControl}</div>:<h2>{group.label}</h2>}<nav aria-label={group.label}>{group.threads.map(item=>{
           const thread={...item,status:item.running?{type:'active'}:undefined};
           return <ThreadRow key={item.id} thread={thread} selected={selected===item.id} preference={preferences[item.id]}
             time={relativeTime(item.updatedAt)} open={()=>open(item.id)} menu={point=>setMenu({thread,point})}/>;})}</nav></div>)}
-        {busy&&!visible.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:
-          !visible.length&&!error&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':ownerFiltered?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,members)}」的会话，已加载列表中没有匹配项。{onOwnerFilterChange&&<button type="button" className="empty-list-action" onClick={()=>onOwnerFilterChange('all')}>显示全部</button>}</>:query?'没有找到匹配的会话。':`还没有 ${appName} 会话。`}</p>}
-        {error&&<p className="error" role="alert">{error} {connected&&<button type="button" onClick={refreshAll}>重试</button>}</p>}
-        {notice&&<p className="muted">{notice}</p>}
-        {current?.hasMore&&<button className="more-link" disabled={!connected||busy} onClick={()=>load(true)}>{busy?'正在加载…':'加载更多'}</button>}
-      </section>
+        {busy&&!unassignedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:
+          !unassignedThreads.length&&!error&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':ownerFiltered?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,members)}」的会话，已加载列表中没有匹配项。{onOwnerFilterChange&&<button type="button" className="empty-list-action" onClick={()=>onOwnerFilterChange('all')}>显示全部</button>}</>:query?'没有找到匹配的会话。':`还没有 ${appName} 会话。`}</p>}
+        {query&&current?.hasMore&&<button className="more-link" disabled={!connected||busy} onClick={()=>load(true)}>{busy?'正在加载…':'加载更多'}</button>}
+        {!projectItems.length&&!query&&current?.hasMore&&<button className="more-link" disabled={!connected||busy} onClick={()=>load(true)}>{busy?'正在加载…':'加载更多'}</button>}
+      </section>}
+
+      {error&&<p className="error sidebar-error" role="alert">{error} {connected&&<button type="button" onClick={refreshAll}>重试</button>}</p>}
+      {notice&&<p className="muted sidebar-notice">{notice}</p>}
     </div>
     {menu&&<ThreadMenu key={menu.thread.id} thread={menu.thread} point={menu.point} preference={preferences[menu.thread.id]||{}} sections={[]} archived={false} compact connected={connected}
       teamMode={Boolean(me)} claim={isTeamAdmin(me)&&claimOwner?{members,assign:async userId=>{await claimOwner(menu.thread.id,userId);refreshAll();}}:undefined}

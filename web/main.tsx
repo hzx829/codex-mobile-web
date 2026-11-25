@@ -141,12 +141,11 @@ function App(){
   const [editingProject,setEditingProject]=useState<{service:BridgeService;project:ProjectItem}|null>(null);
   const [claudeSettingsFolder,setClaudeSettingsFolder]=useState('');
   const [autoExpandKey,setAutoExpandKey]=useState('');
-  const [codexExpandedState,setCodexExpandedState]=useState<{machine:string;keys:string[]}>(()=>({machine:savedLocation.machine,keys:savedLocation.machine?loadExpandedProjects('codex',savedLocation.machine):[]}));
-  const codexExpandedKeys=useMemo(()=>new Set(codexExpandedState.machine===machine?codexExpandedState.keys:machine?loadExpandedProjects('codex',machine):[]),[codexExpandedState,machine]);
+  const [codexExpandedState,setCodexExpandedState]=useState<{machine:string;keys:string[]|null}>(()=>({machine:savedLocation.machine,keys:savedLocation.machine?loadExpandedProjects('codex',savedLocation.machine):null}));
   const [codexProjectPages,setCodexProjectPages]=useState<Record<string,{items:Json[];nextCursor:string|null;loading:boolean;error:string}>>({});
   const codexProjectReqSeq=useRef<Record<string,number>>({});
   const codexProjectPagesRef=useRef(codexProjectPages);codexProjectPagesRef.current=codexProjectPages;
-  const codexExpandedRef=useRef(codexExpandedKeys);codexExpandedRef.current=codexExpandedKeys;
+  const codexExpandedRef=useRef<Set<string>>(new Set());
   const codexLoadedExpanded=useRef(new Set<string>());
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
   const [previewState,setPreviewState]=useState<{tabs:PreviewTab[];activeId:number|null}>({tabs:[],activeId:null}),[filePath,setFilePath]=useState('');
@@ -733,6 +732,12 @@ function App(){
     const meta=(info?.projects as Json[]|undefined)?.find(item=>projectPathKey(item.path)===key);
     return {key,id:meta?.id,path:p,name:meta?.name||name(p),roots:meta?.roots,owner:meta?.owner};
   }),[projects,info?.projects]);
+  const codexExpandedKeys=useMemo(()=>{
+    const saved=codexExpandedState.machine===machine?codexExpandedState.keys:(machine?loadExpandedProjects('codex',machine):null);
+    if(saved!==null)return new Set(saved);
+    return codexProjectItems[0]?new Set([codexProjectItems[0].key]):new Set<string>();
+  },[codexExpandedState,machine,codexProjectItems]);
+  codexExpandedRef.current=codexExpandedKeys;
   const refreshExpandedCodex=useStableEvent(()=>{
     if(!current.current.connected||current.current.service!=='codex')return;
     for(const item of codexProjectItems){
@@ -751,7 +756,7 @@ function App(){
   function toggleCodexProject(proj:ProjectItem){
     const opening=!codexExpandedKeys.has(proj.key);
     setCodexExpandedState(old=>{
-      const base=old.machine===machine?old.keys:loadExpandedProjects('codex',machine);
+      const base=(old.machine===machine?old.keys:loadExpandedProjects('codex',machine))??[...codexExpandedKeys];
       const next=opening?[...new Set([...base,proj.key])]:base.filter(k=>k!==proj.key);
       saveExpandedProjects('codex',machine,next);
       return {machine,keys:next};
@@ -899,7 +904,8 @@ function App(){
     if(targetService==='codex'){
       setProjects(old=>old.filter(p=>projectPathKey(p)!==targetProject.key));
       setCodexExpandedState(old=>{
-        const next=old.keys.filter(k=>k!==targetProject.key);
+        const base=old.keys??[...codexExpandedKeys];
+        const next=base.filter(k=>k!==targetProject.key);
         saveExpandedProjects('codex',machine,next);
         return {machine,keys:next};
       });
@@ -931,7 +937,7 @@ function App(){
       if(createOrigin.current==='new-chat'||newChat)selectProject(codexPath);
       else{
         setCodexExpandedState(old=>{
-          const base=old.machine===machine?old.keys:loadExpandedProjects('codex',machine);
+          const base=(old.machine===machine?old.keys:loadExpandedProjects('codex',machine))??[...codexExpandedKeys];
           const next=[...new Set([...base,key])];
           saveExpandedProjects('codex',machine,next);
           return {machine,keys:next};
@@ -1046,16 +1052,30 @@ function App(){
       {previewPane}
     </div></SenderRoot>;
   }
-  const codexHeading=searchQuery?'搜索结果':archived?'归档会话':'最近';
-  const codexGroups=groupThreads(listedThreads,preferences,codexHeading);
+  const codexProjectKeySet=new Set(codexProjectItems.map(p=>p.key));
+  const codexPinnedThreads=!searchQuery&&!archived?listedThreads.filter(s=>preferences[s.id]?.pinned):[];
+  const codexUnassignedThreads=searchQuery||archived||!codexProjectItems.length
+    ?listedThreads
+    :listedThreads.filter(s=>!preferences[s.id]?.pinned&&(!s.cwd||!codexProjectKeySet.has(projectPathKey(s.cwd))));
+  const codexShowProjectsTree=!searchQuery&&!archived&&(codexProjectItems.length>0||canCreateProject);
+  const codexShowFlatSection=Boolean(searchQuery||archived||!codexProjectItems.length||codexUnassignedThreads.length>0);
+  const codexHeading=searchQuery?'搜索结果':archived?'归档会话':codexProjectItems.length?'其他会话':'最近';
+  const codexGroups=groupThreads(codexUnassignedThreads,preferences,codexHeading);
   const codexFilterControl=me?<OwnerFilterControl me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>:null;
   const codexCanManage=canManageProjects&&Boolean(info?.projectApi);
+  const isCodexActive=(s:Json)=>connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?Boolean(view.running):s.status?.type==='active');
   return <SenderRoot me={me?.id}><div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>
       <HomeHeader machineName={machineName} connected={connected} relayOnline={status==='online'} chooseComputer={()=>setSheet('computer')} mobileSettings={mobileSettings}/>
       {!archived&&!searchQuery&&switcher}
       <div className="home-content">
-        {!searchQuery&&<ProjectTree
+        {codexPinnedThreads.length>0&&<section className="pinned-section">
+          <h2>置顶</h2>
+          <nav aria-label="置顶">{codexPinnedThreads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
+            time={relativeTime(s.updatedAt)} active={isCodexActive(s)}
+            open={()=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav>
+        </section>}
+        {codexShowProjectsTree&&<ProjectTree
           service="codex"
           machine={machine}
           projects={codexProjectItems}
@@ -1065,11 +1085,12 @@ function App(){
           onLoadMore={proj=>loadCodexProject(proj,true)}
           selectedThread={selected}
           threadPreferences={preferences}
-          isThreadActive={s=>connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?Boolean(view.running):s.status?.type==='active')}
+          isThreadActive={isCodexActive}
           onOpenThread={s=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}}
           onThreadMenu={(s,point)=>setThreadMenu({thread:s,point,machine,archived})}
           onNewChat={proj=>startNew(proj.path)}
           onCreateProject={canCreateProject?()=>openCreateProject('sidebar'):undefined}
+          headerAction={codexFilterControl}
           onEditProject={codexCanManage?proj=>openEditProject('codex',proj):undefined}
           onRemoveProject={codexCanManage?proj=>removeProject('codex',proj):undefined}
           onMarkAllRead={(_proj,ids)=>markCodexProjectRead(ids)}
@@ -1079,13 +1100,17 @@ function App(){
           connected={connected}
           busy={busy}
           canManageProjects={codexCanManage}
+          ownerFiltered={Boolean(me&&ownerFilter!=='all')}
         />}
-        <section className="recent-section">{!codexGroups.length&&(codexFilterControl?<div className="section-head"><h2>{codexHeading}</h2>{codexFilterControl}</div>:<h2>{codexHeading}</h2>)}{codexGroups.map((group,index)=><div className="thread-group" key={group.key}>{index===0&&codexFilterControl?<div className="section-head"><h2>{group.label}</h2>{codexFilterControl}</div>:<h2>{group.label}</h2>}<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
-          time={relativeTime(s.updatedAt)} active={connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?view.running:s.status?.type==='active')}
-          open={()=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
-          {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}
-          {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
-        </section>
+        {codexShowFlatSection&&<section className="recent-section">
+          {archived&&<div className="section-head"><h2>归档会话</h2><button type="button" className="text-button" onClick={()=>setArchived(false)}>返回项目</button></div>}
+          {!archived&&!codexGroups.length&&(!codexShowProjectsTree&&codexFilterControl?<div className="section-head"><h2>{codexHeading}</h2>{codexFilterControl}</div>:<h2>{codexHeading}</h2>)}
+          {codexGroups.map((group,index)=><div className="thread-group" key={group.key}>{!archived&&(index===0&&!codexShowProjectsTree&&codexFilterControl?<div className="section-head"><h2>{group.label}</h2>{codexFilterControl}</div>:<h2>{group.label}</h2>)}<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
+            time={relativeTime(s.updatedAt)} active={isCodexActive(s)}
+            open={()=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
+          {listBusy&&!codexUnassignedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!codexUnassignedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':archived?'还没有归档会话。':'还没有聊天，开始一个新任务吧。'}</p>}
+          {(searchQuery||archived||!codexProjectItems.length)&&cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
+        </section>}
       </div>
       <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><ChatSearch value={search} change={setSearch}/><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={()=>startNew()}/></div></div>
       {sidebarFooter}

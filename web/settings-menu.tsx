@@ -44,10 +44,12 @@ export function SidebarFooter({
     <button type="button" ref={trigger} className="sidebar-footer-btn" aria-haspopup="dialog" aria-expanded={Boolean(point)}
       aria-label={me?`${me.name} · 设置与账号`:'设置与连接'} onClick={openMenu}>
       {me?<OwnerBadge owner={me} size="md" title={me.name}/>:
-        <span className="sidebar-footer-avatar"><Icon name="settings" size={16}/></span>}
-      <span className="sidebar-footer-copy">
+        <span className="sidebar-footer-avatar"><Icon name="settings" size={15}/></span>}
+      <span className="sidebar-footer-line">
         <strong>{me?me.name:'设置'}</strong>
-        <span><i className={connected?'dot online':'dot'}/><span>{machineName}</span></span>
+        <span className="sidebar-footer-sep" aria-hidden="true">·</span>
+        <i className={connected?'dot online':'dot'}/>
+        <span className="sidebar-footer-machine">{machineName}</span>
       </span>
       <span className="sidebar-footer-chevron"><Icon name="chevron" size={14}/></span>
     </button>

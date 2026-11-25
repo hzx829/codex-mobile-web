@@ -41,9 +41,13 @@ function saveJson(key:string,value:unknown){
   try{localStorage.setItem(key,JSON.stringify(value));}catch{}
 }
 
-export function loadExpandedProjects(service:BridgeService,machine:string):string[]{
-  const raw=loadJson<unknown>(`expanded-projects:${service}:${machine}`,[]);
-  return Array.isArray(raw)?raw.filter((item):item is string=>typeof item==='string'):[];
+export function loadExpandedProjects(service:BridgeService,machine:string):string[]|null{
+  try{
+    const raw=localStorage.getItem(`expanded-projects:${service}:${machine}`);
+    if(raw===null)return null;
+    const parsed=JSON.parse(raw);
+    return Array.isArray(parsed)?parsed.filter((item):item is string=>typeof item==='string'):[];
+  }catch{return null;}
 }
 export function saveExpandedProjects(service:BridgeService,machine:string,keys:readonly string[]){
   saveJson(`expanded-projects:${service}:${machine}`,keys);
@@ -64,6 +68,7 @@ type ProjectTreeProps={
   onThreadMenu:(thread:Json,point:MenuPoint)=>void;
   onNewChat?:(project:ProjectItem)=>void;
   onCreateProject?:()=>void;
+  headerAction?:React.ReactNode;
   onEditProject?:(project:ProjectItem)=>void;
   onClaudeSettings?:(project:ProjectItem)=>void;
   onRemoveProject?:(project:ProjectItem)=>Promise<void>;
@@ -74,13 +79,14 @@ type ProjectTreeProps={
   connected:boolean;
   busy?:boolean;
   canManageProjects?:boolean;
+  ownerFiltered?:boolean;
 };
 
 export function ProjectTree({
   service,machine,projects,expandedKeys,onToggleExpand,projectThreads,onLoadMore,
   selectedThread,threadPreferences,isThreadActive,onOpenThread,onThreadMenu,
-  onNewChat,onCreateProject,onEditProject,onClaudeSettings,onRemoveProject,onMarkAllRead,onCopyPath,
-  projectsCollapsed,onToggleProjects,connected,busy=false,canManageProjects=false,
+  onNewChat,onCreateProject,headerAction,onEditProject,onClaudeSettings,onRemoveProject,onMarkAllRead,onCopyPath,
+  projectsCollapsed,onToggleProjects,connected,busy=false,canManageProjects=false,ownerFiltered=false,
 }:ProjectTreeProps){
   const prefKey=`project-prefs:${service}:${machine}`;
   const sectionKey=`project-sections-collapsed:${service}:${machine}`;
@@ -188,14 +194,19 @@ export function ProjectTree({
             preference={threadPreferences[thread.id]} time={relativeTime(thread.updatedAt)} active={isThreadActive(thread)}
             open={()=>onOpenThread(thread)} menu={point=>onThreadMenu(thread,point)}/>)}
         {state?.loading&&!items.length&&<div className="project-children-skeleton" role="status" aria-label="正在读取项目会话"><div/><div/></div>}
-        {!state?.loading&&!items.length&&!state?.error&&<p className="project-empty-threads">暂无聊天</p>}
+        {!state?.loading&&!items.length&&!state?.error&&<p className="project-empty-threads">{ownerFiltered?'当前筛选下无会话':'暂无聊天'}</p>}
         {state?.error&&<p className="project-threads-error" role="alert">{state.error}</p>}
         {hasHiddenLocal&&<button type="button" className="project-expand-more" onClick={()=>setShowAllMap(old=>({...old,[project.key]:true}))}>展开显示</button>}
-        {!hasHiddenLocal&&state?.hasMore&&<button type="button" className="project-expand-more" disabled={!connected||state.loading} onClick={()=>onLoadMore(project)}>{state.loading?'正在加载…':'加载更多'}</button>}
+        {!hasHiddenLocal&&state?.hasMore&&<button type="button" className="project-expand-more" disabled={!connected||state.loading} onClick={()=>onLoadMore(project)}>{state.loading?'正在加载…':'展开显示'}</button>}
         {showAll&&items.length>INITIAL_THREAD_LIMIT&&<button type="button" className="project-expand-more" onClick={()=>setShowAllMap(old=>({...old,[project.key]:false}))}>收起</button>}
       </div>}
     </div>;
   }
+
+  const sectionActions=(headerAction||onCreateProject)&&<div className="project-section-actions">
+    {headerAction}
+    {onCreateProject&&<IconButton icon="plus" label="新建项目" className="section-action" disabled={!connected||busy} onClick={onCreateProject}/>}
+  </div>;
 
   return <>
     {sectionedGroups.custom.map(group=>{
@@ -212,8 +223,7 @@ export function ProjectTree({
       </section>;
     })}
 
-    <ProjectsSection collapsed={projectsCollapsed} onToggle={onToggleProjects}
-      action={onCreateProject&&<IconButton icon="plus" label="新建项目" className="section-action" disabled={!connected||busy} onClick={onCreateProject}/>}>
+    <ProjectsSection collapsed={projectsCollapsed} onToggle={onToggleProjects} action={sectionActions}>
       {sectionedGroups.defaultItems.map(renderProject)}
       {!projects.length&&<p className="empty-projects">还没有项目，点右上角 + 新建。</p>}
     </ProjectsSection>
