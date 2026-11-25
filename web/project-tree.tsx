@@ -2,7 +2,6 @@ import {useMemo,useState} from 'react';
 import {operationId} from './client';
 import {ProjectsSection,workspaceName} from './chat-layout';
 import {Icon,type IconName} from './icons';
-import {IconButton} from './icon-button';
 import {Popover,type MenuPoint} from './popover';
 import {OwnerBadge,type TeamMemberRef} from './team';
 import {relativeTime,ThreadRow} from './thread-menu';
@@ -96,6 +95,7 @@ export function ProjectTree({
   const collapsedSections=useMemo(()=>new Set(collapsedState.key===sectionKey?collapsedState.names:loadJson<string[]>(sectionKey,[])),[collapsedState,sectionKey]);
   const [showAllMap,setShowAllMap]=useState<Record<string,boolean>>({});
   const [menu,setMenu]=useState<{project:ProjectItem;point:MenuPoint}|null>(null);
+  const [sectionMenu,setSectionMenu]=useState<MenuPoint|null>(null);
 
   function updatePref(projectKey:string,patch:ProjectPreference){
     const current=prefs[projectKey]||{};
@@ -203,10 +203,19 @@ export function ProjectTree({
     </div>;
   }
 
-  const sectionActions=(headerAction||onCreateProject)&&<div className="project-section-actions">
+  const expandedProjects=projects.filter(item=>expandedKeys.has(item.key));
+  // Same "⋯" affordance and hover reveal as the project rows, so the header never carries an always-on button next to them.
+  const sectionActions=(headerAction||onCreateProject||projects.length>0)&&<div className="project-section-actions">
     {headerAction}
-    {onCreateProject&&<IconButton icon="plus" label="新建项目" className="section-action" disabled={!connected||busy} onClick={onCreateProject}/>}
+    <button type="button" className="section-more" aria-haspopup="dialog" aria-expanded={Boolean(sectionMenu)} aria-label="项目列表操作" title="项目列表操作"
+      onClick={e=>{const rect=e.currentTarget.getBoundingClientRect();setSectionMenu({x:rect.right,y:rect.bottom+6,align:'end'});}}>
+      <Icon name="ellipsis" size={15}/>
+    </button>
   </div>;
+  const sectionMenuItem=(icon:IconName,label:string,action:()=>void,disabled=false)=>
+    <button type="button" className="menu-item" disabled={disabled} onClick={()=>{setSectionMenu(null);action();}}>
+      <Icon name={icon} size={18}/><span className="menu-copy">{label}</span>
+    </button>;
 
   return <>
     {sectionedGroups.custom.map(group=>{
@@ -225,8 +234,13 @@ export function ProjectTree({
 
     <ProjectsSection collapsed={projectsCollapsed} onToggle={onToggleProjects} action={sectionActions}>
       {sectionedGroups.defaultItems.map(renderProject)}
-      {!projects.length&&<p className="empty-projects">还没有项目，点右上角 + 新建。</p>}
+      {!projects.length&&<p className="empty-projects">还没有项目。{onCreateProject&&<button type="button" className="empty-list-action" disabled={!connected||busy} onClick={onCreateProject}>新建项目</button>}</p>}
     </ProjectsSection>
+
+    {sectionMenu&&<Popover point={sectionMenu} title="项目" label="项目列表操作" showHeader={false} close={()=>setSectionMenu(null)} className="project-menu-popover" focusSelector=".menu-item:not(:disabled)">
+      {onCreateProject&&sectionMenuItem('plus','新建项目',onCreateProject,!connected||busy)}
+      {sectionMenuItem('collapse','全部收起',()=>expandedProjects.forEach(onToggleExpand),!expandedProjects.length)}
+    </Popover>}
 
     {menu&&<ProjectMenu
       project={menu.project}

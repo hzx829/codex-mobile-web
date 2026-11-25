@@ -286,9 +286,10 @@ export function OwnerFilterControl({me,value,members,change}:{me:TeamUser;value:
     if(rect)setPoint({x:rect.right,y:rect.bottom+6,align:'end'});
   };
   const pick=(next:OwnerFilter)=>{change(next);setPoint(null);};
-  return <>
-    {active?<span className="owner-filter-chip">
-      <button type="button" ref={trigger} className="owner-filter-trigger active" aria-haspopup="dialog" aria-expanded={Boolean(point)}
+  // The trigger is the same hover-revealed "⋯" as the project header and rows; an active filter stays visible as a chip.
+  return <span className="section-head-actions">
+    {active&&<span className="owner-filter-chip">
+      <button type="button" className="owner-filter-trigger active" aria-haspopup="dialog" aria-expanded={Boolean(point)}
         aria-label={`当前筛选：${ownerFilterLabel(value,me,members)}，点击切换`} title={`当前筛选：${ownerFilterLabel(value,me,members)}`} onClick={openMenu}>
         {value==='mine'&&<OwnerBadge owner={me}/>}
         {selectedMember&&<OwnerBadge owner={selectedMember}/>}
@@ -296,10 +297,11 @@ export function OwnerFilterControl({me,value,members,change}:{me:TeamUser;value:
         <span>{activeLabel}</span>
       </button>
       <button type="button" className="owner-filter-clear" aria-label="清除筛选，显示全部" title="显示全部" onClick={()=>change('all')}><Icon name="close" size={12}/></button>
-    </span>:<button type="button" ref={trigger} className="owner-filter-trigger" aria-haspopup="dialog" aria-expanded={Boolean(point)}
-      aria-label="筛选会话归属" title="按成员或来源筛选会话" onClick={openMenu}>
-      <span>全部</span><Icon name="chevron" size={12}/>
-    </button>}
+    </span>}
+    <button type="button" ref={trigger} className="section-more" aria-haspopup="dialog" aria-expanded={Boolean(point)}
+      aria-label="会话列表操作" title="按成员或来源筛选会话" onClick={openMenu}>
+      <Icon name="ellipsis" size={15}/>
+    </button>
     {point&&<Popover point={point} anchor={trigger.current} side="below" showHeader={false} title="筛选会话" label="按成员或来源筛选会话"
       className="owner-filter-popover" focusSelector="button[aria-pressed=true]" close={()=>setPoint(null)}>
       <div className="owner-filter-list" role="group" aria-label="按成员筛选">
@@ -330,7 +332,7 @@ export function OwnerFilterControl({me,value,members,change}:{me:TeamUser;value:
         </button>
       </div>
     </Popover>}
-  </>;
+  </span>;
 }
 
 /** Compact colored avatar button placed in the sidebar header to show who is signed in and open the team sheet. */
