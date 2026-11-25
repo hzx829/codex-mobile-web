@@ -27,7 +27,7 @@ export function ThreadRow({thread,selected,disabled=false,preference={},time,act
 }
 
 /** Apps without a rename, archive or copy action leave those props out and the items are hidden. */
-export function ThreadMenu({thread,point,preference,sections,archived,connected,close,change,copy,rename,archive,duplicate,openPreview,compact=false,teamMode=false,claim}:{thread:Json;point:MenuPoint;preference:ThreadPreference;sections:string[];archived:boolean;connected:boolean;close:()=>void;change?:(patch:ThreadPreference)=>void;copy:()=>Promise<void>;rename?:(name:string)=>Promise<void>;archive?:()=>Promise<void>;duplicate?:()=>Promise<void>;openPreview?:()=>void;compact?:boolean;teamMode?:boolean;claim?:{members:TeamMemberRef[];assign:(userId:string|null)=>Promise<void>}}){
+export function ThreadMenu({thread,point,preference,sections,archived,connected,close,change,copy,rename,archive,duplicate,openPreview,refresh,compact=false,teamMode=false,claim}:{thread:Json;point:MenuPoint;preference:ThreadPreference;sections:string[];archived:boolean;connected:boolean;close:()=>void;change?:(patch:ThreadPreference)=>void;copy:()=>Promise<void>;rename?:(name:string)=>Promise<void>;archive?:()=>Promise<void>;duplicate?:()=>Promise<void>;openPreview?:()=>void;refresh?:()=>void;compact?:boolean;teamMode?:boolean;claim?:{members:TeamMemberRef[];assign:(userId:string|null)=>Promise<void>}}){
   const [mode,setMode]=useState<'menu'|'rename'|'sections'|'claim'>('menu'),[name,setName]=useState(thread.title),[section,setSection]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   async function run(action:()=>Promise<void>){if(busy)return;setBusy(true);setError('');try{await action();close();}catch(e){setError((e as Error).message||'操作失败，请刷新后重试');}finally{setBusy(false);}}
   function choose(patch:ThreadPreference){change?.(patch);close();}
@@ -38,6 +38,7 @@ export function ThreadMenu({thread,point,preference,sections,archived,connected,
       {error&&<p role="alert" className="error">{error}</p>}
       {mode==='menu'?<>
         {compact&&openPreview&&item('browser','打开网页',()=>{close();openPreview();},!connected)}
+        {refresh&&item('refresh','刷新会话',()=>{close();refresh();},!connected)}
         {change&&item('pin',preference.pinned?'取消置顶':'置顶',()=>choose({pinned:!preference.pinned}))}
         {!compact&&item('folder','移至分区',()=>setMode('sections'))}
         {!compact&&item('unread',preference.unread?'标为已读':'标为未读',()=>choose({unread:!preference.unread}))}

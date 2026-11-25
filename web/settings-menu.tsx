@@ -15,8 +15,6 @@ export type SidebarFooterProps={
   busy?:boolean;
   archived?:boolean;
   onToggleArchived?:()=>void;
-  onRefresh:()=>void;
-  refreshDisabled?:boolean;
   onOpenSettings:()=>void;
   onOpenComputer:()=>void;
   onOpenTeam?:()=>void;
@@ -29,7 +27,7 @@ export type SidebarFooterProps={
  */
 export function SidebarFooter({
   me,machineName,machinesCount,connected,relayOnline,busy=false,
-  archived,onToggleArchived,onRefresh,refreshDisabled=false,
+  archived,onToggleArchived,
   onOpenSettings,onOpenComputer,onOpenTeam,onLogout,
 }:SidebarFooterProps){
   const [point,setPoint]=useState<MenuPoint|null>(null);
@@ -66,8 +64,6 @@ export function SidebarFooter({
       busy={busy}
       archived={archived}
       onToggleArchived={onToggleArchived}
-      onRefresh={onRefresh}
-      refreshDisabled={refreshDisabled}
       onOpenSettings={onOpenSettings}
       onOpenComputer={onOpenComputer}
       onOpenTeam={onOpenTeam}
@@ -98,7 +94,7 @@ export function MobileSettingsTrigger(props:SidebarFooterProps){
 
 function SettingsPopover({
   point,anchor,side,me,machineName,machinesCount,connected,relayOnline,busy,
-  archived,onToggleArchived,onRefresh,refreshDisabled,
+  archived,onToggleArchived,
   onOpenSettings,onOpenComputer,onOpenTeam,onLogout,close,
 }:SidebarFooterProps&{point:MenuPoint;anchor:HTMLElement|null;side:'above'|'below';close:()=>void}){
   const run=(fn:()=>void)=>{close();fn();};
@@ -132,10 +128,6 @@ function SettingsPopover({
 
     <div className="menu-divider"/>
 
-    <button type="button" className="menu-item" disabled={!connected||refreshDisabled} onClick={()=>run(onRefresh)}>
-      <Icon name="refresh" size={18}/>
-      <span className="menu-copy">刷新项目与会话</span>
-    </button>
     {onToggleArchived&&<button type="button" className="menu-item" disabled={!connected||busy} onClick={()=>run(onToggleArchived)}>
       <Icon name="archive" size={18}/>
       <span className="menu-copy">{archived?'返回最近会话':'查看归档会话'}{archived&&<Icon name="check" size={16}/>}</span>

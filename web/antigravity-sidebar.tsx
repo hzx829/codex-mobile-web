@@ -256,7 +256,7 @@ export function AntigravitySidebar({
 
   return <aside className="home-panel" inert={inert}>
     <HomeHeader machineName={machineName} connected={connected} relayOnline={relayOnline}
-      chooseComputer={chooseComputer} mobileSettings={mobileSettings}/>
+      chooseComputer={chooseComputer} mobileSettings={mobileSettings} onRefresh={refreshAll}/>
     {!query&&switcher}
     <div className="home-content">
       {showProjectsTree&&<ProjectTree
@@ -303,7 +303,7 @@ export function AntigravitySidebar({
       teamMode={Boolean(me)} claim={isTeamAdmin(me)&&claimOwner?{members,assign:async userId=>{await claimOwner(menu.thread.id,userId);refreshAll();}}:undefined}
       close={()=>setMenu(null)} change={patch=>changePreference(menu.thread.id,patch,menu.thread)} copy={()=>copyText(menu.thread.id)}
       {...afterEach(threadActions?.(menu.thread)||{},refreshAll)}/>}
-    <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/>{onNew&&<IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected} onClick={()=>onNew('')}/>}</div></div>
+    <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/>{onNew&&<IconButton icon="compose" label="新聊天" className="round black new-chat" onClick={()=>onNew('')}/>}</div></div>
     {footer}
   </aside>;
 }

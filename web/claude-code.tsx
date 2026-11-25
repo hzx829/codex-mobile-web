@@ -1,4 +1,4 @@
-import {useEffect,useLayoutEffect,useRef,useState} from 'react';
+import {useEffect,useLayoutEffect,useRef,useState,type ReactNode} from 'react';
 import {ConversationStatus,ConversationTurn,NextStepCard,PendingMessage,RunningStep,connectionLost} from './conversation';
 import {ThreadMenu} from './thread-menu';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
@@ -54,6 +54,15 @@ type Props={
   chooseVoice:()=>void;
   /** Admin-only action to assign or clear this conversation's owner. */
   claim?:{members:TeamMemberRef[];assign:(userId:string|null)=>Promise<void>};
+  /** Opens the slide-out sidebar drawer on mobile. */
+  openSidebar?:()=>void;
+  /** Starts a fresh Claude Code chat from inside an open session. */
+  onNewChat?:()=>void;
+  /** Mobile new-chat header slots (e.g. app switcher & settings trigger). */
+  mobileHeaderCenter?:ReactNode;
+  mobileHeaderRight?:ReactNode;
+  /** Optional computer status badge rendered in the new-chat welcome view. */
+  welcomeMeta?:ReactNode;
 };
 const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
 const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:TurnView)=>turn.items.filter(item=>item.role==='user').map(item=>item.id)):[];
@@ -98,10 +107,19 @@ export function ClaudeCodePanel(props:Props){
   const [view,setView]=useState<Json|null>(()=>creating?null:props.sync&&storedView('claude',machine,conversationId,'turns')||cachedView<Json>(cacheKey)),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[watchError,setWatchError]=useState('');
   const [draft,setDraft]=useState(()=>load(`${scope}:draft`)),[pending,setPending]=useState(()=>load(`${scope}:pending`));
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
-  // A saved session keeps its own model and effort until changed here; the last choice only seeds new sessions.
-  const [model,setModel]=useState(()=>creating?storedModel(machine):''),[effort,setEffort]=useState(()=>creating?load(`claude:${machine}:effort`):''),[mode,setMode]=useState('');
+  // A saved session keeps its own model, effort and mode until changed here; the last choice seeds new sessions.
+  const [model,setModel]=useState(()=>creating?storedModel(machine):''),[effort,setEffort]=useState(()=>creating?load(`claude:${machine}:effort`):''),[mode,setModeState]=useState(()=>creating?load(`claude:${machine}:permissionMode`):'');
+  const setMode=(next:string)=>{setModeState(next);if(creating)store(`claude:${machine}:permissionMode`,next);};
   const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null),[menuPoint,setMenuPoint]=useState<MenuPoint|null>(null),[statusPoint,setStatusPoint]=useState<MenuPoint|null>(null);
-  const [models,setModels]=useState<Json[]|null>(()=>storedModels(machine)),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTarget]=useState(newCwd||''),[places,setPlaces]=useState<Place[]>([]),[defaultMode,setDefaultMode]=useState('');
+  const projectKey=`claude:${machine}:new:project`;
+  const [models,setModels]=useState<Json[]|null>(()=>storedModels(machine)),[modelsError,setModelsError]=useState(''),[adding,setAdding]=useState(false),[cwd,setCwd]=useState(''),[target,setTargetState]=useState(()=>newCwd||(creating?load(projectKey):'')),[places,setPlaces]=useState<Place[]>([]),[defaultMode,setDefaultMode]=useState('');
+  function setTarget(next:string|((old:string)=>string)){
+    setTargetState(old=>{
+      const value=typeof next==='function'?next(old):next;
+      if(creating&&value&&value!==OTHER)store(projectKey,value);
+      return value;
+    });
+  }
   const request=useRef(call);request.current=call;
   const alive=useRef(true),modelsRead=useRef(false),lock=useRef(false),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
   // Once earlier turns are loaded, every read keeps them: it returns the latest turns back to this one.
@@ -139,7 +157,7 @@ export function ClaudeCodePanel(props:Props){
   useEffect(()=>{if(creating&&newCwd)setTarget(newCwd);},[creating,newCwd]);
   useEffect(()=>{
     if(!creating||!connected)return;
-    request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setDefaultMode(page.defaultPermissionMode||'');setTarget(old=>old||list[0]?.id||(guest||props.onCreateProject?'':OTHER));}).catch(failed);
+    request.current('claude.list',{}).then(page=>{if(!alive.current)return;const list:Place[]=page.projects||[];setPlaces(list);setDefaultMode(page.defaultPermissionMode||'');setTarget(old=>old&&(old===OTHER||!list.length||list.some(item=>item.id===old||item.path===old))?old:list[0]?.id||(guest||props.onCreateProject?'':OTHER));}).catch(failed);
   },[creating,connected,guest,props.projectsRevision,props.onCreateProject]);
   useEffect(()=>{
     if(!connected||!view?.revision||syncing)return;
@@ -398,7 +416,9 @@ export function ClaudeCodePanel(props:Props){
   const suggestion=!creating&&!running&&!queued.length&&typeof view?.suggestion==='string'?view.suggestion:'';
   const meId=useCurrentMemberId();
   return <main className="thread-panel" inert={inert}>
-    <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}
+    <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} menu={props.openSidebar} back={props.openSidebar?undefined:()=>go('')}
+      mobileCenter={creating?props.mobileHeaderCenter:undefined} mobileRight={creating?props.mobileHeaderRight:undefined}
+      onNewChat={!creating?props.onNewChat:undefined} newChatDisabled={busy}
       owner={creating?null:view?.owner} lastSender={creating?null:view?.lastSender} meId={meId}>
       {!creating&&<>
         <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文" disabled={!view} onClick={e=>setStatusPoint(headerPoint(e.currentTarget))}><ContextIndicator usage={view?.contextUsage}/></button>
@@ -408,6 +428,7 @@ export function ClaudeCodePanel(props:Props){
     {view?.notice&&<div className="banner">{view.notice}</div>}
     <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={()=>{const el=scroll.current!;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;if(el.scrollTop<160&&!earlierError)void loadEarlier();}}><div className="timeline-content">
       {creating?<div className="new-chat-welcome"><h1>交给 Claude Code</h1>
+        {props.welcomeMeta}
         <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} onChange={e=>setTarget(e.target.value)}>
           {!target&&<option value="">{guest||props.onCreateProject?'选择或新建项目':'正在读取项目…'}</option>}
           {places.map(place=><option key={place.id} value={place.id}>{place.name||workspaceName(place.path)}</option>)}

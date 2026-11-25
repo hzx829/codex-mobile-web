@@ -1,5 +1,5 @@
 import type {ReactNode} from 'react';
-export type IconName='back'|'more'|'ellipsis'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'redo'|'crop'|'trash'|'diff'|'team'|'bell'|'expand'|'collapse';
+export type IconName='back'|'more'|'ellipsis'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'redo'|'crop'|'trash'|'diff'|'team'|'bell'|'expand'|'collapse'|'sidebar';
 // One line-icon family: 24-unit grid, 1.75 stroke, round joins. Drawn at 20 px by default.
 const paths:Record<IconName,ReactNode>={
   back:<path d="M19 12H5m6-6.5L4.5 12l6.5 6.5"/>,
@@ -41,6 +41,7 @@ const paths:Record<IconName,ReactNode>={
   expand:<path d="M14 4.5h5.5V10M10 19.5H4.5V14M19.5 4.5 13.5 10.5M4.5 19.5l6-6"/>,
   collapse:<path d="M19.5 4.5l-6 6M13.5 6v4.5H18M4.5 19.5l6-6M10.5 18v-4.5H6"/>,
   team:<><circle cx="9" cy="8.5" r="3.25"/><path d="M3.5 19.5a5.5 5.5 0 0 1 11 0"/><path d="M15.5 5.6a3.25 3.25 0 0 1 0 6.1M17.5 14.4a5.5 5.5 0 0 1 3 5.1"/></>,
+  sidebar:<><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.5 4.5v15"/></>,
 };
 export function Icon({name,size=20}:{name:IconName;size?:number}) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;

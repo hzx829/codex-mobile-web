@@ -5,11 +5,14 @@ import {OwnerBadge,type TeamMemberRef} from './team';
 
 export const workspaceName=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 
-export function HomeHeader({project,machineName,connected,relayOnline,back,backDisabled,chooseComputer,mobileSettings}:{project?:string;machineName:string;connected:boolean;relayOnline:boolean;back?:()=>void;backDisabled?:boolean;chooseComputer:()=>void;mobileSettings?:ReactNode}){
+export function HomeHeader({project,machineName,connected,relayOnline,back,backDisabled,chooseComputer,mobileSettings,onRefresh,refreshDisabled=false}:{project?:string;machineName:string;connected:boolean;relayOnline:boolean;back?:()=>void;backDisabled?:boolean;chooseComputer:()=>void;mobileSettings?:ReactNode;onRefresh?:()=>void;refreshDisabled?:boolean}){
   return <header className="home-header">
     {project&&back?<><IconButton icon="back" label="返回全部项目" className="round" disabled={backDisabled} onClick={back}/><h1>{project}</h1></>:
       <button className="home-identity" aria-label="选择电脑" onClick={chooseComputer}><span className="home-computer"><Icon name="computer" size={19}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{relayOnline?'离线':'连接中…'}</small>}</span></button>}
-    {mobileSettings&&<div className="home-header-actions mobile-only-actions">{mobileSettings}</div>}
+    {(onRefresh||mobileSettings)&&<div className="home-header-actions">
+      {onRefresh&&<IconButton icon="refresh" label="刷新项目与会话" className="round home-refresh" disabled={!connected||refreshDisabled} onClick={onRefresh}/>}
+      {mobileSettings&&<span className="mobile-only-actions">{mobileSettings}</span>}
+    </div>}
   </header>;
 }
 
@@ -31,14 +34,22 @@ export function ProjectsSection({collapsed,onToggle,action,children}:{collapsed:
   </section>;
 }
 
-export function ThreadHeader({title,project,machineName,connected,back,backDisabled,onTitle,owner,lastSender,meId,children}:{title:string;project:string;machineName:string;connected:boolean;back:()=>void;backDisabled?:boolean;onTitle?:(element:HTMLButtonElement)=>void;owner?:TeamMemberRef|null;lastSender?:TeamMemberRef|null;meId?:string|null;children:ReactNode}){
+export function ThreadHeader({title,project,machineName,connected,back,menu,backDisabled,onTitle,owner,lastSender,meId,mobileCenter,mobileRight,onNewChat,newChatDisabled,children}:{title:string;project:string;machineName:string;connected:boolean;back?:()=>void;menu?:()=>void;backDisabled?:boolean;onTitle?:(element:HTMLButtonElement)=>void;owner?:TeamMemberRef|null;lastSender?:TeamMemberRef|null;meId?:string|null;mobileCenter?:ReactNode;mobileRight?:ReactNode;onNewChat?:()=>void;newChatDisabled?:boolean;children?:ReactNode}){
   const isOther=Boolean(owner&&meId&&owner.id!==meId);
   const ownerTip=[owner&&`由 ${owner.name} 创建`,lastSender&&lastSender.id!==owner?.id&&`${lastSender.name} 最后发送`].filter(Boolean).join(' · ');
   const heading=<><strong>{title}</strong><span><Icon name="folder" size={13}/><span>{project}</span><span className="mini-machine"><Icon name="computer" size={13}/><i className={connected?'dot online':'dot'}/></span><span>{machineName}</span>{owner&&<span className={`thread-owner-tag${isOther?' other':''}`} title={ownerTip}><OwnerBadge owner={owner} title={ownerTip}/><span>{owner.id===meId?'我':owner.name}</span></span>}</span></>;
-  return <header className="thread-header">
-    <IconButton icon="back" label="返回会话列表" className="round" disabled={backDisabled} onClick={back}/>
-    {onTitle?<button className="thread-title" type="button" onClick={event=>onTitle(event.currentTarget)}>{heading}</button>:<div className="thread-title">{heading}</div>}
-    <div className="header-actions">{children}</div>
+  const titleClass=`thread-title${mobileCenter?' desktop-only-title':''}`;
+  const hasActions=Boolean(children||onNewChat);
+  return <header className={`thread-header${mobileCenter?' has-mobile-center':''}`}>
+    {menu?<IconButton icon="sidebar" label="打开侧边栏" className="round mobile-drawer-trigger" disabled={backDisabled} onClick={menu}/>
+      :back?<IconButton icon="back" label="返回会话列表" className="round" disabled={backDisabled} onClick={back}/>:null}
+    {onTitle?<button className={titleClass} type="button" onClick={event=>onTitle(event.currentTarget)}>{heading}</button>:<div className={titleClass}>{heading}</div>}
+    {mobileCenter&&<div className="thread-header-mobile-center">{mobileCenter}</div>}
+    {mobileRight&&<div className="thread-header-mobile-right">{mobileRight}</div>}
+    {hasActions&&<div className={`header-actions${mobileRight?' desktop-only-actions':''}`}>
+      {onNewChat&&<IconButton icon="compose" label="新聊天" className="mobile-new-chat-btn" disabled={newChatDisabled} onClick={onNewChat}/>}
+      {children}
+    </div>}
   </header>;
 }
 

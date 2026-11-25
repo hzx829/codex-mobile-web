@@ -1,4 +1,4 @@
-import {useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
+import {useEffect,useLayoutEffect,useMemo,useRef,useState,type ReactNode} from 'react';
 import {createPortal} from 'react-dom';
 import {useComposerAttachments} from './composer-attachments';
 import {useVoiceInput} from './use-voice-input';
@@ -21,13 +21,16 @@ import {connectionLost,ConversationStatus,elapsedLabel,PendingMessage} from './c
 import {DraftSave} from './draft-save';
 import {OPTIMISTIC_ACCEPTED_MS,optimisticFlatDelivered,optimisticFlatMessage,type OptimisticMessage} from './optimistic';
 import {ThreadHeader,useComposerHeight,workspaceName} from './chat-layout';
+import {ThreadMenu} from './thread-menu';
+import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
+import type {MenuPoint} from './popover';
 import {IconButton} from './icon-button';
 import {Icon} from './icons';
 import {useStableEvent} from './use-event';
 import {operationId} from './client';
-import type {AntigravityBackgroundTask,ApprovalRequest,Json,QueuedMessage,RequestAction} from '../src/shared/types';
+import type {AntigravityBackgroundTask,ApprovalRequest,Json,QueuedMessage,RequestAction,SessionView} from '../src/shared/types';
 import {SenderScope,useCurrentMemberId} from './senders';
-import {otherOwnerHint} from './team';
+import {otherOwnerHint,type TeamMemberRef} from './team';
 import {useTurnNotice,watchWhileHidden} from './turn-notify';
 
 const IMAGES_BLOCKED='请更新这台电脑上的连接器后再给 Antigravity 发送图片。';
@@ -88,7 +91,20 @@ type Props={
   sync?:SyncLink;
   /** Opens the background tasks in the preview pane, beside documents and pages; `tasksSlot` is where they render while that tab is open. */
   showTasks:()=>void;tasksSlot:HTMLElement|null;
+  /** Team admins can reassign who owns this conversation. */
+  claim?:{members:TeamMemberRef[];assign:(userId:string|null)=>Promise<void>};
+  /** Opens the slide-out sidebar drawer on mobile. */
+  openSidebar?:()=>void;
+  /** Starts a fresh Antigravity conversation from inside an open session. */
+  onNewChat?:()=>void;
+  /** Mobile new-chat header slots (e.g. app switcher & settings trigger). */
+  mobileHeaderCenter?:ReactNode;
+  mobileHeaderRight?:ReactNode;
+  /** Optional computer status badge rendered in the new-chat welcome view. */
+  welcomeMeta?:ReactNode;
 };
+
+function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
 
 export function BackgroundTasksBar({tasks,onOpen}:{tasks:AntigravityBackgroundTask[];onOpen:()=>void}){
   const count=tasks.length;
@@ -165,6 +181,7 @@ export function AntigravityPanel(props:Props){
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[submitting,setSubmitting]=useState(false);
   const [draft,setDraft]=useState(()=>saved(`${key}:draft`)),[pending,setPending]=useState(()=>saved(`${key}:pending`));
   const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null);
+  const [menuPoint,setMenuPoint]=useState<MenuPoint|null>(null),[statusPoint,setStatusPoint]=useState<MenuPoint|null>(null);
   const [watchError,setWatchError]=useState('');
   const lock=useRef(false),alive=useRef(true),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
   const draftSave=useRef(new DraftSave(store));
@@ -172,10 +189,10 @@ export function AntigravityPanel(props:Props){
   const [settling,setSettling]=useState(()=>!creating&&recentCreatedRemaining(machine,conversationId)>0);
   useComposerHeight(composer,draft,true);
   const request=useRef(call);request.current=call;
-  // A saved conversation keeps its own model until changed here; the last choice seeds new conversations.
+  // A saved conversation keeps its own model and permission mode until changed here; the last choice seeds new conversations.
   const [model,setModel]=useState(()=>creating?saved(`antigravity:${machine}:model`):saved(`${key}:model`));
-  const [permissionMode,setPermissionModeState]=useState(()=>saved(`${key}:permissionMode`));
-  function setPermissionMode(value:string){setPermissionModeState(value);store(`${key}:permissionMode`,value);}
+  const [permissionMode,setPermissionModeState]=useState(()=>creating?saved(`antigravity:${machine}:permissionMode`)||saved(`${key}:permissionMode`):saved(`${key}:permissionMode`));
+  function setPermissionMode(value:string){setPermissionModeState(value);store(creating?`antigravity:${machine}:permissionMode`:`${key}:permissionMode`,value);}
   const [defaultMode,setDefaultMode]=useState('');
   const [catalog,setCatalog]=useState<AntigravityCatalog|null>(()=>storedCatalog(machine));
   // Unknown (null) until the desktop's model list for the new conversation's project has been read.
@@ -206,7 +223,7 @@ export function AntigravityPanel(props:Props){
   const attachments=useComposerAttachments({draftKey:key,disabled:busy||Boolean(pending),imagesBlocked:imagesBlockedReason,notify:setError,added:()=>setAdding(false)});
   const {images,files,setImages,setFiles}=attachments;
   const pick=useAttachmentPickers(chosen=>void attachments.add(chosen));
-  function sent(){clearDraftNow();setImages([]);setFiles([]);if(creating)setPermissionMode('');}
+  function sent(){clearDraftNow();setImages([]);setFiles([]);}
   const voice=useVoiceInput(props.voiceMode,key,connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
     request:(action,payload)=>request.current(action,payload),
@@ -528,12 +545,18 @@ export function AntigravityPanel(props:Props){
   const projectName=(item:{path:string;name?:string})=>item.name||workspaceName(item.path);
   const meId=useCurrentMemberId();
   return <main className="thread-panel" inert={inert}>
-    <ThreadHeader title={creating?'新的 Antigravity 对话':view?.title||'正在打开…'} project={creating?(chosen?projectName(chosen):'选择项目'):view?.cwd?workspaceName(view.cwd):'Antigravity'} machineName={props.machineName} connected={connected} back={()=>go('')}
+    <ThreadHeader title={creating?'新的 Antigravity 对话':view?.title||'正在打开…'} project={creating?(chosen?projectName(chosen):'选择项目'):view?.cwd?workspaceName(view.cwd):'Antigravity'} machineName={props.machineName} connected={connected} menu={props.openSidebar} back={props.openSidebar?undefined:()=>go('')}
+      mobileCenter={creating?props.mobileHeaderCenter:undefined} mobileRight={creating?props.mobileHeaderRight:undefined}
+      onNewChat={!creating?props.onNewChat:undefined} newChatDisabled={busy||Boolean(pending)}
       owner={creating?null:view?.owner} lastSender={creating?null:view?.lastSender} meId={meId}>
-      {!creating&&<IconButton icon="refresh" label="刷新会话" disabled={!connected||busy} onClick={()=>void refresh()}/>}
+      {!creating&&<>
+        <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文" disabled={!view} onClick={e=>setStatusPoint(headerPoint(e.currentTarget))}><ContextIndicator usage={view?.contextUsage}/></button>
+        <button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" title="会话操作" disabled={!view} onClick={e=>setMenuPoint(headerPoint(e.currentTarget))}><Icon name="more"/></button>
+      </>}
     </ThreadHeader>
     <div className={`timeline ${creating&&!pendingShown?'is-empty':''}`} ref={scroll} onScroll={trackScroll}><div className="timeline-content">
       {creating&&!pendingShown&&<div className="new-chat-welcome"><h1>交给 Antigravity</h1>
+        {props.welcomeMeta}
         <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} disabled={Boolean(pending)} onChange={e=>setTarget(e.target.value)}>
           {!target&&<option value="">{!projects?'正在读取项目…':'桌面上还没有项目'}</option>}
           {projects?.map(item=><option key={item.id} value={item.id}>{projectName(item)}</option>)}
@@ -582,5 +605,11 @@ export function AntigravityPanel(props:Props){
         voiceLabel={voiceProviderLabel(props.voiceMode)} chooseVoice={()=>{setAdding(false);props.chooseVoice();}}
         projectFiles={creating?undefined:()=>{setAdding(false);props.showFiles();}} refresh={creating?undefined:()=>{setAdding(false);void refresh();}}/>
     </SheetPanel>}
+    {menuPoint&&view&&<ThreadMenu thread={{id:conversationId,title:view.title,owner:view.owner,status:view.running?{type:'active'}:undefined}} point={menuPoint} preference={{}} sections={[]} archived={false} compact connected={connected}
+      teamMode={Boolean(meId)} refresh={()=>void refresh()}
+      claim={props.claim?{members:props.claim.members,assign:async userId=>{await props.claim!.assign(userId);const nextOwner=userId?props.claim!.members.find(item=>item.id===userId)||null:null;setView(old=>old?{...old,owner:nextOwner}:old);}}:undefined}
+      close={()=>setMenuPoint(null)} copy={()=>props.copyText(conversationId)}/>}
+    {statusPoint&&view&&<ThreadStatusPanel point={statusPoint} view={{...view,source:'connector'} as unknown as SessionView} threadId={conversationId} cwd={view.cwd||''} connected={connected} close={()=>setStatusPoint(null)}
+      copy={()=>props.copyText(conversationId)} read={async()=>({threadId:conversationId,limits:[],limitsNotice:'Antigravity 不提供额度信息'})}/>}
   </main>;
 }

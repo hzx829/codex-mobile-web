@@ -22,7 +22,7 @@ import {QueuedMessages} from '../web/queued-messages.js';
 import {antigravityModelSupportsImages,antigravityPickerModels,concreteAntigravityModel,splitAntigravityModel} from '../web/antigravity-model-picker.js';
 import {Ledger} from '../src/connector/ledger.js';
 import {BridgeError} from '../src/shared/types.js';
-import {home, parseLocation} from '../web/route-state.js';
+import {home, newChatRoute, parseLocation} from '../web/route-state.js';
 import {serviceOf, switchRoute} from '../web/service-switch.js';
 
 test('app switches restore each machine and app independently, and retired apps return to Codex', () => {
@@ -34,11 +34,11 @@ test('app switches restore each machine and app independently, and retired apps 
   try {
     const id = randomUUID(), codex = {...home, thread:'native-thread', project:'D:/work'};
     const ag = {...home, project:'file:///D:/work', antigravity:id}, other = {...home, project:'D:/work', claude:id};
-    assert.deepEqual(switchRoute('pc', codex, 'antigravity'), {...home, antigravity:''});
-    assert.deepEqual(switchRoute('pc', ag, 'claude'), {...home, claude:''});
+    assert.deepEqual(switchRoute('pc', codex, 'antigravity'), newChatRoute('antigravity'));
+    assert.deepEqual(switchRoute('pc', ag, 'claude'), newChatRoute('claude'));
     assert.deepEqual(switchRoute('pc', other, 'antigravity'), ag);
     assert.deepEqual(switchRoute('pc', ag, 'codex'), codex);
-    assert.deepEqual(switchRoute('other', home, 'antigravity'), {...home, antigravity:''});
+    assert.deepEqual(switchRoute('other', home, 'antigravity'), newChatRoute('antigravity'));
     for (const route of [ag, other, codex]) assert.deepEqual(parseLocation({cmwRoute:route,cmwMachine:'pc'})?.route,route);
     assert.equal(serviceOf(other),'claude');
     assert.deepEqual(parseLocation({cmwRoute:{...home,chat:id},cmwMachine:'pc'}),{route:home,machine:'pc'});
@@ -1118,8 +1118,8 @@ test('new chat routes for Antigravity and Claude Code survive history, reload, a
     assert.deepEqual(parseLocation({cmwRoute: {...agNew, antigravity: id}, cmwMachine: 'pc'}),
       {route: {...agNew, newChat: false, antigravity: id}, machine: 'pc'});
     // Switching to Codex and back to Antigravity restores the unsent new chat screen.
-    assert.deepEqual(switchRoute('pc', agNew, 'codex'), home);
-    assert.deepEqual(switchRoute('pc', home, 'antigravity'), agNew);
+    assert.deepEqual(switchRoute('pc', agNew, 'codex'), newChatRoute('codex'));
+    assert.deepEqual(switchRoute('pc', newChatRoute('codex'), 'antigravity'), agNew);
   } finally {
     if (original) Object.defineProperty(globalThis, 'sessionStorage', original);
     else Reflect.deleteProperty(globalThis, 'sessionStorage');

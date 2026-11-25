@@ -1,4 +1,4 @@
-import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
+import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,useState,type TouchEvent} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Client,hashCredential,inviteCode,operationId} from './client';
 import {AntigravityPanel} from './antigravity';
@@ -31,7 +31,7 @@ import {PreviewPane,useCompactPreview} from './preview-pane';
 import {fileReference,isArtifactUrl,previewRoute,samePreviewTarget,type PreviewTarget} from './preview-target';
 import {ArtifactPanel} from './artifact-view';
 import {rememberPage,type PaneAction} from './artifact-pane';
-import {home,initialLocation,rememberLocation,parseLocation,type Route} from './route-state';
+import {clearSavedLocation,ensureComposerRoute,home,initialLocation,newChatRoute,parseLocation,rememberLocation,touchLocation,type Route} from './route-state';
 import {clearDraftAttachments,flushDraftAttachments,loadDraftAttachments,useComposerAttachments} from './composer-attachments';
 import {AddOptions,Composer,useAttachmentPickers} from './composer';
 import {MenuItem,SheetPanel} from './sheet';
@@ -89,6 +89,13 @@ const APPROVALS:PermissionOption[]=[
 ];
 const approvalName=(policy?:string)=>APPROVALS.find(option=>option.id===policy)?.label||'电脑配置';
 const savedLocation=initialLocation();
+const initialRoute=ensureComposerRoute(savedLocation.route);
+const codexCwdKey=(m:string)=>`codex:${m}:new-cwd`;
+const codexModelKey=(m:string)=>`codex:${m}:model`;
+const codexEffortKey=(m:string)=>`codex:${m}:effort`;
+const codexApprovalKey=(m:string)=>`codex:${m}:approval`;
+const codexTierKey=(m:string)=>`codex:${m}:service-tier`;
+const loadCodexTier=(m:string):string|null|undefined=>{const value=load(codexTierKey(m),'__inherit');return value==='__inherit'?undefined:value;};
 const listKey=(machine:string,project:string,archived:boolean)=>`${machine}:${project}:${archived?'archived':'recent'}`;
 type PreviewTab={id:number;target:PreviewTarget};
 type Sheet='settings'|'computer'|'projects'|'create-project'|'edit-project'|'add'|'file'|'browser'|'voice'|'claude-project'|'team'|null;
@@ -100,13 +107,15 @@ function App(){
   const [projectsCollapsed,setProjectsCollapsed]=useState<boolean>(()=>load('sidebar-projects-collapsed',false)===true);
   const toggleProjects=()=>setProjectsCollapsed(old=>{const next=!old;save('sidebar-projects-collapsed',next);return next;});
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Machine[]>([]),[machine,setMachine]=useState(savedLocation.machine);
-  const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
+  const [route,setRoute]=useState<Route>(initialRoute),[sheet,setSheet]=useState<Sheet>(null);
+  const [drawerOpen,setDrawerOpen]=useState(false);
+  const [isMobile,setIsMobile]=useState(()=>typeof window!=='undefined'&&window.matchMedia('(max-width: 760px)').matches);
   const [remoteListRevision,refreshRemoteList]=useState(0);
   const service=serviceOf(route),codexActive=service==='codex';
-  const lastCodex=useRef({machine,route:home});
+  const lastCodex=useRef({machine,route:newChatRoute('codex')});
   if(codexActive)lastCodex.current={machine,route};
-  const codexRoute=codexActive?route:lastCodex.current.machine===machine?lastCodex.current.route:home;
-  const {thread:selected,project,newChat}=codexRoute,showThread=Boolean(selected||newChat);
+  const codexRoute=codexActive?route:lastCodex.current.machine===machine?lastCodex.current.route:newChatRoute('codex');
+  const selected=codexRoute.thread,project=codexRoute.project,newChat=!selected,showThread=true;
   const remoteConversation=routeConversation(route),previewThread=previewOwnerOf(route,selected);
   const previewOwner=useRef({machine,thread:previewThread});previewOwner.current={machine,thread:previewThread};
   const threadMounted=codexActive&&showThread&&Boolean(token)&&status!=='auth_error';
@@ -117,12 +126,12 @@ function App(){
   const [cursor,setCursor]=useState<string|null>(null),[search,setSearch]=useState(''),[searchQuery,setSearchQuery]=useState(''),[listBusy,setListBusy]=useState(false),[archived,setArchived]=useState(false);
   const [view,setView]=useState<SessionView|null>(null),[loading,setLoading]=useState(false),[loadingOlder,setLoadingOlder]=useState(false),[historyError,setHistoryError]=useState('');
   const viewRef=useRef(view);useLayoutEffect(()=>{viewRef.current=view;},[view]);
-  const [draft,setDraft]=useState<string>(()=>String(load(`draft:${savedLocation.machine}:${savedLocation.route.thread}`,'')||'')),[model,setModel]=useState(''),[effort,setEffort]=useState(''),[approval,setApproval]=useState(''),[newCwd,setNewCwd]=useState<string>(savedLocation.route.project||'');
+  const [draft,setDraft]=useState<string>(()=>String(load(`draft:${savedLocation.machine}:${initialRoute.thread}`,'')||'')),[model,setModel]=useState(()=>initialRoute.newChat&&savedLocation.machine?String(load(codexModelKey(savedLocation.machine),'')||''):''),[effort,setEffort]=useState(()=>initialRoute.newChat&&savedLocation.machine?String(load(codexEffortKey(savedLocation.machine),'')||''):''),[approval,setApproval]=useState(()=>initialRoute.newChat&&savedLocation.machine?String(load(codexApprovalKey(savedLocation.machine),'')||''):''),[newCwd,setNewCwd]=useState<string>(()=>initialRoute.project||(savedLocation.machine?String(load(codexCwdKey(savedLocation.machine),'')||''):''));
   const [optimistic,setOptimistic]=useState<OptimisticMessage|null>(null),optimisticRef=useRef(optimistic);optimisticRef.current=optimistic;
   const everOnline=useRef(false);if(status==='online')everOnline.current=true;
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   const draftSave=useRef(new DraftSave(save));
-  const [serviceTier,setServiceTier]=useState<string|null|undefined>(undefined);
+  const [serviceTier,setServiceTier]=useState<string|null|undefined>(()=>initialRoute.newChat&&savedLocation.machine?loadCodexTier(savedLocation.machine):undefined);
   // Each app (Codex, Claude Code, Antigravity) keeps its own voice engine, defaulting to its native service.
   const [voiceChoices,setVoiceChoices]=useState<Record<Service,VoiceProvider>>(()=>({
     codex:loadVoiceChoice('codex',key=>load(key,'')),
@@ -200,23 +209,32 @@ function App(){
   }
   function closePreviewTab(id:number){browserSequence.current++;const target=previewState.tabs.find(tab=>tab.id===id)?.target;if(target?.kind==='artifact'){const left=previewState.tabs.filter(tab=>tab.id!==id).map(tab=>tab.target).filter(item=>item.kind==='artifact').at(-1);notePage(left?.url||'');}if(target?.kind==='file'&&target.file?.path&&target.file.path===browserState?.filePath)closeBrowser();setPreviewState(old=>{const index=old.tabs.findIndex(tab=>tab.id===id);if(index<0)return old;const tabs=old.tabs.filter(tab=>tab.id!==id);return {tabs,activeId:old.activeId===id?tabs[Math.min(index,tabs.length-1)]?.id??null:old.activeId};});}
   function fail(e:any){setError(e?.message||'操作失败，请重试');}
-  function navigate(next:Route,replace=false){
-    history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine},'',location.pathname);
-    rememberLocation(next,machine);setSheet(null);setThreadMenu(null);setStatusPanel(null);setModelPoint(null);setPermissionPoint(null);setRoute(next);
+  function navigate(next:Route,replace=false,keepDrawer=false){
+    const resolved=ensureComposerRoute(next);
+    history[replace?'replaceState':'pushState']({cmwRoute:resolved,cmwMachine:machine},'',location.pathname);
+    rememberLocation(resolved,machine);setSheet(null);setThreadMenu(null);setStatusPanel(null);setModelPoint(null);setPermissionPoint(null);if(!keepDrawer)setDrawerOpen(false);setRoute(resolved);
   }
-  function backToSessions(){navigate(home);}
+  useEffect(()=>{
+    const mq=window.matchMedia('(max-width: 760px)');
+    const sync=()=>{setIsMobile(mq.matches);if(!mq.matches)setDrawerOpen(false);};
+    sync();
+    mq.addEventListener('change',sync);
+    return()=>mq.removeEventListener('change',sync);
+  },[]);
   useEffect(()=>{
     const onKey=(e:KeyboardEvent)=>{
       if((e.ctrlKey||e.metaKey)&&!e.altKey&&e.key===','){
         e.preventDefault();
         setSheet(old=>old==='settings'?null:'settings');
+      }else if(e.key==='Escape'&&drawerOpen&&!sheet&&!threadMenu&&!statusPanel&&!modelPoint&&!permissionPoint){
+        setDrawerOpen(false);
       }
     };
     window.addEventListener('keydown',onKey);
     return()=>window.removeEventListener('keydown',onKey);
-  },[]);
+  },[drawerOpen,sheet,threadMenu,statusPanel,modelPoint,permissionPoint]);
   useEffect(()=>{
-    const pop=(e:PopStateEvent)=>{setSheet(null);setThreadMenu(null);setStatusPanel(null);setModelPoint(null);setPermissionPoint(null);const location=parseLocation(e.state);const next=location?.machine===current.current.machine?location.route:home;rememberLocation(next,current.current.machine);setRoute(next);};
+    const pop=(e:PopStateEvent)=>{setSheet(null);setThreadMenu(null);setStatusPanel(null);setModelPoint(null);setPermissionPoint(null);setDrawerOpen(false);const location=parseLocation(e.state);const next=ensureComposerRoute(location?.machine===current.current.machine?location.route:newChatRoute('codex'));rememberLocation(next,current.current.machine);setRoute(next);};
     window.addEventListener('popstate',pop);return()=>window.removeEventListener('popstate',pop);
   },[]);
   useEffect(()=>{history.replaceState({cmwRoute:route,cmwMachine:machine},'',location.pathname);rememberLocation(route,machine);},[machine]);
@@ -380,8 +398,8 @@ function App(){
   }),[token,browserState?.sessionId]);
   useEffect(()=>{
     if(!machine&&machines[0]){changeMachine(machines[0].id);return;}
-    const next=supportedRoute(route,available);
-    if(next!==route)navigate(next,true);
+    const next=ensureComposerRoute(supportedRoute(route,available));
+    if(JSON.stringify(next)!==JSON.stringify(route))navigate(next,true,drawerOpen);
   },[machines,machine,route,available]);
   // Other apps' threads set their own watch when they open (web/sync/engine.ts); leaving Codex does not clear it here,
   // because their effects run before this one.
@@ -421,8 +439,12 @@ function App(){
     const stored=selected&&codexSynced?storedView('codex',machine,selected,'turns'):null;
     const cached=stored?{...stored,hasMore:Boolean(stored.truncated),nextCursor:stored.truncated&&stored.turns.length?{before:stored.turns[0].id}:null} as unknown as CachedView:selected?cachedView(`${machine}:${selected}`):null;
     if(selected)traceOpen('codex',`${machine}:${selected}`,'start');
-    sequence.current++;setView(cached);setLoading(Boolean(selected)&&!cached);olderRequest.current=null;setLoadingOlder(false);setHistoryError('');setModel('');setEffort('');setApproval('');setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;lastScrollTop.current=0;
-    setServiceTier(undefined);
+    sequence.current++;setView(cached);setLoading(Boolean(selected)&&!cached);olderRequest.current=null;setLoadingOlder(false);setHistoryError('');
+    setModel(newChat&&machine?String(load(codexModelKey(machine),'')||''):'');
+    setEffort(newChat&&machine?String(load(codexEffortKey(machine),'')||''):'');
+    setApproval(newChat&&machine?String(load(codexApprovalKey(machine),'')||''):'');
+    setServiceTier(newChat&&machine?loadCodexTier(machine):undefined);
+    setError('');setNotice('');sticky.current=true;scrollAnchor.current=null;lastScrollTop.current=0;
     // A message that is still being sent keeps its place when a new chat turns into its thread.
     const sending=optimisticRef.current?.key===scope;setOptimistic(old=>old?.key===scope?old:null);
     setDraft(sending?'':load(draftKey,''));setPending(load(pendingKey,null));if(!codexSynced)void refreshSession();
@@ -441,7 +463,7 @@ function App(){
     return()=>clearTimeout(timer);
   },[optimistic,view,scope]);
   useEffect(()=>{
-    const flush=()=>{draftSave.current.flush();void flushDraftAttachments();void flushCache();void flushThreadStore();},hidden=()=>{if(document.visibilityState==='hidden')flush();};
+    const flush=()=>{draftSave.current.flush();touchLocation();void flushDraftAttachments();void flushCache();void flushThreadStore();},hidden=()=>{if(document.visibilityState==='hidden')flush();};
     window.addEventListener('beforeunload',flush);window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',hidden);
     return()=>{flush();window.removeEventListener('beforeunload',flush);window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',hidden);};
   },[]);
@@ -537,13 +559,19 @@ function App(){
   }
   const target=()=>({threadId:view!.id,source:view!.source,generation:view!.generation,expectedTurnId:view!.activeTurnId});
   function startNew(targetPath?:string){
-    if(!connected||busy)return;
-    const cwd=targetPath||project||view?.cwd||info?.roots?.[0]||'';
+    if(busy)return;
+    const savedCwd=machine?String(load(codexCwdKey(machine),'')||''):'';
+    const cwd=targetPath||savedCwd||project||view?.cwd||info?.roots?.[0]||'';
     setNewCwd(cwd);
-    navigate({...home,project:cwd,thread:'',newChat:true});
+    if(targetPath&&machine)save(codexCwdKey(machine),targetPath);
+    navigate(newChatRoute('codex',cwd));
     if(guest&&!cwd)setSheet('projects');
   }
-  function selectProject(path:string){setNewCwd(path);setModel('');setEffort('');setApproval('');setSheet(null);}
+  function selectProject(path:string){
+    setNewCwd(path);
+    if(machine)save(codexCwdKey(machine),path);
+    setSheet(null);
+  }
   function restoreOptimistic(){
     setOptimistic(old=>old?.key===scope?null:old);
     // The stored draft keeps the text until the send is accepted.
@@ -675,11 +703,11 @@ function App(){
     }}finally{setBrowserRequest(old=>old===request?null:old);}
   }
   function closeBrowser(){const session=browserState;browserSequence.current++;setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});if(session)void call('preview.stop',{sessionId:session.sessionId,threadId:session.threadId},session.machineId).catch(()=>{});}
-  function changeMachine(id:string){setSheet(null);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');const next=id?supportedRoute(serviceHome(service),machines.find(item=>item.id===id)?.services):home;history.replaceState({cmwRoute:next,cmwMachine:id},'',location.pathname);rememberLocation(next,id);setMachine(id);setRoute(next);}
+  function changeMachine(id:string){setSheet(null);setDrawerOpen(false);if(id===machine)return;closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);const savedCwd=id?String(load(codexCwdKey(id),'')||''):'';setNewCwd(savedCwd);const next=id?ensureComposerRoute(supportedRoute(newChatRoute(service,service==='codex'?savedCwd:''),machines.find(item=>item.id===id)?.services)):newChatRoute('codex');history.replaceState({cmwRoute:next,cmwMachine:id},'',location.pathname);rememberLocation(next,id);setMachine(id);setRoute(next);}
   function logout(){
     // A member signing out also removes this device, so its token stops working everywhere.
     if(me&&teamDevice.current&&client.current?.ready)void client.current.team('team.devices.revoke',{deviceId:teamDevice.current}).catch(()=>{});
-    client.current?.close();save('connection','');setMe(null);setRoster([]);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);clearDraftAttachments();void clearCache();void clearThreadStore();changeMachine('');}
+    client.current?.close();save('connection','');clearSavedLocation();setMe(null);setRoster([]);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);clearDraftAttachments();void clearCache();void clearThreadStore();changeMachine('');}
   async function copyText(text:string){
       if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
       else {
@@ -720,7 +748,7 @@ function App(){
     const updated=action==='session.rename'?{...thread,title:payload.name}:thread;
     setPreferences(old=>{if(old.machine!==owner)return old;const values=rememberThreads(old.values,[updated],action==='session.rename'?archived:action==='session.archive');save(`thread-preferences:${owner}`,values);return {...old,values};});
     if(action==='session.rename'){setSessions(old=>old.map(s=>s.id===thread.id?updated:s));setView(old=>old&&old.id===thread.id?{...old,title:payload.name}:old);}
-    else{setSessions(old=>old.filter(s=>s.id!==thread.id));if(current.current.selected===thread.id)navigate(home);}
+    else{setSessions(old=>old.filter(s=>s.id!==thread.id));if(current.current.selected===thread.id)navigate(newChatRoute('codex'));}
     listLoader.current.invalidate();void list();refreshExpandedCodex();
   }
   const projectName=(path:string)=>{
@@ -821,9 +849,33 @@ function App(){
   const conversation=useMemo(()=>view?.turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={Boolean(view.running)} source={view.source} latestUser={turn.id===latestUserTurn} disabled={!connected||busy||Boolean(pending)} openFile={markdownOpenFile} openPreview={markdownOpenPreview} onFollowup={markdownFollowup} onCopy={conversationCopy} onEdit={conversationEdit} onFork={conversationFork} onDiff={conversationDiff} onBlocked={setNotice}/>),[view?.turns,view?.running,view?.source,latestUserTurn,connected,busy,Boolean(pending),markdownOpenFile,markdownOpenPreview,markdownFollowup,conversationCopy,conversationEdit,conversationFork,conversationDiff]);
   const feedback=<>{error&&<div className="feedback error" role="alert"><span>{error}</span><IconButton icon="close" label="关闭提示" onClick={()=>setError('')}/></div>}{notice&&<div className="feedback" role="status">{notice}</div>}{pending&&!busy&&<div className="pending"><button onClick={()=>void checkPending()}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先查看最新任务，确认这次操作的实际结果。清除提示不会重发旧操作。')){setOperation(null);setNotice('');setOptimistic(old=>old?.key===scope?null:old);}}}>我已核实</button></div>}</>;
 
+  const swipe=useRef<{x:number;y:number;mode:'open'|'close'}|null>(null);
+  const onShellTouchStart=(e:TouchEvent<HTMLDivElement>)=>{
+    if(!isMobile||e.touches.length!==1||sheet||threadMenu||statusPanel||modelPoint||permissionPoint||preview)return;
+    const t=e.touches[0];
+    if(drawerOpen)swipe.current={x:t.clientX,y:t.clientY,mode:'close'};
+    else if(t.clientX<28)swipe.current={x:t.clientX,y:t.clientY,mode:'open'};
+  };
+  const onShellTouchEnd=(e:TouchEvent<HTMLDivElement>)=>{
+    const start=swipe.current;swipe.current=null;
+    if(!start||!e.changedTouches.length)return;
+    const t=e.changedTouches[0],dx=t.clientX-start.x,dy=t.clientY-start.y;
+    if(Math.abs(dx)<56||Math.abs(dx)<Math.abs(dy)*1.4)return;
+    if(start.mode==='open'&&dx>0)setDrawerOpen(true);
+    else if(start.mode==='close'&&dx<0)setDrawerOpen(false);
+  };
+
   if(!token||status==='auth_error')return <main className="connect"><Icon name="computer" size={38}/><h1>连接你的电脑</h1><p>通过自部署中继继续电脑上的对话。</p><form onSubmit={e=>{e.preventDefault();const value=inviteCode(tokenInput)||tokenInput.trim();save('connection',value);setToken(value);}}><label>中继地址<input readOnly value={location.origin}/></label><label>邀请链接或连接 Token<input type="password" autoComplete="off" value={tokenInput} onChange={e=>setTokenInput(e.target.value)} placeholder="粘贴团队邀请链接，或电脑上的连接 Token" required/></label>{status==='auth_error'&&<p className="error">登录信息无效或已失效。请重新输入，团队成员请向管理员要新的邀请链接。</p>}<button className="primary">连接</button></form><small>也可以用手机扫描电脑上的连接二维码。</small></main>;
-  const selectService=(next:Service)=>navigate(switchRoute(machine,route,next));
-  const switcher=<ServiceSwitch active={service} available={available} disabled={busy||voiceBusy||imageLoading} select={selectService}/>;
+  const selectService=(next:Service,keepDrawer=false)=>navigate(switchRoute(machine,route,next),false,keepDrawer);
+  const switcher=<ServiceSwitch active={service} available={available} disabled={busy||voiceBusy||imageLoading} select={next=>selectService(next,true)}/>;
+  const mobileHeaderCenter=!available||available.length>1
+    ?<ServiceSwitch className="header-service-switch" active={service} available={available} disabled={busy||voiceBusy||imageLoading} select={next=>selectService(next,false)}/>
+    :<button type="button" className="header-machine-pill" onClick={()=>setSheet('computer')}><i className={connected?'dot online':'dot'}/><span>{machineName}</span></button>;
+  const welcomeMeta=<button type="button" className="welcome-machine" onClick={()=>setSheet('computer')}>
+    <i className={connected?'dot online':'dot'}/>
+    <span>{machineName}</span>
+    {!connected&&<small>{status==='online'?'离线':'连接中…'}</small>}
+  </button>;
   const previewPane=preview&&<PreviewPane title={previewTitle(preview)} subtitle={preview.kind==='file'?preview.file?.path||preview.path:preview.kind==='web'?preview.session.url:preview.kind==='site'?`${preview.url} · 手机直接访问`:undefined}
        tabs={previewState.tabs.map(tab=>({id:tab.id,title:previewTitle(tab.target)}))} activeTab={previewState.activeId}
        selectTab={id=>{const target=previewState.tabs.find(tab=>tab.id===id)?.target;if(target?.kind==='artifact')notePage(target.url);setPreviewState(old=>({...old,activeId:id}));}} closeTab={closePreviewTab}
@@ -942,16 +994,16 @@ function App(){
           saveExpandedProjects('codex',machine,next);
           return {machine,keys:next};
         });
-        if(service!=='codex')navigate(home);
+        if(service!=='codex')navigate(newChatRoute('codex'),false,true);
       }
     }else if(preferred==='claude'){
       const claudeId=result.results.claude?.project?.id||result.path;
-      if(createOrigin.current==='new-chat'||route.newChat)navigate({...serviceHome('claude',claudeId),newChat:true},true);
-      else{setAutoExpandKey(projectPathKey(result.path)||claudeId);if(service!=='claude')navigate(serviceHome('claude'));}
+      if(createOrigin.current==='new-chat'||route.newChat)navigate(newChatRoute('claude',claudeId),true);
+      else{setAutoExpandKey(projectPathKey(result.path)||claudeId);if(service!=='claude')navigate(newChatRoute('claude'),false,true);}
     }else if(preferred==='antigravity'){
       const agId=result.results.antigravity?.project?.id||result.path;
-      if(createOrigin.current==='new-chat'||route.newChat)navigate({...serviceHome('antigravity',agId),newChat:true},true);
-      else{setAutoExpandKey(projectPathKey(result.path)||agId);if(service!=='antigravity')navigate(serviceHome('antigravity'));}
+      if(createOrigin.current==='new-chat'||route.newChat)navigate(newChatRoute('antigravity',agId),true);
+      else{setAutoExpandKey(projectPathKey(result.path)||agId);if(service!=='antigravity')navigate(newChatRoute('antigravity'),false,true);}
     }
   }
   const projectCreateSheet=<ProjectCreateSheet key={`${machine}:${service}`} connected={connected} machineServices={available} currentService={service} guest={guest} call={call} onCreated={handleProjectCreated} close={()=>setSheet(null)}/>;
@@ -971,8 +1023,6 @@ function App(){
     me,machineName,machinesCount:machines.length,connected,relayOnline:status==='online',busy,
     archived:service==='codex'?archived:undefined,
     onToggleArchived:service==='codex'?()=>setArchived(old=>!old):undefined,
-    onRefresh:refreshSidebar,
-    refreshDisabled:service==='codex'?listBusy:false,
     onOpenSettings:()=>setSheet('settings'),
     onOpenComputer:()=>setSheet('computer'),
     onOpenTeam:me?()=>setSheet('team'):undefined,
@@ -993,9 +1043,15 @@ function App(){
     busy={busy}
   />;
   if(service==='antigravity'||service==='claude'){
-    const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
-    const open=(next:string)=>{if(next!==id||route.newChat){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
-    const creatingClaude=service==='claude'&&!id&&route.newChat,creatingAntigravity=service==='antigravity'&&!id&&route.newChat;
+    const id=remoteConversation,overlayInert=Boolean(sheet||compactPreview&&preview);
+    const sidebarInert=overlayInert||Boolean(isMobile&&!drawerOpen);
+    const mainInert=overlayInert||Boolean(isMobile&&drawerOpen);
+    const open=(next:string)=>{
+      if(!next){navigate(newChatRoute(service,route.project));refreshRemoteList(value=>value+1);return;}
+      if(next!==id||route.newChat)navigate(withConversation(route,next));
+      else setDrawerOpen(false);
+    };
+    const creatingClaude=service==='claude'&&!id,creatingAntigravity=service==='antigravity'&&!id;
     const created=(next:string)=>{refreshRemoteList(value=>value+1);navigate(withConversation(route,next),true);};
     const forked=(next:string)=>{refreshRemoteList(value=>value+1);open(next);};
     async function claudeChange(action:RequestAction,payload:Json){
@@ -1008,15 +1064,15 @@ function App(){
       archive:async()=>{await claudeChange('claude.archive',{conversationId:thread.id});if(thread.id===id)open('');},
       duplicate:async()=>{forked((await claudeChange('claude.fork',{conversationId:thread.id})).conversationId);},
     });
-    return <SenderRoot me={me?.id}><div className={`shell ${id||creatingClaude||creatingAntigravity?'has-session':''}`}>
-      <AntigravitySidebar key={`${service}:${machine}`} service={service} inert={inert} selected={id} machine={machine} machineName={machineName}
+    return <SenderRoot me={me?.id}><div className={`shell has-session${drawerOpen?' drawer-open':''}`} onTouchStart={onShellTouchStart} onTouchEnd={onShellTouchEnd}>
+      <AntigravitySidebar key={`${service}:${machine}`} service={service} inert={sidebarInert} selected={id} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
         footer={sidebarFooter} mobileSettings={mobileSettings}
         projectsCollapsed={projectsCollapsed} onToggleProjects={toggleProjects} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
         claimOwner={isTeamAdmin(me)?(threadId,userId)=>claimOwner(machine,service,threadId,userId):undefined}
         revision={remoteListRevision} switcher={switcher} call={call} open={open}
         listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>filterThreadsByOwner(threads,me,ownerFilter)}
-        onNew={targetProject=>navigate({...serviceHome(service,targetProject),newChat:true})}
+        onNew={targetProject=>navigate(newChatRoute(service,targetProject))}
         onCreateProject={canCreateProject?()=>openCreateProject('sidebar'):undefined}
         onEditProject={canManageProjects?proj=>openEditProject(service,proj):undefined}
         onClaudeSettings={service==='claude'?proj=>openClaudeProjectSettings(proj.path):undefined}
@@ -1024,22 +1080,27 @@ function App(){
         canManageProjects={canManageProjects}
         autoExpandKey={autoExpandKey}
         chooseComputer={()=>setSheet('computer')}/>
-      {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} showPage={showPage} previewError={error}
+      {drawerOpen&&<div className="drawer-backdrop" aria-hidden="true" onClick={()=>setDrawerOpen(false)}/>}
+      {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={mainInert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} showPage={showPage} previewError={error}
         machine={machine} guest={guest} newCwd={creatingClaude?route.project:null} created={created} forked={forked}
         onCreateProject={canCreateProject?()=>openCreateProject('new-chat'):undefined} projectsRevision={remoteListRevision}
         showDiff={turn=>{if(turn.diff)showPreview({kind:'diff',threadId:`claude:${id}`,turnId:turn.id,text:turn.diff});}} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')} actions={claudeActions}
         claim={isTeamAdmin(me)&&id?{members:roster,assign:userId=>claimOwner(machine,'claude',id,userId)}:undefined}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
+        openSidebar={()=>setDrawerOpen(true)} onNewChat={()=>navigate(newChatRoute('claude'))}
+        mobileHeaderCenter={mobileHeaderCenter} mobileHeaderRight={mobileSettings} welcomeMeta={welcomeMeta}
         machineName={machineName} connected={connected} conversationId={id} call={call} go={open} sync={connectorHas(activeMachine,'sync.claude')?syncLink:undefined}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
-        id||creatingAntigravity?<AntigravityPanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
+        <AntigravityPanel key={JSON.stringify([machine,service,id])} inert={mainInert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open} newProject={creatingAntigravity?route.project:null} created={created} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')}
         onCreateProject={canCreateProject?()=>openCreateProject('new-chat'):undefined} projectsRevision={remoteListRevision}
         sync={connectorHas(activeMachine,'sync.antigravity')?syncLink:undefined}
         showTasks={()=>{if(id)showPreview({kind:'tasks',conversationId:id});}} tasksSlot={tasksSlot}
+        claim={isTeamAdmin(me)&&id?{members:roster,assign:userId=>claimOwner(machine,'antigravity',id,userId)}:undefined}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
-        showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
-        <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}
+        openSidebar={()=>setDrawerOpen(true)} onNewChat={()=>navigate(newChatRoute('antigravity'))}
+        mobileHeaderCenter={mobileHeaderCenter} mobileHeaderRight={mobileSettings} welcomeMeta={welcomeMeta}
+        showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>}
       {sheet==='settings'&&<SheetPanel title="设置" close={()=>setSheet(null)}>{settingsSheet}</SheetPanel>}
       {sheet==='voice'&&<SheetPanel title={`语音输入 · ${serviceLabel(service)}`} close={()=>setSheet(null)}>{voiceOptions}</SheetPanel>}
       {sheet==='team'&&teamPanel&&<SheetPanel title="团队" close={()=>setSheet(null)}>{teamPanel}</SheetPanel>}
@@ -1058,9 +1119,13 @@ function App(){
   const codexFilterControl=me?<OwnerFilterControl me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>:null;
   const codexCanManage=canManageProjects&&Boolean(info?.projectApi);
   const isCodexActive=(s:Json)=>connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?Boolean(view.running):s.status?.type==='active');
-  return <SenderRoot me={me?.id}><div className={`shell ${showThread?'has-session':''}`}>
-    <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>
-      <HomeHeader machineName={machineName} connected={connected} relayOnline={status==='online'} chooseComputer={()=>setSheet('computer')} mobileSettings={mobileSettings}/>
+  const codexOverlayInert=Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview);
+  const codexSidebarInert=codexOverlayInert||Boolean(isMobile&&!drawerOpen);
+  const codexMainInert=codexOverlayInert||Boolean(isMobile&&drawerOpen);
+  const openCodexThread=(s:Json)=>{changePreference(s.id,{unread:false});if(s.id===selected&&!newChat)setDrawerOpen(false);else navigate({...home,thread:s.id,newChat:false});};
+  return <SenderRoot me={me?.id}><div className={`shell has-session${drawerOpen?' drawer-open':''}`} onTouchStart={onShellTouchStart} onTouchEnd={onShellTouchEnd}>
+    <aside className="home-panel" inert={codexSidebarInert}>
+      <HomeHeader machineName={machineName} connected={connected} relayOnline={status==='online'} chooseComputer={()=>setSheet('computer')} mobileSettings={mobileSettings} onRefresh={refreshSidebar} refreshDisabled={listBusy}/>
       {!archived&&!searchQuery&&switcher}
       <div className="home-content">
         {codexShowProjectsTree&&<ProjectTree
@@ -1074,7 +1139,7 @@ function App(){
           selectedThread={selected}
           threadPreferences={preferences}
           isThreadActive={isCodexActive}
-          onOpenThread={s=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}}
+          onOpenThread={openCodexThread}
           onThreadMenu={(s,point)=>setThreadMenu({thread:s,point,machine,archived})}
           onNewChat={proj=>startNew(proj.path)}
           onCreateProject={canCreateProject?()=>openCreateProject('sidebar'):undefined}
@@ -1094,19 +1159,22 @@ function App(){
           {!archived&&!codexGroups.length&&(codexFilterControl?<div className="section-head"><h2>{codexHeading}</h2>{codexFilterControl}</div>:<h2>{codexHeading}</h2>)}
           {codexGroups.map((group,index)=><div className="thread-group" key={group.key}>{!archived&&(index===0&&codexFilterControl?<div className="section-head"><h2>{group.label}</h2>{codexFilterControl}</div>:<h2>{group.label}</h2>)}<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
             time={relativeTime(s.updatedAt)} active={isCodexActive(s)}
-            open={()=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
+            open={()=>openCodexThread(s)} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
           {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':archived?'还没有归档会话。':'还没有聊天，开始一个新任务吧。'}</p>}
           {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
         </section>
       </div>
-      <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><ChatSearch value={search} change={setSearch}/><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={()=>startNew()}/></div></div>
+      <div className="home-bottom"><div className="home-dock"><ChatSearch value={search} change={setSearch}/><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={busy||Boolean(pending)} onClick={()=>startNew()}/></div></div>
       {sidebarFooter}
     </aside>
+    {drawerOpen&&<div className="drawer-backdrop" aria-hidden="true" onClick={()=>setDrawerOpen(false)}/>}
 
-    <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={()=>startNew()} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
-      <ThreadHeader title={visibleTitle} project={projectName(newChat?newCwd:view?.cwd||project)||'项目'} machineName={machineName} connected={connected} back={backToSessions} backDisabled={busy} onTitle={element=>newChat?setSheet('projects'):openStatus(element)}
+    <main className="thread-panel" inert={codexMainInert}>
+      <ThreadHeader title={visibleTitle} project={projectName(newChat?newCwd:view?.cwd||project)||'项目'} machineName={machineName} connected={connected} menu={()=>setDrawerOpen(true)} backDisabled={busy} onTitle={element=>newChat?setSheet('projects'):openStatus(element)}
+        mobileCenter={newChat?mobileHeaderCenter:undefined} mobileRight={newChat?mobileSettings:undefined}
+        onNewChat={!newChat?()=>startNew():undefined} newChatDisabled={busy||Boolean(pending)}
         owner={newChat?null:view?.owner} lastSender={newChat?null:view?.lastSender} meId={me?.id}>
-        <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button>
+        {!newChat&&<><button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button></>}
       </ThreadHeader>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
       {view?.notice&&!newChat&&<div className="banner">{view.notice}{!guest&&view.source==='history'&&!view.running&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
@@ -1116,7 +1184,7 @@ function App(){
         <div className="timeline-content" ref={timelineContent}>
         {loading&&!newChat&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         {view?.hasMore&&!newChat&&<button className="more-link earlier" disabled={!connected||loadingOlder} onClick={()=>void loadOlder()}>{loadingOlder?'正在加载…':historyError?`${historyError} · 重试`:'加载更早内容'}</button>}
-        {pendingShown&&(newChat||!view?.turns.length)?null:newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1><button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:<SenderScope senders={view?.turns.flatMap(turn=>turn.items.map(item=>item.sender))||[]}>{conversation}</SenderScope>}
+        {pendingShown&&(newChat||!view?.turns.length)?null:newChat||(!loading&&view&&!view.turns.length)?<div className="new-chat-welcome"><h1>我们来处理</h1>{newChat&&welcomeMeta}<button className="center-project" disabled={!newChat||busy} onClick={()=>setSheet('projects')}><Icon name="folder"/><span>{projectName(newChat?newCwd:view?.cwd||'')||'选择项目'}</span>{newChat&&<Icon name="chevron" size={17}/>}</button></div>:<SenderScope senders={view?.turns.flatMap(turn=>turn.items.map(item=>item.sender))||[]}>{conversation}</SenderScope>}
         {pendingShown&&<PendingMessage message={pendingShown} openFile={markdownOpenFile} openPreview={markdownOpenPreview} onFollowup={markdownFollowup}/>}
         {!newChat&&view?.retry&&<ConversationStatus>{view.retry}</ConversationStatus>}
         {!connected?<ConversationStatus>{!everOnline.current?'正在连接电脑…':cachedShown?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost}</ConversationStatus>:cachedShown&&<ConversationStatus>正在同步最新内容…</ConversationStatus>}
@@ -1138,14 +1206,14 @@ function App(){
           send={{label:queueNext?'完成后发送':'发送消息',sending,disabled:!canWrite||!draft.trim()&&!attachmentCount}}/>
         {pick.inputs}
       </div>
-    </>}</main>
+    </main>
 
      {threadMenu&&threadMenu.machine===machine&&<ThreadMenu key={`${machine}:${threadMenu.thread.id}`} thread={threadMenu.thread} point={threadMenu.point} preference={preferences[threadMenu.thread.id]||{}} sections={[...new Set(Object.values(preferences).map(p=>p.section).filter((s):s is string=>Boolean(s)))]} archived={threadMenu.archived} compact={threadMenu.compact} connected={connected}
        teamMode={Boolean(me)} claim={isTeamAdmin(me)?{members:codexMembers,assign:userId=>claimOwner(machine,'codex',threadMenu.thread.id,userId)}:undefined}
        close={()=>setThreadMenu(current=>current===threadMenu?null:current)} change={patch=>changePreference(threadMenu.thread.id,patch,threadMenu.thread)} copy={()=>copyText(threadMenu.thread.id)} rename={name=>changeThread('session.rename',threadMenu.thread,{name})} archive={()=>changeThread(threadMenu.archived?'session.unarchive':'session.archive',threadMenu.thread)} openPreview={threadMenu.compact?()=>setSheet('browser'):undefined}/>}
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
-     {permissionPoint&&<PermissionPicker anchor={permissionButton.current} point={permissionPoint} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} title="许可" disabled={busy} onChange={setApproval} close={()=>setPermissionPoint(null)}/>}
-     {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
+     {permissionPoint&&<PermissionPicker anchor={permissionButton.current} point={permissionPoint} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} title="许可" disabled={busy} onChange={next=>{setApproval(next);if(newChat&&machine)save(codexApprovalKey(machine),next);}} close={()=>setPermissionPoint(null)}/>}
+     {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);if(newChat&&machine){save(codexModelKey(machine),value.model);save(codexEffortKey(machine),value.effort);save(codexTierKey(machine),value.serviceTier===undefined?'__inherit':value.serviceTier);}}} close={()=>setModelPoint(null)}/>}
      {sheet&&<SheetPanel title={sheet==='voice'?`语音输入 · ${serviceLabel(service)}`:({settings:'设置',computer:'电脑',projects:'选择项目','create-project':'新建项目','edit-project':'编辑项目',add:'添加与选项',file:'查看项目文件',browser:'打开网页','claude-project':'项目设置',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);setUnreachable('');}if(sheet==='edit-project')setEditingProject(null);setSheet(null);}}>
        {sheet==='settings'&&settingsSheet}
       {sheet==='computer'&&computerOptions}
@@ -1171,5 +1239,7 @@ function App(){
 // The app shell is cached by a service worker for instant reopening; see public/sw.js.
 // UpdateBanner moves an open page to a new release once the worker has it.
 if(import.meta.env.PROD&&'serviceWorker' in navigator)window.addEventListener('load',()=>{navigator.serviceWorker.register('/sw.js').catch(()=>{});});
+// Ask the browser not to evict drafts and cached threads under storage pressure when supported.
+try{void navigator.storage?.persist?.().catch(()=>{});}catch{}
 // The stored cache is read first (bounded by a short timeout) so the first paint can show it.
 void Promise.all([loadCache(),loadThreadStore(),loadDraftAttachments()]).finally(()=>createRoot(document.getElementById('root')!).render(<><App/><UpdateBanner/></>));

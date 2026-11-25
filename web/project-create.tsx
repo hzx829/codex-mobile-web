@@ -68,6 +68,8 @@ export function ProjectCreateSheet({connected,machineServices,currentService,gue
 
   // Services: default ALL available services checked (Product Decision #2)
   const [selectedServices,setSelectedServices]=useState<BridgeService[]>(initialServices);
+  // Extra configuration stays collapsed by default so creating a project only needs a name.
+  const [showOptions,setShowOptions]=useState(false);
 
   // Submission & partial failure state
   const [busy,setBusy]=useState(false);
@@ -264,11 +266,31 @@ export function ProjectCreateSheet({connected,machineServices,currentService,gue
     ),
   );
   const previewFullPath=mode==='new'&&parentPath&&(folderName||name.trim())?joinPreview(parentPath,folderName||name.trim()):'';
+  const rootLabel=roots.find(root=>root.path===parentPath)?.label||(parentPath?baseName(parentPath):'默认目录');
+  const appsSummary=selectedServices.length===availableServices.length?'全部应用':selectedServices.map(serviceLabel).join('、');
+  const customFolder=folderTouched&&folderName.trim()&&folderName.trim()!==name.trim()?`目录 ${folderName.trim()}`:'';
+  const customDisplayName=existingNameTouched&&existingName.trim()&&selectedPath&&existingName.trim()!==baseName(selectedPath)?existingName.trim():'';
+  const optionsSummary=mode==='new'
+    ?[customFolder,rootLabel,initGit?'Git':'无 Git',appsSummary].filter(Boolean).join(' · ')
+    :[customDisplayName,appsSummary].filter(Boolean).join(' · ');
+
+  const servicesFieldset=<fieldset className="project-services">
+    <legend>注册到应用（可多选）</legend>
+    <div className="project-service-list">
+      {availableServices.map(svc=>{
+        const checked=selectedServices.includes(svc);
+        return <label className={`project-service-option${checked?' checked':''}`} key={svc}>
+          <input type="checkbox" checked={checked} onChange={()=>toggleService(svc)}/>
+          <span>{serviceLabel(svc)}</span>
+        </label>;
+      })}
+    </div>
+  </fieldset>;
 
   return <form className="project-create" onSubmit={handleSubmit}>
     <div className="project-create-tabs" role="tablist" aria-label="创建方式">
-      <button type="button" role="tab" aria-selected={mode==='new'} className={mode==='new'?'selected':''} onClick={()=>{setMode('new');setError('');}}>新建文件夹</button>
-      <button type="button" role="tab" aria-selected={mode==='existing'} className={mode==='existing'?'selected':''} onClick={()=>{setMode('existing');setError('');}}>已有文件夹</button>
+      <button type="button" role="tab" aria-selected={mode==='new'} className={mode==='new'?'selected':''} onClick={()=>{setMode('new');setShowOptions(false);setError('');}}>新建文件夹</button>
+      <button type="button" role="tab" aria-selected={mode==='existing'} className={mode==='existing'?'selected':''} onClick={()=>{setMode('existing');setShowOptions(false);setError('');}}>已有文件夹</button>
     </div>
 
     {loadingRoots&&!rootsInfo?<div className="list-skeleton" role="status" aria-label="正在读取电脑目录配置"><div/><div/></div>:
@@ -276,27 +298,37 @@ export function ProjectCreateSheet({connected,machineServices,currentService,gue
       <label>项目名称
         <input autoFocus required maxLength={80} value={name} onChange={e=>updateNewName(e.target.value)} placeholder="例如 my-service"/>
       </label>
-      <label>文件夹名称
-        <input required maxLength={80} value={folderName} onChange={e=>{setFolderTouched(true);setFolderName(e.target.value);}} placeholder="默认与项目名称一致"/>
-      </label>
-      {roots.length>1?<label>保存位置
-        <select value={parentPath} onChange={e=>setParentPath(e.target.value)}>
-          {roots.map(root=><option key={root.path} value={root.path}>{root.label}{root.isDefault?'（默认）':''} — {root.path}</option>)}
-        </select>
-      </label>:<div className="project-root-field">
-        <span className="field-caption">保存位置</span>
-        <div className="project-root-box" title={parentPath}>{parentPath||'默认项目目录'}</div>
-        <p className="muted">
-          {isGuest?'借用模式下，新建项目位于电脑的共享工作区目录中。'
-            :!configured?'当前电脑未配置团队项目根目录，默认新建在此目录；管理员可在电脑托盘的「连接设置」中添加项目根目录。'
-            :'将在管理员配置的默认项目根目录下创建新文件夹。'}
-        </p>
-      </div>}
-      {previewFullPath&&<p className="project-path-preview" title={previewFullPath}>将创建：<code>{previewFullPath}</code></p>}
-      <label className="project-check">
-        <input type="checkbox" checked={initGit} onChange={e=>setInitGit(e.target.checked)}/>
-        <span>初始化 Git 仓库（git init）</span>
-      </label>
+      <div className={`project-options${showOptions?' open':''}`}>
+        <button type="button" className="project-options-toggle" aria-expanded={showOptions} onClick={()=>setShowOptions(old=>!old)}>
+          <span className="project-options-title">更多选项</span>
+          <span className="project-options-summary" title={optionsSummary}>{optionsSummary}</span>
+          <Icon name="chevron" size={14}/>
+        </button>
+        {showOptions&&<div className="project-options-body">
+          <label>文件夹名称
+            <input maxLength={80} value={folderName} onChange={e=>{const next=e.target.value;setFolderTouched(Boolean(next.trim()));setFolderName(next);}} placeholder="默认与项目名称一致"/>
+          </label>
+          {roots.length>1?<label>保存位置
+            <select value={parentPath} onChange={e=>setParentPath(e.target.value)}>
+              {roots.map(root=><option key={root.path} value={root.path}>{root.label}{root.isDefault?'（默认）':''} — {root.path}</option>)}
+            </select>
+          </label>:<div className="project-root-field">
+            <span className="field-caption">保存位置</span>
+            <div className="project-root-box" title={parentPath}>{parentPath||'默认项目目录'}</div>
+            <p className="muted">
+              {isGuest?'借用模式下，新建项目位于电脑的共享工作区目录中。'
+                :!configured?'当前电脑未配置团队项目根目录，默认新建在此目录；管理员可在电脑托盘的「连接设置」中添加项目根目录。'
+                :'将在管理员配置的默认项目根目录下创建新文件夹。'}
+            </p>
+          </div>}
+          {previewFullPath&&<p className="project-path-preview" title={previewFullPath}>将创建：<code>{previewFullPath}</code></p>}
+          <label className="project-check">
+            <input type="checkbox" checked={initGit} onChange={e=>setInitGit(e.target.checked)}/>
+            <span>初始化 Git 仓库（git init）</span>
+          </label>
+          {servicesFieldset}
+        </div>}
+      </div>
     </>:<>
       {roots.length>1&&<div className="project-root-chips" role="group" aria-label="项目根目录">
         {roots.map(root=><button type="button" key={root.path} className={browsePath===root.path?'selected':''} onClick={()=>setBrowsePath(root.path)}>{root.label}</button>)}
@@ -344,23 +376,21 @@ export function ProjectCreateSheet({connected,machineServices,currentService,gue
       </details>}
 
       {selectedPath&&<p className="project-path-preview" title={selectedPath}>已选目录：<code>{selectedPath}</code></p>}
-      <label>显示名称
-        <input maxLength={80} value={existingName} onChange={e=>{setExistingNameTouched(true);setExistingName(e.target.value);}} placeholder="默认使用文件夹名称"/>
-      </label>
-    </>}
 
-    <fieldset className="project-services">
-      <legend>注册到应用（可多选）</legend>
-      <div className="project-service-list">
-        {availableServices.map(svc=>{
-          const checked=selectedServices.includes(svc);
-          return <label className={`project-service-option${checked?' checked':''}`} key={svc}>
-            <input type="checkbox" checked={checked} onChange={()=>toggleService(svc)}/>
-            <span>{serviceLabel(svc)}</span>
-          </label>;
-        })}
+      <div className={`project-options${showOptions?' open':''}`}>
+        <button type="button" className="project-options-toggle" aria-expanded={showOptions} onClick={()=>setShowOptions(old=>!old)}>
+          <span className="project-options-title">更多选项</span>
+          <span className="project-options-summary" title={optionsSummary}>{optionsSummary}</span>
+          <Icon name="chevron" size={14}/>
+        </button>
+        {showOptions&&<div className="project-options-body">
+          <label>显示名称
+            <input maxLength={80} value={existingName} onChange={e=>{const next=e.target.value;setExistingNameTouched(Boolean(next.trim()));setExistingName(next);}} placeholder="默认使用文件夹名称"/>
+          </label>
+          {servicesFieldset}
+        </div>}
       </div>
-    </fieldset>
+    </>}
 
     {error&&<p className="error" role="alert">{error}</p>}
 
