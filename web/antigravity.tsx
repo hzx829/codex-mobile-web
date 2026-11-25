@@ -7,6 +7,7 @@ import {QueuedMessages} from './queued-messages';
 import {PermissionMenu,type PermissionOption} from './permission-picker';
 import {ApprovalCard} from './approval-card';
 import {SheetPanel} from './sheet';
+import {ProjectPicker} from './project-picker';
 import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {cachedView,rememberView,threadKey} from './session-cache';
@@ -557,11 +558,10 @@ export function AntigravityPanel(props:Props){
     <div className={`timeline ${creating&&!pendingShown?'is-empty':''}`} ref={scroll} onScroll={trackScroll}><div className="timeline-content">
       {creating&&!pendingShown&&<div className="new-chat-welcome"><h1>交给 Antigravity</h1>
         {props.welcomeMeta}
-        <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} disabled={Boolean(pending)} onChange={e=>setTarget(e.target.value)}>
-          {!target&&<option value="">{!projects?'正在读取项目…':'桌面上还没有项目'}</option>}
-          {projects?.map(item=><option key={item.id} value={item.id}>{projectName(item)}</option>)}
-        </select></label>
-        {props.onCreateProject&&<button type="button" className="create-project-inline" disabled={!connected||Boolean(pending)} onClick={props.onCreateProject}><Icon name="plus" size={16}/><span>新建或关联项目</span></button>}
+        <ProjectPicker projects={projects} value={target} disabled={Boolean(pending)} onSelect={setTarget}
+          label={chosen?projectName(chosen):!projects?'正在读取项目…':props.onCreateProject?'选择或新建项目':'选择项目'}
+          empty={!projects?'正在读取项目…':'桌面上还没有项目'}
+          onCreate={props.onCreateProject} createDisabled={!connected||Boolean(pending)}/>
       </div>}
       {view&&<SenderScope senders={senders}><AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/></SenderScope>}
       {pendingShown&&<PendingMessage message={pendingShown} openFile={openFile} openPreview={openPreview} onFollowup={followup}/>}

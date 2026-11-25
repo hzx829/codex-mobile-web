@@ -20,7 +20,8 @@ import {ModelMenu} from './model-picker';
 import {listedModel,modelDisplayName,reasoningLabel,resolveModelSelection,type ModelSelection} from '../src/shared/models';
 import {PermissionMenu,type PermissionOption} from './permission-picker';
 import {ApprovalCard} from './approval-card';
-import {SheetPanel} from './sheet';
+import {MenuItem,SheetPanel} from './sheet';
+import {ProjectPicker} from './project-picker';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import type {ApprovalRequest,Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
@@ -429,17 +430,15 @@ export function ClaudeCodePanel(props:Props){
     <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={()=>{const el=scroll.current!;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<80;if(el.scrollTop<160&&!earlierError)void loadEarlier();}}><div className="timeline-content">
       {creating?<div className="new-chat-welcome"><h1>交给 Claude Code</h1>
         {props.welcomeMeta}
-        <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} onChange={e=>setTarget(e.target.value)}>
-          {!target&&<option value="">{guest||props.onCreateProject?'选择或新建项目':'正在读取项目…'}</option>}
-          {places.map(place=><option key={place.id} value={place.id}>{place.name||workspaceName(place.path)}</option>)}
-          {chosen&&!places.includes(chosen as Place)&&<option value={chosen.id}>{workspaceName(chosen.path)}</option>}
-          {!guest&&!props.onCreateProject&&<option value={OTHER}>其他文件夹…</option>}
-        </select></label>
-        {props.onCreateProject?<button type="button" className="create-project-inline" disabled={!connected||busy} onClick={props.onCreateProject}><Icon name="plus" size={16}/><span>新建或关联项目</span></button>
-          :guest?<details className="other-project" open={!startPath||undefined}><summary>新建项目</summary>
-          <GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setPlaces(old=>old.some(item=>item.id===path)?old:[...old,{id:path,path}]);setTarget(path);}}/>
-        </details>:target===OTHER&&<label className="claude-project"><input autoFocus aria-label="文件夹路径" placeholder="电脑上的完整路径" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>}
-        {startPath&&<p className="muted">{startPath}</p>}</div>:<>
+        <ProjectPicker projects={chosen&&!places.includes(chosen as Place)?[...places,chosen]:places} value={target} onSelect={setTarget}
+          label={target===OTHER?(cwd.trim()?workspaceName(cwd.trim()):'其他文件夹'):chosen?chosen.name||workspaceName(chosen.path):guest||props.onCreateProject?'选择或新建项目':'正在读取项目…'}
+          empty={guest?'还没有项目，在下面新建一个':'电脑上还没有项目'}
+          onCreate={props.onCreateProject} createDisabled={!connected||busy}
+          footer={props.onCreateProject?undefined:guest?close=><details className="other-project" open={!places.length||undefined}><summary>新建项目</summary>
+            <GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setPlaces(old=>old.some(item=>item.id===path)?old:[...old,{id:path,path}]);setTarget(path);close();}}/>
+          </details>:close=><MenuItem icon="edit" onClick={()=>{close();setTarget(OTHER);}}><span>其他文件夹…</span>{target===OTHER&&<Icon name="check" size={18}/>}</MenuItem>}/>
+        {target===OTHER&&!guest&&!props.onCreateProject&&<label className="claude-project"><input autoFocus aria-label="文件夹路径" placeholder="电脑上的完整路径" value={cwd} onChange={e=>setCwd(e.target.value)}/></label>}
+        </div>:<>
         {view?.truncated&&<button type="button" className="more-link earlier" disabled={!connected||loadingEarlier} onClick={()=>void loadEarlier()}>{loadingEarlier?'正在加载…':earlierError?`${earlierError} · 重试`:'加载更早内容'}</button>}
         {!view&&(busy||synced.view?.phase==='syncing'&&!synced.view.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
         <SenderScope senders={turns.flatMap(turn=>turn.items.map(item=>item.sender))}>{turns.map(turn=><ConversationTurn key={turn.id} turn={turn} running={running} source="connector"  latestUser={false} disabled={!canWrite}

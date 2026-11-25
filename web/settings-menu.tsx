@@ -108,11 +108,12 @@ function SettingsPopover({
           <small>{me?`${ROLE_LABELS[me.role]} · ${location.host}`:location.host}</small>
         </div>
       </div>
-      <div className="settings-popover-status">
+      <button type="button" className="settings-popover-status" aria-label={`当前电脑 ${machineName}，切换电脑`} onClick={()=>run(onOpenComputer)}>
         <i className={connected?'dot online':'dot'}/>
         <span>{machineName}</span>
-        <em>{connected?'已连接':relayOnline?'离线':'连接中…'}</em>
-      </div>
+        <em>{machinesCount>1?`${machinesCount} 台`:connected?'切换':relayOnline?'离线 · 切换':'连接中…'}</em>
+        <Icon name="chevron" size={14}/>
+      </button>
     </div>
 
     <div className="menu-divider"/>
@@ -121,25 +122,14 @@ function SettingsPopover({
       <Icon name="settings" size={18}/>
       <span className="menu-copy">设置<kbd className="menu-shortcut">Ctrl+,</kbd></span>
     </button>
-    <button type="button" className="menu-item" onClick={()=>run(onOpenComputer)}>
-      <Icon name="computer" size={18}/>
-      <span className="menu-copy">切换电脑<span className="menu-detail">{machinesCount>1?`${machinesCount} 台`:machineName}</span></span>
-    </button>
-
-    <div className="menu-divider"/>
-
     {onToggleArchived&&<button type="button" className="menu-item" disabled={!connected||busy} onClick={()=>run(onToggleArchived)}>
       <Icon name="archive" size={18}/>
       <span className="menu-copy">{archived?'返回最近会话':'查看归档会话'}{archived&&<Icon name="check" size={16}/>}</span>
     </button>}
-
-    {me&&onOpenTeam&&<>
-      <div className="menu-divider"/>
-      <button type="button" className="menu-item" onClick={()=>run(onOpenTeam)}>
-        <Icon name="team" size={18}/>
-        <span className="menu-copy">{isTeamAdmin(me)?'团队管理':'我的设备与用量'}<span className="menu-detail">{ROLE_LABELS[me.role]}</span></span>
-      </button>
-    </>}
+    {me&&onOpenTeam&&<button type="button" className="menu-item" onClick={()=>run(onOpenTeam)}>
+      <Icon name="team" size={18}/>
+      <span className="menu-copy">{isTeamAdmin(me)?'团队管理':'我的设备与用量'}</span>
+    </button>}
 
     <div className="menu-divider"/>
 
