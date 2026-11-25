@@ -11,7 +11,7 @@ export interface Device {id: string; userId: string; name: string; createdAt: nu
 export interface Owner {id: string; name: string}
 /** One row per day, member, computer, app and model; `userId` is null for turns started on the computer itself. */
 export interface UsageRow {day: string; userId: string | null; machineId: string; service: Service; model: string; turns: number; inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null; reasoningTokens: number | null}
-export interface Activity {id: number; ts: number; userId: string; userName: string; deviceId: string | null; machineId: string; service: Service; action: string; threadId: string | null; state: string}
+export interface Activity {id: number; ts: number; userId: string; userName: string; deviceId: string | null; machineId: string; service: Service; action: string; threadId: string | null; threadTitle?: string | null; state: string}
 
 /** One invite stays usable for a day; it only turns into a device token, which the browser keeps. */
 export const INVITE_TTL_MS = 24 * 3600_000;
@@ -262,7 +262,7 @@ export class TeamStore {
 
   lastSender(machineId: string, service: Service, threadId: string, actions: string[]): Owner | undefined {
     const row = this.db.prepare(`SELECT u.id, u.name FROM activity a JOIN users u ON u.id=a.user_id
-      WHERE a.machine_id=? AND a.service=? AND a.thread_id=? AND a.action IN (${actions.map(() => '?').join(',')})
+      WHERE a.machine_id=? AND a.service=? AND a.thread_id=? AND a.state!='failed' AND a.action IN (${actions.map(() => '?').join(',')})
       ORDER BY a.ts DESC, a.id DESC LIMIT 1`).get(machineId, service, threadId, ...actions);
     return row ? {id: String(row.id), name: String(row.name)} : undefined;
   }
@@ -273,10 +273,12 @@ export class TeamStore {
     if (filter.machineId) {where.push('a.machine_id=?');values.push(filter.machineId);}
     if (filter.before) {where.push('a.id<?');values.push(filter.before);}
     const limit = Math.min(Math.max(Number(filter.limit) || 50, 1), 200);
-    return this.db.prepare(`SELECT a.*, u.name AS user_name FROM activity a JOIN users u ON u.id=a.user_id
+    return this.db.prepare(`SELECT a.*, u.name AS user_name, t.title AS thread_title FROM activity a JOIN users u ON u.id=a.user_id
+      LEFT JOIN threads t ON t.machine_id=a.machine_id AND t.service=a.service AND t.thread_id=a.thread_id
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.id DESC LIMIT ${limit}`).all(...values)
       .map(row => ({id: Number(row.id), ts: Number(row.ts), userId: String(row.user_id), userName: String(row.user_name), deviceId: row.device_id === null ? null : String(row.device_id),
-        machineId: String(row.machine_id), service: row.service as Service, action: String(row.action), threadId: row.thread_id === null ? null : String(row.thread_id), state: String(row.state)}));
+        machineId: String(row.machine_id), service: row.service as Service, action: String(row.action), threadId: row.thread_id === null ? null : String(row.thread_id),
+        threadTitle: row.thread_title === null || row.thread_title === undefined ? null : String(row.thread_title), state: String(row.state)}));
   }
 
   /**

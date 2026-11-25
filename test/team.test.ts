@@ -115,7 +115,10 @@ test('a team relay signs in members, stamps who sent each request and records ow
     assert.equal((await relay.hello({role:'phone',token:MAIN})).code,4401);
     const pcA=await relay.connector('pc-a',request=>request.action==='session.create'?{state:'accepted',threadId:'thread-1'}
       :request.action==='sessions.list'?{data:[{id:'thread-1',title:'Fix login',updatedAt:1},{id:'thread-2',title:'Desktop chat',updatedAt:2}]}
-      :request.action==='session.read'?{id:request.payload.threadId,turns:[]}:{state:'accepted'});
+      :request.action==='session.read'?{id:request.payload.threadId,turns:[]}
+      :request.action==='sync.open'?{epoch:'e1',seq:0,head:{id:request.payload.threadId,title:'Fix login'},order:[],entries:[],hasMore:false}
+      :request.action==='turn.send'&&request.payload.fail?{state:'failed',error:{message:'boom'}}
+      :{state:'accepted'});
     await relay.connector('pc-b');
 
     const adaInvite=store.createInvite(owner.id,null);
@@ -142,15 +145,33 @@ test('a team relay signs in members, stamps who sent each request and records ow
     assert.deepEqual(read.result.owner,{id:member.id,name:'Bo'});
     assert.deepEqual(read.result.lastSender,{id:member.id,name:'Bo'});
 
+    // A failed send does not replace the last sender; sync.open puts owner and lastSender into `head`.
+    await relay.request(ada.ws,'pc-a','turn.send',{threadId:'thread-1',fail:true});
+    const synced=await relay.request(ada.ws,'pc-a','sync.open',{service:'codex',threadId:'thread-1'});
+    assert.deepEqual(synced.result.head.owner,{id:member.id,name:'Bo'});
+    assert.deepEqual(synced.result.head.lastSender,{id:member.id,name:'Bo'});
+
+    // Every member can fetch the active roster for sidebar filtering; only admins see full member management.
+    const roster=await relay.team(bo.ws,'team.roster');
+    assert.deepEqual(roster.result.members.map((item:any)=>item.name),['Ada','Bo']);
+
     const activity=await relay.team(ada.ws,'team.activity');
-    assert.deepEqual(activity.result.entries.map((entry:any)=>[entry.userName,entry.action,entry.threadId,entry.state]),[['Bo','session.create','thread-1','accepted']]);
+    assert.deepEqual(activity.result.entries.map((entry:any)=>[entry.userName,entry.action,entry.threadId,entry.threadTitle,entry.state]),[
+      ['Ada','turn.send','thread-1','Fix login','failed'],
+      ['Bo','session.create','thread-1','Fix login','accepted'],
+    ]);
+    assert.deepEqual(activity.result.members.map((item:any)=>item.name),['Ada','Bo']);
+    const onlyBo=await relay.team(ada.ws,'team.activity',{userId:member.id,machineId:'pc-a'});
+    assert.equal(onlyBo.result.entries.length,1);
+    assert.equal(onlyBo.result.entries[0].userName,'Bo');
     assert.equal((await relay.team(bo.ws,'team.members.list')).error.code,'forbidden');
     assert.equal((await relay.team(bo.ws,'team.activity')).result.entries.length,1,'members see their own activity');
 
-    // Disabling a member closes their devices at once.
+    // Disabling a member closes their devices at once and removes them from the active roster.
     const closed=once(bo.ws,'close');
     assert.equal((await relay.team(ada.ws,'team.members.update',{userId:member.id,status:'disabled'})).result.user.status,'disabled');
     assert.equal((await closed)[0],4401);
+    assert.deepEqual((await relay.team(ada.ws,'team.roster')).result.members.map((item:any)=>item.name),['Ada']);
   }finally{await relay.close();store.close();await removeTestTemp(dir);}
 });
 
@@ -232,4 +253,39 @@ test('the data channel signs in members by device and checks their computers on 
     store.revokeDevice(device.id);
     assert.equal((await file('pc-a')).status,403,'A removed device loses the channel at once.');
   }finally{await close();store.close();await removeTestTemp(dir);}
+});
+
+test('sidebar owner filtering, member colors, and other-owner composer hints behave predictably',async()=>{
+  const {filterThreadsByOwner,mergeMembers,otherOwnerHint,ownerColorIndex,ownerFilterLabel,parseOwnerFilter}=await import('../web/team.js');
+  const me={id:'u1',name:'Ada',role:'owner' as const};
+  const threads=[
+    {id:'t1',owner:{id:'u1',name:'Ada'}},
+    {id:'t2',owner:{id:'u2',name:'Bo'}},
+    {id:'t3',owner:null},
+    {id:'t4'},
+  ];
+  assert.equal(parseOwnerFilter(null,true),'mine');
+  assert.equal(parseOwnerFilter(null,false),'all');
+  assert.equal(parseOwnerFilter('member:u2',true),'member:u2');
+  assert.equal(parseOwnerFilter('local'),'local');
+  assert.equal(parseOwnerFilter('member:'),'all');
+
+  assert.deepEqual(filterThreadsByOwner(threads,me,'all').map(t=>t.id),['t1','t2','t3','t4']);
+  assert.deepEqual(filterThreadsByOwner(threads,me,'mine').map(t=>t.id),['t1','t4']);
+  assert.deepEqual(filterThreadsByOwner(threads,me,'member:u2').map(t=>t.id),['t2','t4']);
+  assert.deepEqual(filterThreadsByOwner(threads,me,'local').map(t=>t.id),['t3']);
+  assert.deepEqual(filterThreadsByOwner(threads,null,'mine').map(t=>t.id),['t1','t2','t3','t4']);
+
+  const merged=mergeMembers([{id:'u1',name:'Ada'}],threads);
+  assert.deepEqual(merged,[{id:'u1',name:'Ada'},{id:'u2',name:'Bo'}]);
+  assert.equal(ownerFilterLabel('member:u2',me,merged),'Bo');
+  assert.equal(ownerFilterLabel('local',me,merged),'电脑本机');
+
+  const slot=ownerColorIndex('u1');
+  assert.ok(slot>=0&&slot<8&&Number.isInteger(slot));
+  assert.equal(ownerColorIndex('u1'),slot);
+
+  assert.equal(otherOwnerHint({id:'u2',name:'Bo'},'u1','在 Mac 上继续…'),'Bo 的会话 · 在 Mac 上继续…');
+  assert.equal(otherOwnerHint({id:'u1',name:'Ada'},'u1','在 Mac 上继续…'),'在 Mac 上继续…');
+  assert.equal(otherOwnerHint(null,'u1','在 Mac 上继续…'),'在 Mac 上继续…');
 });

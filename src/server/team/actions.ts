@@ -101,6 +101,8 @@ export function handleTeam(store: TeamStore, me: Member, action: string, p: Json
   switch (action) {
     case 'team.me':
       return {result: {user: publicUser(self), device: me.device}};
+    case 'team.roster':
+      return {result: {members: store.users().filter(user => user.status === 'active').map(user => ({id: user.id, name: user.name}))}};
     case 'team.devices.list': {
       const userId = p.userId === undefined ? self.id : String(p.userId);
       if (userId !== self.id) requireAdmin(self);
@@ -179,7 +181,9 @@ export function handleTeam(store: TeamStore, me: Member, action: string, p: Json
     case 'team.activity': {
       const userId = isAdmin(self) ? (typeof p.userId === 'string' ? p.userId : undefined) : self.id;
       const machineId = typeof p.machineId === 'string' ? p.machineId : undefined;
-      return {result: {entries: store.activity({userId, machineId, before: Number(p.before) || undefined, limit: Number(p.limit) || undefined})}};
+      const members = isAdmin(self) ? store.users().map(user => ({id: user.id, name: user.name})) : [{id: self.id, name: self.name}];
+      const machines = store.machines().filter(machine => store.canUse(self, machine.id)).map(machine => ({id: machine.id, name: context.online.get(machine.id) || machine.name}));
+      return {result: {entries: store.activity({userId, machineId, before: Number(p.before) || undefined, limit: Number(p.limit) || undefined}), members, machines}};
     }
     default:
       throw new TeamError('unsupported', '中继暂不支持此团队操作，请更新中继');

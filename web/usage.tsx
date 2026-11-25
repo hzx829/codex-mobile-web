@@ -115,6 +115,7 @@ export function UsagePanel({team,admin}:{team:TeamCall;admin:boolean}){
       {days.length>1&&rows.length>0&&<DailyChart days={days} totals={byDay}/>}
       {!rows.length&&<p className="muted">这段时间还没有记录。连接器更新后，新完成的每一轮会记在发起它的成员名下。</p>}
       {admin&&!member&&<UsageTable title="按成员" first="成员" rows={groupUsage(rows,row=>memberName(row.userId))}/>}
+      {(report.machines.length>1||new Set(rows.map(row=>row.machineId)).size>1)&&<UsageTable title="按电脑" first="电脑" rows={groupUsage(rows,row=>machines.get(row.machineId)||row.machineId)}/>}
       <UsageTable title="按应用和模型" first="应用 · 模型" rows={groupUsage(rows,row=>`${SERVICES[row.service]||row.service}${row.model?` · ${row.model}`:''}`)}/>
       <p className="muted">输入含缓存命中；Antigravity 不提供 token 数，只计轮次。用订阅账号登录的电脑，额度由全员共用。</p>
       {rows.length>0&&<button type="button" className="text-button" onClick={exportCsv}>导出 CSV</button>}

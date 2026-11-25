@@ -26,7 +26,8 @@ import {Icon} from './icons';
 import {useStableEvent} from './use-event';
 import {operationId} from './client';
 import type {AntigravityBackgroundTask,ApprovalRequest,Json,QueuedMessage,RequestAction} from '../src/shared/types';
-import {SenderScope} from './senders';
+import {SenderScope,useCurrentMemberId} from './senders';
+import {otherOwnerHint} from './team';
 import {useTurnNotice,watchWhileHidden} from './turn-notify';
 
 const IMAGES_BLOCKED='请更新这台电脑上的连接器后再给 Antigravity 发送图片。';
@@ -517,8 +518,10 @@ export function AntigravityPanel(props:Props){
   const effectiveMode=view?.permissionMode||view?.defaultPermissionMode||defaultMode||'AGENT_PERMISSION_PRESET_DEFAULT';
   const chosen=projects?.find(item=>item.id===target);
   const projectName=(item:{path:string;name?:string})=>item.name||workspaceName(item.path);
+  const meId=useCurrentMemberId();
   return <main className="thread-panel" inert={inert}>
-    <ThreadHeader title={creating?'新的 Antigravity 对话':view?.title||'正在打开…'} project={creating?(chosen?projectName(chosen):'选择项目'):view?.cwd?workspaceName(view.cwd):'Antigravity'} machineName={props.machineName} connected={connected} back={()=>go('')}>
+    <ThreadHeader title={creating?'新的 Antigravity 对话':view?.title||'正在打开…'} project={creating?(chosen?projectName(chosen):'选择项目'):view?.cwd?workspaceName(view.cwd):'Antigravity'} machineName={props.machineName} connected={connected} back={()=>go('')}
+      owner={creating?null:view?.owner} lastSender={creating?null:view?.lastSender} meId={meId}>
       {!creating&&<IconButton icon="refresh" label="刷新会话" disabled={!connected||busy} onClick={()=>void refresh()}/>}
     </ThreadHeader>
     <div className={`timeline ${creating&&!pendingShown?'is-empty':''}`} ref={scroll} onScroll={trackScroll}><div className="timeline-content">
@@ -550,7 +553,7 @@ export function AntigravityPanel(props:Props){
         onWithdraw={withdrawQueued}
         onCancel={queuedId=>void queueAction('antigravity.cancelQueued',{conversationId,queuedId},()=>setNotice('已删除排队消息'))}/>}
       <Composer attachments={attachments} input={composer} draft={draft} edit={edit} maxLength={50_000} readOnly={Boolean(pending)} submit={()=>void mutate('send')}
-        placeholder={creating?'想让 Antigravity 做什么？':queueNext?'当前任务完成后发送…':view?.running?'当前任务结束后可发送':`在 ${props.machineName} 上继续…`}
+        placeholder={creating?'想让 Antigravity 做什么？':otherOwnerHint(view?.owner,meId,queueNext?'当前任务完成后发送…':view?.running?'当前任务结束后可发送':`在 ${props.machineName} 上继续…`)}
         locked={busy||Boolean(pending)} showImage={props.showImage} uploadProgress={uploadProgress}
         voice={voice} voiceMode={props.voiceMode} voiceDisabled={busy||Boolean(pending)} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
         add={()=>setAdding(true)} addDisabled={busy||Boolean(pending)||attachments.loading}

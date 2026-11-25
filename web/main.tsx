@@ -50,7 +50,7 @@ import {defaultVoiceProvider,loadVoiceChoice,resolveVoiceProvider,voiceEngineKey
 import {useVoiceInput} from './use-voice-input';
 import {useStableEvent} from './use-event';
 import {notifyHint,notifyLabel,notifyState,toggleNotify,useTurnNotice,watchWhileHidden,type NotifyState} from './turn-notify';
-import {TeamPanel,type TeamUser} from './team';
+import {filterThreadsByOwner,IdentityButton,isTeamAdmin,mergeMembers,otherOwnerHint,OwnerFilterBar,ownerFilterLabel,parseOwnerFilter,TeamPanel,type OpenActivityThread,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -88,13 +88,11 @@ const savedLocation=initialLocation();
 const listKey=(machine:string,project:string,archived:boolean)=>`${machine}:${project}:${archived?'archived':'recent'}`;
 type PreviewTab={id:number;target:PreviewTarget};
 type Sheet='home'|'computer'|'projects'|'add'|'file'|'browser'|'voice'|'claude-project'|'team'|null;
-/** Sessions another member started; the filter keeps those of `me` and leaves lists without owners as they are. */
-const ownedBy=(threads:Json[],me:TeamUser|null,onlyMine:boolean)=>me&&onlyMine?threads.filter(thread=>!('owner' in thread)||thread.owner?.id===me.id):threads;
-
 function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
   // The signed-in member once the relay has a team; null with the shared Token.
-  const [me,setMe]=useState<TeamUser|null>(null),[onlyMine,setOnlyMine]=useState(()=>load('only-mine',false)===true),teamDevice=useRef('');
+  const [me,setMe]=useState<TeamUser|null>(null),[roster,setRoster]=useState<TeamMemberRef[]>([]),[ownerFilter,setOwnerFilterState]=useState<OwnerFilter>(()=>parseOwnerFilter(load('owner-filter',null),load('only-mine',false)===true)),teamDevice=useRef('');
+  const setOwnerFilter=(next:OwnerFilter)=>{setOwnerFilterState(next);save('owner-filter',next);save('only-mine',next==='mine');};
   const [status,setStatus]=useState('connecting'),[machines,setMachines]=useState<Machine[]>([]),[machine,setMachine]=useState(savedLocation.machine);
   const [route,setRoute]=useState<Route>(savedLocation.route),[sheet,setSheet]=useState<Sheet>(null);
   const [remoteListRevision,refreshRemoteList]=useState(0);
@@ -286,6 +284,13 @@ function App(){
     const stopStatus=c.onStatus(online=>{for(const listener of syncBus.current.status)listener(online);});
     return()=>{stopSync();stopStatus();c.close();clearTimeout(refreshTimer.current);cancelAnimationFrame(liveFrame.current);liveFrame.current=0;liveFrames.current=[];};
   },[token]);
+  const teamSheetOpen=sheet==='team';
+  useEffect(()=>{
+    if(!me||status!=='online'||!client.current||teamSheetOpen)return;
+    let alive=true;
+    client.current.team('team.roster').then(result=>{if(alive&&Array.isArray(result?.members))setRoster(result.members);}).catch(()=>{});
+    return()=>{alive=false;};
+  },[me?.id,status,teamSheetOpen]);
   useEffect(()=>client.current?.onPreview(message=>{
     if(message.type==='preview.disconnected'||message.type==='preview.ended'&&message.sessionId===browserState?.sessionId){setBrowserSession(null);setPreviewState(old=>{const tabs=old.tabs.filter(tab=>tab.target.kind!=='web');return {tabs,activeId:tabs.some(tab=>tab.id===old.activeId)?old.activeId:tabs.at(-1)?.id??null};});}
   }),[token,browserState?.sessionId]);
@@ -584,7 +589,7 @@ function App(){
   function logout(){
     // A member signing out also removes this device, so its token stops working everywhere.
     if(me&&teamDevice.current&&client.current?.ready)void client.current.team('team.devices.revoke',{deviceId:teamDevice.current}).catch(()=>{});
-    client.current?.close();save('connection','');setMe(null);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);clearDraftAttachments();void clearCache();void clearThreadStore();changeMachine('');}
+    client.current?.close();save('connection','');setMe(null);setRoster([]);teamDevice.current='';setToken('');setView(null);setInfo(null);setMachines([]);setOptimistic(null);clearDraftAttachments();void clearCache();void clearThreadStore();changeMachine('');}
   async function copyText(text:string){
       if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text);
       else {
@@ -609,7 +614,7 @@ function App(){
   function openThreadMenu(element:HTMLElement){
     if(!selected)return;
     const row:Json|undefined=sessions.find(s=>s.id===selected)||preferences[selected]?.thread;
-    const thread={...row,id:selected,title:view?.title||row?.title||'会话',cwd:view?.cwd||row?.cwd||project,status:view?.running?{type:'active'}:row?.status};
+    const thread={...row,id:selected,title:view?.title||row?.title||'会话',cwd:view?.cwd||row?.cwd||project,owner:view?.owner??row?.owner??null,status:view?.running?{type:'active'}:row?.status};
     setThreadMenu({thread,point:headerPoint(element),machine,archived,compact:true});
   }
   function changePreference(id:string,patch:ThreadPreference,thread?:Json){
@@ -651,7 +656,8 @@ function App(){
   const pendingShown=optimistic&&optimistic.key===scope&&!optimisticDelivered(optimistic,view)?optimistic:null;
   const attachmentCount=images.length+files.length,selectedImageBytes=images.reduce((sum,url)=>sum+imageBytes(url),0);
   const effortLabel=reasoningLabel(selection.effort),sending=busy&&(Boolean(uploadProgress)||pending?.action==='turn.send'||pending?.action==='session.create');
-  const listedThreads=useMemo(()=>ownedBy(visibleThreads(sessions,preferences,project,archived,searchQuery),me,onlyMine),[sessions,preferences,project,archived,searchQuery,me,onlyMine]);
+  const codexMembers=useMemo(()=>mergeMembers(roster,sessions),[roster,sessions]);
+  const listedThreads=useMemo(()=>filterThreadsByOwner(visibleThreads(sessions,preferences,project,archived,searchQuery),me,ownerFilter),[sessions,preferences,project,archived,searchQuery,me,ownerFilter]);
   const visibleTitle=newChat?'新聊天':view?.title||sessions.find(s=>s.id===selected)?.title||'正在打开…';
   const conversationCopy=useStableEvent((text:string)=>void copyText(text).then(()=>setNotice('已复制文字')).catch(()=>setError('复制失败，请长按选择文字')));
   const conversationEdit=useStableEvent((turnId:string,itemId:string,text:string)=>editTurn(mutate,target(),{turnId,itemId,text},{model,effort,approvalPolicy:approval,serviceTier}));
@@ -704,9 +710,28 @@ function App(){
     <button className="primary" onClick={()=>setSheet(null)}>完成</button>
   </>;
   const teamItems=me&&<><MenuItem icon="team" onClick={()=>setSheet('team')}>团队<span className="menu-detail">{me.name}</span></MenuItem>
-    <MenuItem icon="chat" onClick={()=>{setOnlyMine(!onlyMine);save('only-mine',!onlyMine);setSheet(null);}}>只看我的会话{onlyMine&&<Icon name="check" size={18}/>}</MenuItem></>;
+    <MenuItem icon="chat" onClick={()=>{setOwnerFilter(ownerFilter==='mine'?'all':'mine');setSheet(null);}}>只看我的会话{ownerFilter==='mine'&&<Icon name="check" size={18}/>}</MenuItem></>;
+  const openActivityThread:OpenActivityThread=target=>{
+    setSheet(null);
+    const next:Route=target.service==='codex'?{...home,thread:target.threadId}:withConversation(serviceHome(target.service),target.threadId);
+    if(target.machineId!==machine){
+      closeBrowser();closePreview();infoSequence.current++;listLoader.current.invalidate();setListBusy(false);setInfo(null);setProjects([]);setSessions([]);setSearch('');setSearchQuery('');setArchived(false);setNewCwd('');
+      history.pushState({cmwRoute:next,cmwMachine:target.machineId},'',location.pathname);rememberLocation(next,target.machineId);setMachine(target.machineId);setRoute(next);
+    }else navigate(next);
+  };
+  async function claimOwner(targetMachine:string,targetService:Service,threadId:string,userId:string|null){
+    if(!client.current)throw new Error('尚未连接中继');
+    await client.current.team('team.threads.claim',{machineId:targetMachine,service:targetService,threadId,userId});
+    const nextOwner=userId?codexMembers.find(item=>item.id===userId)||roster.find(item=>item.id===userId)||null:null;
+    if(targetService==='codex'&&targetMachine===machine){
+      setSessions(old=>old.map(item=>item.id===threadId?{...item,owner:nextOwner}:item));
+      setView(old=>old&&old.id===threadId?{...old,owner:nextOwner}:old);
+      listLoader.current.invalidate();void list();
+    }else refreshRemoteList(value=>value+1);
+  }
+  const identityButton=me&&<IdentityButton me={me} onClick={()=>setSheet('team')}/>;
   const teamPanel=me&&<TeamPanel me={me} team={(action,payload)=>client.current?client.current.team(action,payload):Promise.reject({message:'尚未连接中继'})} logout={logout} copy={copyText}
-    machines={new Map(machines.map(item=>[item.id,computerName(item)]))}/>;
+    machines={new Map(machines.map(item=>[item.id,computerName(item)]))} onOpenThread={openActivityThread}/>;
   const fileOptions=<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>;
   if(service==='antigravity'||service==='claude'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
@@ -727,14 +752,17 @@ function App(){
     return <SenderRoot me={me?.id}><div className={`shell ${id||creatingClaude||creatingAntigravity?'has-session':''}`}>
       <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
+        identity={identityButton} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
+        claimOwner={isTeamAdmin(me)?(threadId,userId)=>claimOwner(machine,service,threadId,userId):undefined}
         revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
-        listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>ownedBy(threads,me,onlyMine)} action={service==='claude'&&route.project?
+        listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>filterThreadsByOwner(threads,me,ownerFilter)} action={service==='claude'&&route.project?
           <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
         onNew={()=>{if(id||!route.newChat)navigate({...withConversation(route,''),newChat:true});}}
         chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} showPage={showPage} previewError={error}
         machine={machine} guest={guest} newCwd={creatingClaude?route.project:null} created={created} forked={forked}
         showDiff={turn=>{if(turn.diff)showPreview({kind:'diff',threadId:`claude:${id}`,turnId:turn.id,text:turn.diff});}} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')} actions={claudeActions}
+        claim={isTeamAdmin(me)&&id?{members:roster,assign:userId=>claimOwner(machine,'claude',id,userId)}:undefined}
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         machineName={machineName} connected={connected} conversationId={id} call={call} go={open} sync={connectorHas(activeMachine,'sync.claude')?syncLink:undefined}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
@@ -764,14 +792,15 @@ function App(){
   }
   return <SenderRoot me={me?.id}><div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>
-      <HomeHeader project={projectName(project)} machineName={machineName} connected={connected} relayOnline={status==='online'} back={backToProjects} backDisabled={busy} chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
+      <HomeHeader project={projectName(project)} machineName={machineName} connected={connected} relayOnline={status==='online'} identity={identityButton} back={backToProjects} backDisabled={busy} chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
       {!project&&!archived&&!searchQuery&&switcher}
       <div className="home-content">
         {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
+        {me&&<OwnerFilterBar me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>}
         <section className="recent-section">{!listedThreads.length&&<h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2>}{groupThreads(listedThreads,preferences,searchQuery?'搜索结果':archived?'归档会话':'最近').map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
           time={relativeTime(s.updatedAt)} activeLabel="进行中" active={connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?view.running:s.status?.type==='active')}
           open={()=>{changePreference(s.id,{unread:false});navigate({...route,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
-          {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}
+          {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}
           {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
         </section>
       </div>
@@ -779,7 +808,8 @@ function App(){
     </aside>
 
     <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
-      <ThreadHeader title={visibleTitle} project={projectName(newChat?newCwd:view?.cwd||project)||'项目'} machineName={machineName} connected={connected} back={backToSessions} backDisabled={busy} onTitle={element=>newChat?setSheet('projects'):openStatus(element)}>
+      <ThreadHeader title={visibleTitle} project={projectName(newChat?newCwd:view?.cwd||project)||'项目'} machineName={machineName} connected={connected} back={backToSessions} backDisabled={busy} onTitle={element=>newChat?setSheet('projects'):openStatus(element)}
+        owner={newChat?null:view?.owner} lastSender={newChat?null:view?.lastSender} meId={me?.id}>
         <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button>
       </ThreadHeader>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
@@ -802,7 +832,7 @@ function App(){
           attachmentsFull={message=>attachmentCount+message.imageCount+(message.fileNames?.length||0)>MAX_ATTACHMENTS||selectedImageBytes+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
           onSteer={queuedId=>void mutate('turn.steerQueued',{...target(),queuedId})} onWithdraw={queuedId=>void mutate('turn.withdrawQueued',{threadId:selected,queuedId})} onCancel={queuedId=>void mutate('turn.cancelQueued',{threadId:selected,queuedId})}/>}
         <Composer attachments={attachments} input={composer} draft={draft} edit={editDraft} readOnly={busy} submit={()=>void submit()}
-          placeholder={queueNext?'当前任务完成后发送…':newChat||!view?.turns.length?'接下来我们该写什么代码？':`在 ${machineName} 上继续…`}
+          placeholder={newChat?'接下来我们该写什么代码？':otherOwnerHint(view?.owner,me?.id,queueNext?'当前任务完成后发送…':!view?.turns.length?'接下来我们该写什么代码？':`在 ${machineName} 上继续…`)}
           locked={busy} showImage={(url,title)=>showPreview({kind:'image',url,title})} uploadProgress={uploadProgress}
           voice={voice} voiceMode={voiceMode} voiceDisabled={busy} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
           add={()=>setSheet('add')} addDisabled={busy||imageLoading}
@@ -814,7 +844,9 @@ function App(){
       </div>
     </>}</main>
 
-     {threadMenu&&threadMenu.machine===machine&&<ThreadMenu key={`${machine}:${threadMenu.thread.id}`} thread={threadMenu.thread} point={threadMenu.point} preference={preferences[threadMenu.thread.id]||{}} sections={[...new Set(Object.values(preferences).map(p=>p.section).filter((s):s is string=>Boolean(s)))]} archived={threadMenu.archived} compact={threadMenu.compact} connected={connected} close={()=>setThreadMenu(current=>current===threadMenu?null:current)} change={patch=>changePreference(threadMenu.thread.id,patch,threadMenu.thread)} copy={()=>copyText(threadMenu.thread.id)} rename={name=>changeThread('session.rename',threadMenu.thread,{name})} archive={()=>changeThread(threadMenu.archived?'session.unarchive':'session.archive',threadMenu.thread)} openPreview={threadMenu.compact?()=>setSheet('browser'):undefined}/>}
+     {threadMenu&&threadMenu.machine===machine&&<ThreadMenu key={`${machine}:${threadMenu.thread.id}`} thread={threadMenu.thread} point={threadMenu.point} preference={preferences[threadMenu.thread.id]||{}} sections={[...new Set(Object.values(preferences).map(p=>p.section).filter((s):s is string=>Boolean(s)))]} archived={threadMenu.archived} compact={threadMenu.compact} connected={connected}
+       teamMode={Boolean(me)} claim={isTeamAdmin(me)?{members:codexMembers,assign:userId=>claimOwner(machine,'codex',threadMenu.thread.id,userId)}:undefined}
+       close={()=>setThreadMenu(current=>current===threadMenu?null:current)} change={patch=>changePreference(threadMenu.thread.id,patch,threadMenu.thread)} copy={()=>copyText(threadMenu.thread.id)} rename={name=>changeThread('session.rename',threadMenu.thread,{name})} archive={()=>changeThread(threadMenu.archived?'session.unarchive':'session.archive',threadMenu.thread)} openPreview={threadMenu.compact?()=>setSheet('browser'):undefined}/>}
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
      {permissionPoint&&<PermissionPicker anchor={permissionButton.current} point={permissionPoint} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} title="许可" disabled={busy} onChange={setApproval} close={()=>setPermissionPoint(null)}/>}
      {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}

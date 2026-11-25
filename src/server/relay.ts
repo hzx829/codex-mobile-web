@@ -126,8 +126,14 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
       }
       const read=READ_ACTIONS.has(r.action)&&result&&typeof result==='object'?threadOf(r.payload):undefined;
       if(read){
-        result.owner=team.owners(r.machineId,service,[read]).get(read)??null;
-        result.lastSender=team.lastSender(r.machineId,service,read,SEND_ACTIONS)??null;
+        const owner=team.owners(r.machineId,service,[read]).get(read)??null;
+        const lastSender=team.lastSender(r.machineId,service,read,SEND_ACTIONS)??null;
+        result.owner=owner;
+        result.lastSender=lastSender;
+        if(r.action==='sync.open'&&result.head&&typeof result.head==='object'){
+          result.head.owner=owner;
+          result.head.lastSender=lastSender;
+        }
       }
       if(SENDER_ACTIONS.has(r.action)&&result&&typeof result==='object')refreshSenderNames(team,result);
     }catch(error){console.error('团队记录写入失败：',(error as Error).message);}

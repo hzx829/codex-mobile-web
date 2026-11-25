@@ -24,7 +24,8 @@ import {SheetPanel} from './sheet';
 import {uploadAttachments,type UploadProgress} from './file-upload';
 import {MAX_IMAGES,MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import type {ApprovalRequest,Json,QueuedMessage,RequestAction,SessionView,TurnView} from '../src/shared/types';
-import {SenderScope} from './senders';
+import {SenderScope,useCurrentMemberId} from './senders';
+import {otherOwnerHint,type TeamMemberRef} from './team';
 import {useTurnNotice,watchWhileHidden} from './turn-notify';
 import {paneActions,pageToRestore,savedPage,type PaneAction} from './artifact-pane';
 import {cachedView,rememberView,threadKey} from './session-cache';
@@ -47,6 +48,8 @@ type Props={
   showDiff:(turn:TurnView)=>void;voiceMode:VoiceProvider;actions?:(thread:Json)=>ThreadActions;
   /** Opens the voice input settings, shared with the other apps. */
   chooseVoice:()=>void;
+  /** Admin-only action to assign or clear this conversation's owner. */
+  claim?:{members:TeamMemberRef[];assign:(userId:string|null)=>Promise<void>};
 };
 const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
 const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:TurnView)=>turn.items.filter(item=>item.role==='user').map(item=>item.id)):[];
@@ -388,8 +391,10 @@ export function ClaudeCodePanel(props:Props){
   const nextStep=!creating&&!running&&!outgoing&&lastTurn?.status==='completed'&&lastTurn.nextStep&&closedNext!==lastTurn.id&&load(nextKey)!==lastTurn.id?lastTurn.nextStep:undefined;
   // Claude Code's guess at the next prompt, offered while the composer is empty.
   const suggestion=!creating&&!running&&!queued.length&&typeof view?.suggestion==='string'?view.suggestion:'';
+  const meId=useCurrentMemberId();
   return <main className="thread-panel" inert={inert}>
-    <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}>
+    <ThreadHeader title={title} project={project} machineName={machineName} connected={connected} back={()=>go('')}
+      owner={creating?null:view?.owner} lastSender={creating?null:view?.lastSender} meId={meId}>
       {!creating&&<>
         <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文" disabled={!view} onClick={e=>setStatusPoint(headerPoint(e.currentTarget))}><ContextIndicator usage={view?.contextUsage}/></button>
         <button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" title="会话操作" disabled={!view} onClick={e=>setMenuPoint(headerPoint(e.currentTarget))}><Icon name="more"/></button>
@@ -432,7 +437,7 @@ export function ClaudeCodePanel(props:Props){
         onNow={queuedId=>void mutate('claude.steerQueued',{conversationId,queuedId,mode:'now'},result=>setNotice(result.kind==='sent_now'?'已立即发送':'已追加到当前任务'))}
         onWithdraw={withdrawQueued} onCancel={queuedId=>void mutate('claude.cancelQueued',{conversationId,queuedId},()=>setNotice('已删除排队消息'))}/>}
       <Composer attachments={attachments} input={composer} draft={draft} edit={edit} maxLength={100_000} readOnly={Boolean(pending)} submit={()=>void send()}
-        placeholder={creating?'想让 Claude Code 做什么？':queueNext?'当前任务完成后发送…':`在 ${machineName} 上继续…`}
+        placeholder={creating?'想让 Claude Code 做什么？':otherOwnerHint(view?.owner,meId,queueNext?'当前任务完成后发送…':`在 ${machineName} 上继续…`)}
         suggestion={suggestion} locked={busy} showImage={showImage} uploadProgress={uploadProgress}
         voice={voice} voiceMode={props.voiceMode} voiceDisabled={busy} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
         add={()=>setAdding(true)} addDisabled={!canWrite||attachments.loading}
@@ -453,7 +458,8 @@ export function ClaudeCodePanel(props:Props){
         voiceLabel={voiceProviderLabel(props.voiceMode)} chooseVoice={()=>{setAdding(false);props.chooseVoice();}}
         projectFiles={creating?undefined:()=>{setAdding(false);showFiles();}} refresh={creating?undefined:()=>{setAdding(false);void refresh();}}/>
     </SheetPanel>}
-    {menuPoint&&view&&<ThreadMenu thread={{id:conversationId,title:view.title,status:running?{type:'active'}:undefined}} point={menuPoint} preference={{}} sections={[]} archived={false} compact connected={connected}
+    {menuPoint&&view&&<ThreadMenu thread={{id:conversationId,title:view.title,owner:view.owner,status:running?{type:'active'}:undefined}} point={menuPoint} preference={{}} sections={[]} archived={false} compact connected={connected}
+      teamMode={Boolean(meId)} claim={props.claim?{members:props.claim.members,assign:async userId=>{await props.claim!.assign(userId);const nextOwner=userId?props.claim!.members.find(item=>item.id===userId)||null:null;setView(old=>old?{...old,owner:nextOwner}:old);}}:undefined}
       close={()=>setMenuPoint(null)} copy={()=>copyText(conversationId)} {...(props.actions?.({id:conversationId,title:view.title})||{})}/>}
     {statusPoint&&view&&<ThreadStatusPanel point={statusPoint} view={{...view,source:'connector'} as unknown as SessionView} threadId={conversationId} cwd={view.cwd} connected={connected} close={()=>setStatusPoint(null)}
       copy={()=>copyText(conversationId)} read={async()=>({threadId:conversationId,limits:[],limitsNotice:'Claude Code 不提供额度信息，可在电脑上运行 /usage 查看'})}/>}

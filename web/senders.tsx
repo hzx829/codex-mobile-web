@@ -23,6 +23,9 @@ export function SenderScope({senders,children}:{senders:(TeamMember|undefined)[]
   return <SenderContext.Provider value={value}>{children}</SenderContext.Provider>;
 }
 
+/** The signed-in team member's ID, or null in single-token mode. */
+export function useCurrentMemberId(){return useContext(SenderContext).me;}
+
 /** "我" or the member's name above a message sent from a phone; nothing for messages typed on the computer. */
 export function SenderLabel({sender}:{sender?:TeamMember}){
   const {me,shown}=useContext(SenderContext);
