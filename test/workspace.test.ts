@@ -229,6 +229,42 @@ test('createProjectsHandler registers all enabled services by default, reports p
     assert.equal(failedExisting.state, 'failed');
     assert.match(failedExisting.error.message, /未能创建项目/);
     assert.equal((await stat(join(existingDir, 'README.md'))).isFile(), true);
+
+    // 5. Unified projects.update and projects.remove with opId idempotency
+    const manageCalls: string[] = [];
+    let manageChanges = 0;
+    const manageHandle = createProjectsHandler({
+      workspace,
+      ledger,
+      availableServices: ['codex', 'claude'],
+      registrars: {},
+      updaters: {
+        codex: async (_op, input) => {
+          manageCalls.push(`update:codex:${input.id}:${input.name}`);
+          return {project: {id: input.id || 'p1', name: input.name, path: input.path || existingDir}};
+        },
+      },
+      removers: {
+        claude: async input => {
+          manageCalls.push(`remove:claude:${input.path}`);
+          return {removed: true};
+        },
+      },
+      onChanged: () => { manageChanges++; },
+    });
+    const updOp = opId();
+    const upd1 = await manageHandle('projects.update', {service: 'codex', id: 'p1', path: existingDir, name: 'Renamed', opId: updOp});
+    assert.equal(upd1.state, 'accepted');
+    assert.equal(upd1.project.name, 'Renamed');
+    const upd2 = await manageHandle('projects.update', {service: 'codex', id: 'p1', path: existingDir, name: 'Renamed', opId: updOp});
+    assert.deepEqual(upd2, upd1);
+    assert.equal(manageCalls.length, 1);
+
+    const rem = await manageHandle('projects.remove', {service: 'claude', path: existingDir, opId: opId()});
+    assert.equal(rem.state, 'accepted');
+    assert.equal(rem.removed, true);
+    assert.equal(manageChanges, 2);
+    await assert.rejects(() => manageHandle('projects.update', {service: 'claude', path: existingDir, name: 'X', opId: opId()}), /暂不支持修改/);
   } finally {
     ledger.close();
     await removeTestTemp(sandbox);

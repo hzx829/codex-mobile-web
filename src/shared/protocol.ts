@@ -40,6 +40,8 @@ export const CONNECTOR_FEATURES = [
   'blob.image',
   /** Supports creating and browsing projects across enabled services (`projects.roots`, `projects.browse`, `projects.create`). */
   'projects.create',
+  /** Supports renaming and removing projects across enabled services (`projects.update`, `projects.remove`). */
+  'projects.manage',
 ] as const;
 export type ConnectorFeature = typeof CONNECTOR_FEATURES[number];
 

@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { BridgeError, type Json, type UsageEvent } from '../shared/types.js';
+import { projectPathKey } from '../shared/project-paths.js';
 import type {FileAttachment} from '../shared/attachments.js';
 import { textKey, type SenderRecord } from './message-senders.js';
 
@@ -94,7 +95,8 @@ export class Ledger {
     this.db.exec(`CREATE TABLE IF NOT EXISTS message_senders (seq INTEGER PRIMARY KEY AUTOINCREMENT, service TEXT NOT NULL, thread_id TEXT NOT NULL,
         turn_id TEXT, kind TEXT NOT NULL, text_hash TEXT, user_id TEXT NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS message_senders_thread ON message_senders(service, thread_id, seq);
-      CREATE TABLE IF NOT EXISTS claude_registered_projects (path TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS claude_registered_projects (path TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS hidden_projects (service TEXT NOT NULL, path_key TEXT NOT NULL, path TEXT NOT NULL, hidden_at INTEGER NOT NULL, PRIMARY KEY (service, path_key));`);
     this.db.prepare('DELETE FROM message_senders WHERE created < ?').run(Date.now()-400*86400_000);
     this.db.exec("UPDATE operations SET state='uncertain' WHERE state='pending';");
     this.db.prepare(`DELETE FROM operations WHERE updated < ? ${QUEUE_TABLES.map(table=>`AND id NOT IN (SELECT id FROM ${table})`).join(' ')}`).run(Date.now()-7*86400_000);
@@ -141,6 +143,25 @@ export class Ledger {
   }
   registerClaudeProject(path:string,name:string) {
     this.db.prepare('INSERT INTO claude_registered_projects (path,name,created_at) VALUES (?,?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name').run(path,name,Date.now());
+    this.unhideProject('claude',path);
+  }
+  removeClaudeProject(path:string) {
+    const key=projectPathKey(path);
+    const rows=this.db.prepare('SELECT path FROM claude_registered_projects').all();
+    for(const row of rows)if(projectPathKey(String(row.path))===key)this.db.prepare('DELETE FROM claude_registered_projects WHERE path=?').run(String(row.path));
+    this.hideProject('claude',path);
+  }
+  hideProject(service:string,path:string) {
+    const key=projectPathKey(path);
+    this.db.prepare('INSERT OR REPLACE INTO hidden_projects (service,path_key,path,hidden_at) VALUES (?,?,?,?)').run(service,key,path,Date.now());
+  }
+  unhideProject(service:string,path:string) {
+    const key=projectPathKey(path);
+    this.db.prepare('DELETE FROM hidden_projects WHERE service=? AND path_key=?').run(service,key);
+  }
+  hiddenProjects(service:string):Set<string> {
+    const rows=this.db.prepare('SELECT path_key FROM hidden_projects WHERE service=?').all(service);
+    return new Set(rows.map(row=>String(row.path_key)));
   }
   claudeProjects():{path:string;name:string;createdAt:number}[] {
     return this.db.prepare('SELECT path,name,created_at FROM claude_registered_projects ORDER BY created_at DESC, path ASC').all()

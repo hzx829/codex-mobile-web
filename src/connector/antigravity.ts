@@ -4,6 +4,7 @@ import {watch, type FSWatcher} from 'node:fs';
 import {open, readFile, readdir, stat} from 'node:fs/promises';
 import {dirname, isAbsolute, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {projectPathKey} from '../shared/project-paths.js';
 import {readProjectFile, downloadProjectFile, openProjectDownload} from './project.js';
 import {setTimeout as delay} from 'node:timers/promises';
 import {
@@ -1378,8 +1379,45 @@ export class AntigravityBridge {
         throw error;
       }
     }
+    this.ledger.unhideProject('antigravity', input.path);
     this.projectsCache = undefined;
     return {project: {id: folderUri, projectId, name, path: input.path, uri: folderUri}};
+  }
+
+  /** Renames an Antigravity project via Hub `UpdateProject` (or registers a DB-only folder first). */
+  async updateProject(opId: string, input: {id?: string; projectId?: string; path?: string; name: string}): Promise<{project: {id: string; projectId: string; name: string; path: string; uri: string}}> {
+    const name = textRequired(input.name, '项目名称', 80);
+    const resolvedPath = (typeof input.path === 'string' && input.path.trim()) || (typeof input.id === 'string' ? localWorkspace(input.id) : '');
+    const desktop = await this.desktopProjects();
+    const match = (typeof input.projectId === 'string' && input.projectId.trim() ? desktop.find(item => item.id === input.projectId!.trim()) : undefined)
+      || (resolvedPath ? desktop.find(item => !item.archived && sameFolder(item.path, resolvedPath)) : undefined)
+      || (resolvedPath ? desktop.find(item => sameFolder(item.path, resolvedPath)) : undefined);
+    if (match) {
+      await this.hub(this.daemonDir(), 'UpdateProject', {project: {id: match.id, name, archived: false}, rename: false});
+      this.ledger.unhideProject('antigravity', match.path);
+      this.projectsCache = undefined;
+      return {project: {id: match.uri, projectId: match.id, name, path: match.path, uri: match.uri}};
+    }
+    if (!resolvedPath) throw new BridgeError('not_found', '找不到该 Antigravity 项目');
+    return this.registerProject(opId, {name, path: resolvedPath});
+  }
+
+  /** Soft-archives/removes an Antigravity project via Hub `UpdateProject({archived: true})`, preserving folder and conversations. */
+  async removeProject(input: {id?: string; projectId?: string; path?: string}): Promise<{removed: true; notice?: string}> {
+    const resolvedPath = (typeof input.path === 'string' && input.path.trim()) || (typeof input.id === 'string' ? localWorkspace(input.id) : '');
+    const desktop = await this.desktopProjects();
+    const match = (typeof input.projectId === 'string' && input.projectId.trim() ? desktop.find(item => item.id === input.projectId!.trim()) : undefined)
+      || (resolvedPath ? desktop.find(item => !item.archived && sameFolder(item.path, resolvedPath)) : undefined);
+    if (match) {
+      await this.hub(this.daemonDir(), 'UpdateProject', {project: {id: match.id, archived: true}, rename: false});
+      this.ledger.hideProject('antigravity', match.path);
+      this.projectsCache = undefined;
+    } else if (resolvedPath) {
+      this.ledger.hideProject('antigravity', resolvedPath);
+    } else {
+      throw new BridgeError('not_found', '找不到该 Antigravity 项目');
+    }
+    return {removed: true, notice: '已从 Antigravity 项目列表移除（文件夹与对话记录均已保留）'};
   }
 
   /** Settings of the latest message in this project (else anywhere), which the desktop sends with every message. */
@@ -2103,12 +2141,14 @@ export class AntigravityBridge {
       const [named, defaultPermissionMode] = includeProjects
         ? await Promise.all([this.desktopProjects(), this.defaultPermissionMode()])
         : [[] as {id: string; name: string; path: string; uri: string; archived: boolean}[], this.permissionCache?.value];
+      const hidden = includeProjects ? this.ledger.hiddenProjects('antigravity') : new Set<string>();
+      const isHidden = (p: string) => hidden.has(projectPathKey(p));
       const mergeListedProjects = (dbUris: unknown[]) => {
         const listed: {id: string; path: string; name?: string}[] = [];
         for (const rawUri of dbUris) {
           if (typeof rawUri !== 'string') continue;
           const path = localWorkspace(rawUri);
-          if (!path) continue;
+          if (!path || isHidden(path)) continue;
           const match = named.find(item => sameFolder(item.path, path));
           if (match?.archived) continue;
           const name = match?.name;
@@ -2116,7 +2156,7 @@ export class AntigravityBridge {
         }
         // Include empty desktop projects that do not have any conversation yet, skipping archived ones.
         for (const item of named) {
-          if (item.archived) continue;
+          if (item.archived || isHidden(item.path)) continue;
           if (listed.some(existing => sameFolder(existing.path, item.path))) continue;
           listed.push({id: item.uri, path: item.path, ...(item.name ? {name: item.name} : {})});
         }

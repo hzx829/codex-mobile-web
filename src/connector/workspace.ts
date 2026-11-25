@@ -462,29 +462,87 @@ export type ProjectRegistrar = (
   input: {name: string; path: string; initClaudeMd?: string},
 ) => Promise<{project: ProjectInfo; notice?: string}>;
 
+export type ProjectUpdater = (
+  opId: string,
+  input: {id?: string; projectId?: string; path?: string; name: string},
+) => Promise<{project: ProjectInfo; notice?: string}>;
+
+export type ProjectRemover = (
+  input: {id?: string; projectId?: string; path?: string},
+) => Promise<{removed: true; notice?: string}>;
+
 export interface ProjectCoordinatorOptions {
   workspace: WorkspaceManager;
   ledger: Ledger;
   availableServices: readonly BridgeService[];
   registrars: Partial<Record<BridgeService, ProjectRegistrar>>;
+  updaters?: Partial<Record<BridgeService, ProjectUpdater>>;
+  removers?: Partial<Record<BridgeService, ProjectRemover>>;
   onChanged?: () => void;
 }
 
 /**
- * Coordinates `projects.roots`, `projects.browse`, and `projects.create` across enabled services
+ * Coordinates `projects.roots`, `projects.browse`, `projects.create`, `projects.update`, and `projects.remove` across enabled services
  * with opId idempotency, safety checks, partial-failure reporting, and automatic rollback if all services fail on a freshly created folder.
  */
 export function createProjectsHandler(options: ProjectCoordinatorOptions) {
-  const {workspace, ledger, availableServices, registrars, onChanged} = options;
+  const {workspace, ledger, availableServices, registrars, updaters = {}, removers = {}, onChanged} = options;
   const availableSet = new Set<BridgeService>(availableServices);
 
-  return async function handleProjects(action: 'projects.roots' | 'projects.browse' | 'projects.create', p: Json, actor?: Actor): Promise<Json> {
+  return async function handleProjects(
+    action: 'projects.roots' | 'projects.browse' | 'projects.create' | 'projects.update' | 'projects.remove',
+    p: Json,
+    actor?: Actor,
+  ): Promise<Json> {
     if (action === 'projects.roots') {
       const info = await workspace.roots(actor);
       return {...info, services: [...availableServices]};
     }
     if (action === 'projects.browse') {
       return workspace.browse(p.path, actor);
+    }
+    if (action === 'projects.update' || action === 'projects.remove') {
+      const opId = textRequired(p.opId, '操作标识', 100);
+      const svc = typeof p.service === 'string' && bridgeServices.includes(p.service as BridgeService)
+        ? p.service as BridgeService
+        : (() => { throw new BridgeError('invalid', '目标应用无效'); })();
+      if (!availableSet.has(svc)) {
+        throw new BridgeError('unsupported', `这台电脑暂不支持 ${svc}`);
+      }
+      const id = typeof p.id === 'string' && p.id.trim() ? p.id.trim().slice(0, 4096) : undefined;
+      const projectId = typeof p.projectId === 'string' && p.projectId.trim() ? p.projectId.trim().slice(0, 200) : undefined;
+      const path = typeof p.path === 'string' && p.path.trim() ? p.path.trim().slice(0, 4096) : undefined;
+      if (!id && !projectId && !path) throw new BridgeError('invalid', '缺少项目标识');
+      if (action === 'projects.update') {
+        const updater = updaters[svc];
+        if (!updater) throw new BridgeError('unsupported', `这台电脑暂不支持修改 ${svc} 项目`);
+        const name = textRequired(p.name, '项目名称', 80);
+        return ledger.run(opId, {
+          action: 'projects.update',
+          service: svc,
+          ...(id ? {id} : {}),
+          ...(projectId ? {projectId} : {}),
+          ...(path ? {path} : {}),
+          name,
+        }, async () => {
+          const result = await updater(opId, {id, projectId, path, name});
+          onChanged?.();
+          return {service: svc, ...result};
+        });
+      }
+      const remover = removers[svc];
+      if (!remover) throw new BridgeError('unsupported', `这台电脑暂不支持移除 ${svc} 项目`);
+      return ledger.run(opId, {
+        action: 'projects.remove',
+        service: svc,
+        ...(id ? {id} : {}),
+        ...(projectId ? {projectId} : {}),
+        ...(path ? {path} : {}),
+      }, async () => {
+        const result = await remover({id, projectId, path});
+        onChanged?.();
+        return {service: svc, ...result};
+      });
     }
     const opId = textRequired(p.opId, '操作标识', 100);
     const mode = p.mode === 'existing' ? 'existing' : p.mode === 'new' ? 'new' : (() => {

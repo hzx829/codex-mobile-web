@@ -6,7 +6,9 @@ import {AntigravitySidebar} from './antigravity-sidebar';
 import {ClaudeCodePanel} from './claude-code';
 import {ClaudeProjectEditor,GuestProjectForm} from './claude-projects';
 import {ProjectCreateSheet} from './project-create';
-import {ChatSearch,HomeHeader,ProjectsSection,ThreadHeader,useComposerHeight} from './chat-layout';
+import {loadExpandedProjects,ProjectEditSheet,ProjectTree,saveExpandedProjects,type ProjectItem,type ProjectThreadsState} from './project-tree';
+import {MobileSettingsTrigger,SettingsSheet,SidebarFooter,type SidebarFooterProps} from './settings-menu';
+import {ChatSearch,HomeHeader,ThreadHeader,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
 import {connectorHas,versionGap,versionGapNotice} from './features';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,supportedRoute,withConversation,type Service} from './services';
@@ -50,8 +52,8 @@ import {ModelButton,ModelPicker} from './model-picker';
 import {defaultVoiceProvider,loadVoiceChoice,resolveVoiceProvider,voiceEngineKey,voiceProvider,voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
 import {useVoiceInput} from './use-voice-input';
 import {useStableEvent} from './use-event';
-import {notifyHint,notifyLabel,notifyState,toggleNotify,useTurnNotice,watchWhileHidden,type NotifyState} from './turn-notify';
-import {filterThreadsByOwner,IdentityButton,isTeamAdmin,mergeMembers,otherOwnerHint,OwnerBadge,OwnerFilterControl,ownerFilterLabel,parseOwnerFilter,TeamPanel,type OpenActivityThread,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
+import {notifyState,useTurnNotice,watchWhileHidden,type NotifyState} from './turn-notify';
+import {filterThreadsByOwner,isTeamAdmin,mergeMembers,otherOwnerHint,OwnerFilterControl,ownerFilterLabel,parseOwnerFilter,TeamPanel,type OpenActivityThread,type OwnerFilter,type TeamMemberRef,type TeamUser} from './team';
 import './style.css';
 import 'react-diff-view/style/index.css';
 import './preview.css';
@@ -89,7 +91,7 @@ const approvalName=(policy?:string)=>APPROVALS.find(option=>option.id===policy)?
 const savedLocation=initialLocation();
 const listKey=(machine:string,project:string,archived:boolean)=>`${machine}:${project}:${archived?'archived':'recent'}`;
 type PreviewTab={id:number;target:PreviewTarget};
-type Sheet='home'|'computer'|'projects'|'create-project'|'add'|'file'|'browser'|'voice'|'claude-project'|'team'|null;
+type Sheet='settings'|'computer'|'projects'|'create-project'|'edit-project'|'add'|'file'|'browser'|'voice'|'claude-project'|'team'|null;
 function App(){
   const [token,setToken]=useState(initialToken),[tokenInput,setTokenInput]=useState('');
   // The signed-in member once the relay has a team; null with the shared Token.
@@ -135,8 +137,17 @@ function App(){
   const [preferenceState,setPreferences]=useState<{machine:string;values:ThreadPreferences}>({machine:'',values:{}});
   const preferences=preferenceState.machine===machine?preferenceState.values:{};
   const [notify,setNotify]=useState<NotifyState>(notifyState),[notifyMessage,setNotifyMessage]=useState('');
-  useEffect(()=>{if(sheet!=='home')setNotifyMessage('');else setNotify(notifyState());},[sheet]);
-  const notifyItem=<><MenuItem icon="bell" disabled={notify==='unsupported'} onClick={()=>void toggleNotify().then(next=>{setNotify(next);setNotifyMessage(notifyHint[next]);})}>完成通知<span className="menu-detail">{notifyLabel[notify]}</span></MenuItem>{notifyMessage&&<p className="muted" role="status">{notifyMessage}</p>}</>;
+  useEffect(()=>{if(sheet!=='settings')setNotifyMessage('');else setNotify(notifyState());},[sheet]);
+  const [editingProject,setEditingProject]=useState<{service:BridgeService;project:ProjectItem}|null>(null);
+  const [claudeSettingsFolder,setClaudeSettingsFolder]=useState('');
+  const [autoExpandKey,setAutoExpandKey]=useState('');
+  const [codexExpandedState,setCodexExpandedState]=useState<{machine:string;keys:string[]}>(()=>({machine:savedLocation.machine,keys:savedLocation.machine?loadExpandedProjects('codex',savedLocation.machine):[]}));
+  const codexExpandedKeys=useMemo(()=>new Set(codexExpandedState.machine===machine?codexExpandedState.keys:machine?loadExpandedProjects('codex',machine):[]),[codexExpandedState,machine]);
+  const [codexProjectPages,setCodexProjectPages]=useState<Record<string,{items:Json[];nextCursor:string|null;loading:boolean;error:string}>>({});
+  const codexProjectReqSeq=useRef<Record<string,number>>({});
+  const codexProjectPagesRef=useRef(codexProjectPages);codexProjectPagesRef.current=codexProjectPages;
+  const codexExpandedRef=useRef(codexExpandedKeys);codexExpandedRef.current=codexExpandedKeys;
+  const codexLoadedExpanded=useRef(new Set<string>());
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState<Json|null>(null);
   const [previewState,setPreviewState]=useState<{tabs:PreviewTab[];activeId:number|null}>({tabs:[],activeId:null}),[filePath,setFilePath]=useState('');
   const preview=previewState.tabs.find(tab=>tab.id===previewState.activeId)?.target||null;
@@ -194,8 +205,17 @@ function App(){
     history[replace?'replaceState':'pushState']({cmwRoute:next,cmwMachine:machine},'',location.pathname);
     rememberLocation(next,machine);setSheet(null);setThreadMenu(null);setStatusPanel(null);setModelPoint(null);setPermissionPoint(null);setRoute(next);
   }
-  function backToProjects(){navigate(home);}
-  function backToSessions(){navigate({...home,project});}
+  function backToSessions(){navigate(home);}
+  useEffect(()=>{
+    const onKey=(e:KeyboardEvent)=>{
+      if((e.ctrlKey||e.metaKey)&&!e.altKey&&e.key===','){
+        e.preventDefault();
+        setSheet(old=>old==='settings'?null:'settings');
+      }
+    };
+    window.addEventListener('keydown',onKey);
+    return()=>window.removeEventListener('keydown',onKey);
+  },[]);
   useEffect(()=>{
     const pop=(e:PopStateEvent)=>{setSheet(null);setThreadMenu(null);setStatusPanel(null);setModelPoint(null);setPermissionPoint(null);const location=parseLocation(e.state);const next=location?.machine===current.current.machine?location.route:home;rememberLocation(next,current.current.machine);setRoute(next);};
     window.addEventListener('popstate',pop);return()=>window.removeEventListener('popstate',pop);
@@ -249,22 +269,51 @@ function App(){
   };
   async function list(append=false,refresh=false,showError=true){
     const c={...current.current};
-    const key=(value:typeof c)=>JSON.stringify([value.service,value.machine,value.project,value.searchQuery,value.archived]);
+    const key=(value:typeof c)=>JSON.stringify([value.service,value.machine,value.searchQuery,value.archived]);
     const here=()=>key(c)===key(current.current);
-    const meta=codexProjectMeta(c.project);
-    await listLoader.current.load(key(c),()=>call('sessions.list',{cwd:c.project||undefined,projectId:meta?.id||undefined,roots:meta?.roots||undefined,search:c.searchQuery||undefined,archived:c.archived,cursor:append?cursor:undefined,refresh},c.machine),{
+    await listLoader.current.load(key(c),()=>call('sessions.list',{search:c.searchQuery||undefined,archived:c.archived,cursor:append?cursor:undefined,refresh},c.machine),{
       start:()=>setListBusy(true),
       result:r=>{
         if(!here())return;
         startTransition(()=>{setSessions(old=>append?[...old,...r.data.filter((n:Json)=>!old.some(s=>s.id===n.id))]:r.data);setCursor(r.nextCursor);});
-        if(!append&&!c.searchQuery)rememberList(listKey(c.machine,c.project,c.archived),r.data);
+        if(!append&&!c.searchQuery)rememberList(listKey(c.machine,'',c.archived),r.data);
         setPreferences(old=>{if(old.machine!==c.machine)return old;const values=rememberThreads(old.values,r.data,c.archived);if(values===old.values)return old;save(`thread-preferences:${c.machine}`,values);return {...old,values};});
-        setProjects(old=>mergeProjectPaths([...old,...r.data.map((s:Json)=>s.cwd)]));
+        if(!infoRef.current?.projectApi)setProjects(old=>mergeProjectPaths([...old,...r.data.map((s:Json)=>s.cwd)]));
       },
       error:e=>{if(here()&&showError)fail(e);},
       finish:()=>setListBusy(false),
     });
   }
+  const loadCodexProject=useStableEvent((proj:ProjectItem,append=false)=>{
+    const c={...current.current};
+    if(!c.connected||c.service!=='codex'||!c.machine)return;
+    const prev=codexProjectPagesRef.current[proj.key];
+    const nextCursor=append?prev?.nextCursor||undefined:undefined;
+    const seq=(codexProjectReqSeq.current[proj.key]||0)+1;
+    codexProjectReqSeq.current[proj.key]=seq;
+    const cache=listKey(c.machine,proj.path,c.archived);
+    setCodexProjectPages(old=>{
+      const existing=old[proj.key];
+      const seed=existing?.items?.length?existing.items:(cachedList(cache)||[]);
+      return {...old,[proj.key]:{items:seed,nextCursor:existing?.nextCursor||null,loading:true,error:''}};
+    });
+    void call('sessions.list',{cwd:proj.path,projectId:proj.id||undefined,roots:proj.roots||undefined,archived:c.archived,cursor:nextCursor},c.machine).then(r=>{
+      if(codexProjectReqSeq.current[proj.key]!==seq||current.current.machine!==c.machine||current.current.archived!==c.archived)return;
+      if(!append)rememberList(cache,r.data);
+      setPreferences(old=>{if(old.machine!==c.machine)return old;const values=rememberThreads(old.values,r.data,c.archived);if(values===old.values)return old;save(`thread-preferences:${c.machine}`,values);return {...old,values};});
+      setCodexProjectPages(old=>{
+        const prior=append?old[proj.key]?.items||[]:[];
+        const merged=append?[...prior,...r.data.filter((n:Json)=>!prior.some(s=>s.id===n.id))]:r.data;
+        return {...old,[proj.key]:{items:merged,nextCursor:r.nextCursor||null,loading:false,error:''}};
+      });
+    }).catch((e:any)=>{
+      if(codexProjectReqSeq.current[proj.key]!==seq)return;
+      setCodexProjectPages(old=>{
+        const existing=old[proj.key];
+        return {...old,[proj.key]:{items:existing?.items||[],nextCursor:existing?.nextCursor||null,loading:false,error:e?.message||'读取项目会话失败'}};
+      });
+    });
+  });
   const effectiveCwd=newChat?newCwd:view?.cwd||project;
   const voice=useVoiceInput(voiceMode,JSON.stringify([machine,selected,newChat,newChat?newCwd:'']),connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
@@ -275,12 +324,13 @@ function App(){
   const voiceBusy=voice.state!=='idle',voiceLabel=voiceProviderLabel(voiceMode);
   function refreshInfo(){
     const seq=++infoSequence.current;if(!connected||!codexActive)return;
-    call('info',{cwd:effectiveCwd||undefined}).then(r=>{if(seq!==infoSequence.current)return;setInfo(r);setProjects(old=>mergeProjectPaths([...r.roots,...old]));setNewCwd(old=>old||r.roots[0]||'');}).catch(e=>{if(seq===infoSequence.current)fail(e);});
+    call('info',{cwd:effectiveCwd||undefined}).then(r=>{if(seq!==infoSequence.current)return;setInfo(r);setProjects(old=>r.projectApi?mergeProjectPaths(r.roots):mergeProjectPaths([...r.roots,...old]));setNewCwd(old=>old||r.roots[0]||'');}).catch(e=>{if(seq===infoSequence.current)fail(e);});
   }
   useEffect(refreshInfo,[connected,machine,effectiveCwd,codexActive]);
   useEffect(()=>{const timer=setTimeout(()=>setSearchQuery(search.trim()),250);return()=>clearTimeout(timer);},[search]);
-  useEffect(()=>{if(searchQuery)return;const cached=cachedList(listKey(machine,project,archived));if(cached)setSessions(cached);},[machine,project,searchQuery,archived]);
-  useEffect(()=>{if(connected&&codexActive)void list();},[connected,machine,project,searchQuery,archived,codexActive]);
+  useEffect(()=>{if(searchQuery)return;const cached=cachedList(listKey(machine,'',archived));if(cached)setSessions(cached);},[machine,searchQuery,archived]);
+  useEffect(()=>{if(connected&&codexActive)void list();},[connected,machine,searchQuery,archived,codexActive]);
+  useEffect(()=>{codexLoadedExpanded.current.clear();setCodexProjectPages({});if(machine)setCodexExpandedState({machine,keys:loadExpandedProjects('codex',machine)});},[machine,archived]);
   useEffect(()=>{if(machine)setProjects(old=>old.length?old:mergeProjectPaths(cachedProjects(machine)));},[machine]);
   useEffect(()=>{if(projects.length)rememberProjects(machine,projects);},[projects]);
   const onProjectListChanged=useStableEvent(()=>{
@@ -288,7 +338,7 @@ function App(){
     projectRefreshTimer.current=setTimeout(()=>{
       projectRefreshTimer.current=undefined;
       if(!current.current.connected)return;
-      if(current.current.service==='codex')refreshInfo();
+      if(current.current.service==='codex'){refreshInfo();refreshExpandedCodex();}
       else refreshRemoteList(value=>value+1);
     },300);
   });
@@ -487,7 +537,13 @@ function App(){
     finally{setBusy(false);}
   }
   const target=()=>({threadId:view!.id,source:view!.source,generation:view!.generation,expectedTurnId:view!.activeTurnId});
-  function startNew(){if(!connected||busy)return;const cwd=project||view?.cwd||info?.roots?.[0]||'';setNewCwd(cwd);navigate({...route,thread:'',newChat:true});if(guest&&!cwd)setSheet('projects');}
+  function startNew(targetPath?:string){
+    if(!connected||busy)return;
+    const cwd=targetPath||project||view?.cwd||info?.roots?.[0]||'';
+    setNewCwd(cwd);
+    navigate({...home,project:cwd,thread:'',newChat:true});
+    if(guest&&!cwd)setSheet('projects');
+  }
   function selectProject(path:string){setNewCwd(path);setModel('');setEffort('');setApproval('');setSheet(null);}
   function restoreOptimistic(){
     setOptimistic(old=>old?.key===scope?null:old);
@@ -551,7 +607,7 @@ function App(){
       if(here)setNotice('结果待核实，系统不会自动重发。');
       setOptimistic(old=>old?.at===message.at?{...old,state:'uncertain'}:old);
     }
-    setBusy(false);setUploadProgress(null);void refreshSession();void list(false,false,false);
+    setBusy(false);setUploadProgress(null);void refreshSession();void list(false,false,false);refreshExpandedCodex();
   }
   /** The action and payload that read a thread's file: Codex's `file.*`, or the app's own with its conversation. */
   function fileAction(action:'read'|'download',threadId:string,payload:Json):{action:RequestAction;payload:Json}|null{
@@ -665,13 +721,73 @@ function App(){
     const updated=action==='session.rename'?{...thread,title:payload.name}:thread;
     setPreferences(old=>{if(old.machine!==owner)return old;const values=rememberThreads(old.values,[updated],action==='session.rename'?archived:action==='session.archive');save(`thread-preferences:${owner}`,values);return {...old,values};});
     if(action==='session.rename'){setSessions(old=>old.map(s=>s.id===thread.id?updated:s));setView(old=>old&&old.id===thread.id?{...old,title:payload.name}:old);}
-    else{setSessions(old=>old.filter(s=>s.id!==thread.id));if(current.current.selected===thread.id)navigate({...home,project:thread.cwd||''});}
-    listLoader.current.invalidate();void list();
+    else{setSessions(old=>old.filter(s=>s.id!==thread.id));if(current.current.selected===thread.id)navigate(home);}
+    listLoader.current.invalidate();void list();refreshExpandedCodex();
   }
   const projectName=(path:string)=>{
     const key=projectPathKey(path);
     return info?.projects?.find((p:Json)=>projectPathKey(p.path)===key)?.name||name(path);
   };
+  const codexProjectItems=useMemo<ProjectItem[]>(()=>projects.map(p=>{
+    const key=projectPathKey(p);
+    const meta=(info?.projects as Json[]|undefined)?.find(item=>projectPathKey(item.path)===key);
+    return {key,id:meta?.id,path:p,name:meta?.name||name(p),roots:meta?.roots,owner:meta?.owner};
+  }),[projects,info?.projects]);
+  const refreshExpandedCodex=useStableEvent(()=>{
+    if(!current.current.connected||current.current.service!=='codex')return;
+    for(const item of codexProjectItems){
+      if(codexExpandedRef.current.has(item.key))loadCodexProject(item,false);
+    }
+  });
+  useEffect(()=>{
+    if(!connected||!codexActive)return;
+    for(const item of codexProjectItems){
+      if(codexExpandedKeys.has(item.key)&&!codexLoadedExpanded.current.has(item.key)){
+        codexLoadedExpanded.current.add(item.key);
+        loadCodexProject(item,false);
+      }
+    }
+  },[connected,codexActive,codexProjectItems,codexExpandedKeys,loadCodexProject]);
+  function toggleCodexProject(proj:ProjectItem){
+    const opening=!codexExpandedKeys.has(proj.key);
+    setCodexExpandedState(old=>{
+      const base=old.machine===machine?old.keys:loadExpandedProjects('codex',machine);
+      const next=opening?[...new Set([...base,proj.key])]:base.filter(k=>k!==proj.key);
+      saveExpandedProjects('codex',machine,next);
+      return {machine,keys:next};
+    });
+    if(opening&&connected){
+      codexLoadedExpanded.current.add(proj.key);
+      loadCodexProject(proj,false);
+    }
+  }
+  function markCodexProjectRead(threadIds:string[]){
+    let changed=false;
+    const next={...preferences};
+    for(const id of threadIds){
+      if(next[id]?.unread){next[id]={...next[id],unread:false};changed=true;}
+    }
+    if(changed){save(`thread-preferences:${machine}`,next);setPreferences({machine,values:next});}
+  }
+  const codexProjectThreadsMap=useMemo<Record<string,ProjectThreadsState>>(()=>{
+    const map:Record<string,ProjectThreadsState>={};
+    for(const item of codexProjectItems){
+      if(!codexExpandedKeys.has(item.key))continue;
+      const entry=codexProjectPages[item.key];
+      const cache=listKey(machine,item.path,archived);
+      const rawItems=entry?.items?.length?entry.items
+        :(cachedList(cache)||sessions.filter(s=>s.cwd&&projectPathKey(s.cwd)===item.key));
+      const shown=filterThreadsByOwner(visibleThreads(rawItems,preferences,item.path,archived,''),me,ownerFilter);
+      map[item.key]={
+        items:shown,
+        loading:Boolean(entry?.loading),
+        hasMore:Boolean(entry?.nextCursor),
+        error:entry?.error||'',
+      };
+    }
+    return map;
+  },[codexProjectItems,codexExpandedKeys,codexProjectPages,machine,archived,sessions,preferences,me,ownerFilter]);
+  const allCodexThreads=useMemo(()=>[...sessions,...Object.values(codexProjectPages).flatMap(entry=>entry.items)],[sessions,codexProjectPages]);
   const queueNext=!newChat&&Boolean(view?.running||view?.queuedMessages?.length);
   const availableModels=(info?.models||[]).filter((m:Json)=>(view?.provider||info?.provider)==='openai'||m.model===(view?.model||info?.model));
   const currentModel={model:view?.model||info?.model,effort:view?.effort||(newChat?info?.effort:''),serviceTier:view?.serviceTier!==undefined?view.serviceTier:info?.serviceTier};
@@ -691,8 +807,8 @@ function App(){
   const pendingShown=optimistic&&optimistic.key===scope&&!optimisticDelivered(optimistic,view)?optimistic:null;
   const attachmentCount=images.length+files.length,selectedImageBytes=images.reduce((sum,url)=>sum+imageBytes(url),0);
   const effortLabel=reasoningLabel(selection.effort),sending=busy&&(Boolean(uploadProgress)||pending?.action==='turn.send'||pending?.action==='session.create');
-  const codexMembers=useMemo(()=>mergeMembers(roster,sessions),[roster,sessions]);
-  const listedThreads=useMemo(()=>filterThreadsByOwner(visibleThreads(sessions,preferences,project,archived,searchQuery),me,ownerFilter),[sessions,preferences,project,archived,searchQuery,me,ownerFilter]);
+  const codexMembers=useMemo(()=>mergeMembers(roster,allCodexThreads),[roster,allCodexThreads]);
+  const listedThreads=useMemo(()=>filterThreadsByOwner(visibleThreads(sessions,preferences,'',archived,searchQuery),me,ownerFilter),[sessions,preferences,archived,searchQuery,me,ownerFilter]);
   const visibleTitle=newChat?'新聊天':view?.title||sessions.find(s=>s.id===selected)?.title||'正在打开…';
   const conversationCopy=useStableEvent((text:string)=>void copyText(text).then(()=>setNotice('已复制文字')).catch(()=>setError('复制失败，请长按选择文字')));
   const conversationEdit=useStableEvent((turnId:string,itemId:string,text:string)=>editTurn(mutate,target(),{turnId,itemId,text},{model,effort,approvalPolicy:approval,serviceTier}));
@@ -744,8 +860,6 @@ function App(){
     <p className="muted">此设置仅用于 {serviceLabel(service)}，保存在当前浏览器；不同应用可分别选择。</p>
     <button className="primary" onClick={()=>setSheet(null)}>完成</button>
   </>;
-  const teamItems=me&&<><MenuItem icon="team" onClick={()=>setSheet('team')}>团队<span className="menu-detail">{me.name}</span></MenuItem>
-    <MenuItem icon="chat" onClick={()=>{setOwnerFilter(ownerFilter==='mine'?'all':'mine');setSheet(null);}}>只看我的会话{ownerFilter==='mine'&&<Icon name="check" size={18}/>}</MenuItem></>;
   const openActivityThread:OpenActivityThread=target=>{
     setSheet(null);
     const next:Route=target.service==='codex'?{...home,thread:target.threadId}:withConversation(serviceHome(target.service),target.threadId);
@@ -761,15 +875,46 @@ function App(){
     if(targetService==='codex'&&targetMachine===machine){
       setSessions(old=>old.map(item=>item.id===threadId?{...item,owner:nextOwner}:item));
       setView(old=>old&&old.id===threadId?{...old,owner:nextOwner}:old);
-      listLoader.current.invalidate();void list();
+      listLoader.current.invalidate();void list();refreshExpandedCodex();
     }else refreshRemoteList(value=>value+1);
   }
-  const identityButton=me&&<IdentityButton me={me} onClick={()=>setSheet('team')}/>;
   const teamPanel=me&&<TeamPanel me={me} team={(action,payload)=>client.current?client.current.team(action,payload):Promise.reject({message:'尚未连接中继'})} logout={logout} copy={copyText}
     machines={new Map(machines.map(item=>[item.id,computerName(item)]))} onOpenThread={openActivityThread}/>;
   const fileOptions=<form onSubmit={e=>{e.preventDefault();void openFile(filePath);}}><label>文件路径<input autoFocus required value={filePath} onChange={e=>setFilePath(e.target.value)} placeholder="例如 README.md 或 docs/deck.pptx"/></label>{error&&<p className="error" role="alert">{error}</p>}<button className="primary">打开文件</button></form>;
   const canCreateProject=connectorHas(activeMachine,'projects.create');
+  const canManageProjects=!guest&&connectorHas(activeMachine,'projects.manage');
   const openCreateProject=(origin:'sidebar'|'new-chat')=>{createOrigin.current=origin;setSheet('create-project');};
+  const openEditProject=(targetService:BridgeService,targetProject:ProjectItem)=>{setEditingProject({service:targetService,project:targetProject});setSheet('edit-project');};
+  const openClaudeProjectSettings=(folder:string)=>{setClaudeSettingsFolder(folder);setSheet('claude-project');};
+  async function removeProject(targetService:BridgeService,targetProject:ProjectItem){
+    const result=await call('projects.remove',{
+      service:targetService,
+      ...(targetProject.id?{id:targetProject.id}:{}),
+      ...(targetProject.projectId?{projectId:targetProject.projectId}:{}),
+      path:targetProject.path,
+      opId:operationId(),
+    });
+    if(result?.state==='failed'||result?.state==='uncertain')throw new Error(result.error?.message||'移除项目失败，请重试');
+    if(result?.notice)setNotice(result.notice);
+    if(targetService==='codex'){
+      setProjects(old=>old.filter(p=>projectPathKey(p)!==targetProject.key));
+      setCodexExpandedState(old=>{
+        const next=old.keys.filter(k=>k!==targetProject.key);
+        saveExpandedProjects('codex',machine,next);
+        return {machine,keys:next};
+      });
+      refreshInfo();
+    }else{
+      refreshRemoteList(value=>value+1);
+    }
+  }
+  function handleProjectEdited(updated:{name:string;notice?:string}){
+    const targetService=editingProject?.service||service;
+    setEditingProject(null);setSheet(null);
+    if(updated.notice)setNotice(updated.notice);
+    if(targetService==='codex')refreshInfo();
+    else refreshRemoteList(value=>value+1);
+  }
   function handleProjectCreated(result:ProjectCreateResult,selectedServices:BridgeService[]){
     setSheet(null);
     if(result.results.codex?.ok){
@@ -782,19 +927,65 @@ function App(){
     if(notes)setNotice(notes);
     if(preferred==='codex'){
       const codexPath=result.results.codex?.project?.path||result.path;
+      const key=projectPathKey(codexPath);
       if(createOrigin.current==='new-chat'||newChat)selectProject(codexPath);
-      else{setSessions([]);setCursor(null);navigate({...home,project:codexPath});}
+      else{
+        setCodexExpandedState(old=>{
+          const base=old.machine===machine?old.keys:loadExpandedProjects('codex',machine);
+          const next=[...new Set([...base,key])];
+          saveExpandedProjects('codex',machine,next);
+          return {machine,keys:next};
+        });
+        if(service!=='codex')navigate(home);
+      }
     }else if(preferred==='claude'){
       const claudeId=result.results.claude?.project?.id||result.path;
       if(createOrigin.current==='new-chat'||route.newChat)navigate({...serviceHome('claude',claudeId),newChat:true},true);
-      else navigate(serviceHome('claude',claudeId));
+      else{setAutoExpandKey(projectPathKey(result.path)||claudeId);if(service!=='claude')navigate(serviceHome('claude'));}
     }else if(preferred==='antigravity'){
       const agId=result.results.antigravity?.project?.id||result.path;
       if(createOrigin.current==='new-chat'||route.newChat)navigate({...serviceHome('antigravity',agId),newChat:true},true);
-      else navigate(serviceHome('antigravity',agId));
+      else{setAutoExpandKey(projectPathKey(result.path)||agId);if(service!=='antigravity')navigate(serviceHome('antigravity'));}
     }
   }
   const projectCreateSheet=<ProjectCreateSheet key={`${machine}:${service}`} connected={connected} machineServices={available} currentService={service} guest={guest} call={call} onCreated={handleProjectCreated} close={()=>setSheet(null)}/>;
+  const projectEditSheet=editingProject&&<ProjectEditSheet
+    key={`${editingProject.service}:${editingProject.project.key}`}
+    service={editingProject.service}
+    project={editingProject.project}
+    connected={connected}
+    call={call}
+    onSaved={handleProjectEdited}
+    onOpenClaudeSettings={editingProject.service==='claude'?()=>{const folder=editingProject.project.path;setEditingProject(null);openClaudeProjectSettings(folder);}:undefined}
+    close={()=>{setEditingProject(null);setSheet(null);}}
+  />;
+  const handleVoiceChange=(mode:VoiceProvider)=>{setVoiceChoices(old=>({...old,[service]:mode}));save(voiceEngineKey(service),mode);};
+  const refreshSidebar=()=>service==='codex'?(refreshInfo(),void list(false,true),refreshExpandedCodex()):refreshRemoteList(value=>value+1);
+  const footerProps:SidebarFooterProps={
+    me,machineName,machinesCount:machines.length,connected,relayOnline:status==='online',busy,
+    archived:service==='codex'?archived:undefined,
+    onToggleArchived:service==='codex'?()=>setArchived(old=>!old):undefined,
+    onRefresh:refreshSidebar,
+    refreshDisabled:service==='codex'?listBusy:false,
+    onOpenSettings:()=>setSheet('settings'),
+    onOpenComputer:()=>setSheet('computer'),
+    onOpenTeam:me?()=>setSheet('team'):undefined,
+    onLogout:logout,
+  };
+  const sidebarFooter=<SidebarFooter {...footerProps}/>;
+  const mobileSettings=<MobileSettingsTrigger {...footerProps}/>;
+  const settingsSheet=<SettingsSheet
+    service={service} me={me} machineName={machineName} connected={connected} relayOnline={status==='online'}
+    voiceChoice={voiceChoice} voiceMode={voiceMode} onVoiceChange={handleVoiceChange}
+    notify={notify} notifyMessage={notifyMessage} onNotifyChange={(next,msg)=>{setNotify(next);setNotifyMessage(msg);}}
+    ownerFilter={ownerFilter} onOwnerFilterChange={me?setOwnerFilter:undefined}
+    archived={service==='codex'?archived:undefined}
+    onToggleArchived={service==='codex'?()=>setArchived(old=>!old):undefined}
+    onOpenComputer={()=>setSheet('computer')}
+    onOpenTeam={me?()=>setSheet('team'):undefined}
+    onLogout={logout}
+    busy={busy}
+  />;
   if(service==='antigravity'||service==='claude'){
     const id=remoteConversation,inert=Boolean(sheet||compactPreview&&preview);
     const open=(next:string)=>{if(next!==id||route.newChat){navigate(withConversation(route,next));if(!next)refreshRemoteList(value=>value+1);}};
@@ -812,16 +1003,21 @@ function App(){
       duplicate:async()=>{forked((await claudeChange('claude.fork',{conversationId:thread.id})).conversationId);},
     });
     return <SenderRoot me={me?.id}><div className={`shell ${id||creatingClaude||creatingAntigravity?'has-session':''}`}>
-      <AntigravitySidebar key={`${service}:${machine}`} inert={inert} selected={id} project={route.project} machine={machine} machineName={machineName}
+      <AntigravitySidebar key={`${service}:${machine}`} service={service} inert={inert} selected={id} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
-        identity={identityButton} projectsCollapsed={projectsCollapsed} onToggleProjects={toggleProjects} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
+        footer={sidebarFooter} mobileSettings={mobileSettings}
+        projectsCollapsed={projectsCollapsed} onToggleProjects={toggleProjects} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
         claimOwner={isTeamAdmin(me)?(threadId,userId)=>claimOwner(machine,service,threadId,userId):undefined}
-        revision={remoteListRevision} switcher={switcher} call={call} open={open} chooseProject={project=>navigate(serviceHome(service,project))}
-        listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>filterThreadsByOwner(threads,me,ownerFilter)} action={service==='claude'&&route.project?
-          <div className="claude-project-actions"><button type="button" disabled={!connected} onClick={()=>setSheet('claude-project')}>项目设置</button></div>:undefined}
-        onNew={()=>{if(id||!route.newChat)navigate({...withConversation(route,''),newChat:true});}}
+        revision={remoteListRevision} switcher={switcher} call={call} open={open}
+        listAction={`${service}.list`} appName={serviceLabel(service)} filter={threads=>filterThreadsByOwner(threads,me,ownerFilter)}
+        onNew={targetProject=>navigate({...serviceHome(service,targetProject),newChat:true})}
         onCreateProject={canCreateProject?()=>openCreateProject('sidebar'):undefined}
-        chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
+        onEditProject={canManageProjects?proj=>openEditProject(service,proj):undefined}
+        onClaudeSettings={service==='claude'?proj=>openClaudeProjectSettings(proj.path):undefined}
+        onRemoveProject={canManageProjects?proj=>removeProject(service,proj):undefined}
+        canManageProjects={canManageProjects}
+        autoExpandKey={autoExpandKey}
+        chooseComputer={()=>setSheet('computer')}/>
       {(id||creatingClaude)&&service==='claude'?<ClaudeCodePanel key={JSON.stringify([machine,service,id])} inert={inert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} showPage={showPage} previewError={error}
         machine={machine} guest={guest} newCwd={creatingClaude?route.project:null} created={created} forked={forked}
         onCreateProject={canCreateProject?()=>openCreateProject('new-chat'):undefined} projectsRevision={remoteListRevision}
@@ -838,51 +1034,64 @@ function App(){
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         <main className="thread-panel" inert={inert}><div className="desktop-welcome"><h1>选择一个聊天</h1></div></main>}
-      {sheet==='home'&&<SheetPanel title="选项" close={()=>setSheet(null)}>
-        <MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>
-        {teamItems}
-        <MenuItem icon="refresh" disabled={!connected} onClick={()=>{setSheet(null);refreshRemoteList(value=>value+1);}}>刷新项目与会话</MenuItem>
-        <MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>
-        {notifyItem}
-        <MenuItem icon="logout" onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem>
-      </SheetPanel>}
+      {sheet==='settings'&&<SheetPanel title="设置" close={()=>setSheet(null)}>{settingsSheet}</SheetPanel>}
       {sheet==='voice'&&<SheetPanel title={`语音输入 · ${serviceLabel(service)}`} close={()=>setSheet(null)}>{voiceOptions}</SheetPanel>}
       {sheet==='team'&&teamPanel&&<SheetPanel title="团队" close={()=>setSheet(null)}>{teamPanel}</SheetPanel>}
       {sheet==='computer'&&<SheetPanel title="电脑" close={()=>setSheet(null)}>{computerOptions}</SheetPanel>}
       {sheet==='file'&&<SheetPanel title="查看项目文件" close={()=>setSheet(null)}>{fileOptions}</SheetPanel>}
-      {sheet==='claude-project'&&route.project&&<SheetPanel title="项目设置" close={()=>setSheet(null)}>
-        <ClaudeProjectEditor key={route.project} folder={route.project} connected={connected} call={call} done={()=>setSheet(null)}/></SheetPanel>}
+      {sheet==='claude-project'&&claudeSettingsFolder&&<SheetPanel title="项目设置" close={()=>setSheet(null)}>
+        <ClaudeProjectEditor key={claudeSettingsFolder} folder={claudeSettingsFolder} connected={connected} call={call} done={()=>setSheet(null)}/></SheetPanel>}
       {sheet==='create-project'&&<SheetPanel title="新建项目" close={()=>setSheet(null)}>{projectCreateSheet}</SheetPanel>}
+      {sheet==='edit-project'&&projectEditSheet&&<SheetPanel title="编辑项目" close={()=>{setEditingProject(null);setSheet(null);}}>{projectEditSheet}</SheetPanel>}
       {previewPane}
     </div></SenderRoot>;
   }
   const codexHeading=searchQuery?'搜索结果':archived?'归档会话':'最近';
   const codexGroups=groupThreads(listedThreads,preferences,codexHeading);
   const codexFilterControl=me?<OwnerFilterControl me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>:null;
+  const codexCanManage=canManageProjects&&Boolean(info?.projectApi);
   return <SenderRoot me={me?.id}><div className={`shell ${showThread?'has-session':''}`}>
     <aside className="home-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>
-      <HomeHeader project={projectName(project)} machineName={machineName} connected={connected} relayOnline={status==='online'} identity={identityButton} back={backToProjects} backDisabled={busy} chooseComputer={()=>setSheet('computer')} more={()=>setSheet('home')}/>
-      {!project&&!archived&&!searchQuery&&switcher}
+      <HomeHeader machineName={machineName} connected={connected} relayOnline={status==='online'} chooseComputer={()=>setSheet('computer')} mobileSettings={mobileSettings}/>
+      {!archived&&!searchQuery&&switcher}
       <div className="home-content">
-        {!project&&!searchQuery&&<ProjectsSection collapsed={projectsCollapsed} onToggle={toggleProjects}
-          action={canCreateProject&&<IconButton icon="plus" label="新建项目" className="section-action" disabled={!connected||busy} onClick={()=>openCreateProject('sidebar')}/>}>
-          <button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>
-          {projects.map(p=>{
-            const meta=codexProjectMeta(p);
-            return <button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span>{meta?.owner&&<OwnerBadge owner={meta.owner}/>}</button>;
-          })}
-        </ProjectsSection>}
+        {!searchQuery&&<ProjectTree
+          service="codex"
+          machine={machine}
+          projects={codexProjectItems}
+          expandedKeys={codexExpandedKeys}
+          onToggleExpand={toggleCodexProject}
+          projectThreads={codexProjectThreadsMap}
+          onLoadMore={proj=>loadCodexProject(proj,true)}
+          selectedThread={selected}
+          threadPreferences={preferences}
+          isThreadActive={s=>connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?Boolean(view.running):s.status?.type==='active')}
+          onOpenThread={s=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}}
+          onThreadMenu={(s,point)=>setThreadMenu({thread:s,point,machine,archived})}
+          onNewChat={proj=>startNew(proj.path)}
+          onCreateProject={canCreateProject?()=>openCreateProject('sidebar'):undefined}
+          onEditProject={codexCanManage?proj=>openEditProject('codex',proj):undefined}
+          onRemoveProject={codexCanManage?proj=>removeProject('codex',proj):undefined}
+          onMarkAllRead={(_proj,ids)=>markCodexProjectRead(ids)}
+          onCopyPath={copyText}
+          projectsCollapsed={projectsCollapsed}
+          onToggleProjects={toggleProjects}
+          connected={connected}
+          busy={busy}
+          canManageProjects={codexCanManage}
+        />}
         <section className="recent-section">{!codexGroups.length&&(codexFilterControl?<div className="section-head"><h2>{codexHeading}</h2>{codexFilterControl}</div>:<h2>{codexHeading}</h2>)}{codexGroups.map((group,index)=><div className="thread-group" key={group.key}>{index===0&&codexFilterControl?<div className="section-head"><h2>{group.label}</h2>{codexFilterControl}</div>:<h2>{group.label}</h2>}<nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
           time={relativeTime(s.updatedAt)} active={connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?view.running:s.status?.type==='active')}
-          open={()=>{changePreference(s.id,{unread:false});navigate({...route,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
+          open={()=>{changePreference(s.id,{unread:false});navigate({...home,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
           {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':me&&ownerFilter!=='all'?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,codexMembers)}」的会话，已加载列表中没有匹配项。<button type="button" className="empty-list-action" onClick={()=>setOwnerFilter('all')}>显示全部</button></>:searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}
           {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
         </section>
       </div>
-      <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><ChatSearch value={search} change={setSearch}/><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={startNew}/></div></div>
+      <div className="home-bottom">{!showThread&&feedback}<div className="home-dock"><ChatSearch value={search} change={setSearch}/><IconButton icon="compose" label="新聊天" className="round black new-chat" disabled={!connected||busy||Boolean(pending)} onClick={()=>startNew()}/></div></div>
+      {sidebarFooter}
     </aside>
 
-    <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={startNew} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
+    <main className="thread-panel" inert={Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview)}>{!showThread?<div className="desktop-welcome"><h1>我们来处理</h1><button className="center-project" onClick={()=>startNew()} disabled={!connected}><Icon name="folder"/><span>{projectName(project||info?.roots?.[0]||'选择一个项目')}</span><Icon name="chevron" size={18}/></button></div>:<>
       <ThreadHeader title={visibleTitle} project={projectName(newChat?newCwd:view?.cwd||project)||'项目'} machineName={machineName} connected={connected} back={backToSessions} backDisabled={busy} onTitle={element=>newChat?setSheet('projects'):openStatus(element)}
         owner={newChat?null:view?.owner} lastSender={newChat?null:view?.lastSender} meId={me?.id}>
         <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button>
@@ -925,14 +1134,15 @@ function App(){
      {statusPanel&&statusPanel.machine===machine&&statusPanel.thread===selected&&<ThreadStatusPanel key={`${machine}:${selected}`} point={statusPanel.point} view={view} threadId={selected} cwd={view?.cwd||project} connected={connected} close={()=>setStatusPanel(current=>current===statusPanel?null:current)} copy={()=>copyText(selected)} read={()=>call('session.status',{threadId:selected})}/>}
      {permissionPoint&&<PermissionPicker anchor={permissionButton.current} point={permissionPoint} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} title="许可" disabled={busy} onChange={setApproval} close={()=>setPermissionPoint(null)}/>}
      {modelPoint&&<ModelPicker anchor={modelButton.current} point={modelPoint} models={availableModels} value={{model,effort,serviceTier}} current={currentModel} disabled={busy} onChange={value=>{setModel(value.model);setEffort(value.effort);setServiceTier(value.serviceTier);}} close={()=>setModelPoint(null)}/>}
-     {sheet&&<SheetPanel title={sheet==='voice'?`语音输入 · ${serviceLabel(service)}`:({home:'选项',computer:'电脑',projects:'选择项目','create-project':'新建项目',add:'添加与选项',file:'查看项目文件',browser:'打开网页','claude-project':'项目',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);setUnreachable('');}setSheet(null);}}>
-       {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>{teamItems}<MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>{notifyItem}<MenuItem icon="logout" disabled={busy} onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem></>}
+     {sheet&&<SheetPanel title={sheet==='voice'?`语音输入 · ${serviceLabel(service)}`:({settings:'设置',computer:'电脑',projects:'选择项目','create-project':'新建项目','edit-project':'编辑项目',add:'添加与选项',file:'查看项目文件',browser:'打开网页','claude-project':'项目设置',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);setUnreachable('');}if(sheet==='edit-project')setEditingProject(null);setSheet(null);}}>
+       {sheet==='settings'&&settingsSheet}
       {sheet==='computer'&&computerOptions}
        {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>selectProject(p)}><span>{projectName(p)}<small>{p}</small></span>{projectPathKey(p)===projectPathKey(newCwd)&&<Icon name="check" size={18}/>}</MenuItem>)}</div>
          {canCreateProject?<MenuItem icon="plus" disabled={!connected||busy} onClick={()=>openCreateProject('new-chat')}>新建或关联项目</MenuItem>
          :guest?<GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setProjects(old=>mergeProjectPaths([...old,path]));selectProject(path);}}/>:
          <details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details>}</>}
        {sheet==='create-project'&&projectCreateSheet}
+       {sheet==='edit-project'&&projectEditSheet}
        {sheet==='voice'&&voiceOptions}
        {sheet==='team'&&teamPanel}
        {sheet==='add'&&<AddOptions attachments={attachments} pick={pick} disabled={busy} connected={connected} error={error} imagesBlocked={canImage?undefined:'当前模型未确认图片能力'}

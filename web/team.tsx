@@ -23,7 +23,7 @@ const ACTION_LABELS:Record<string,string>={
   'turn.stop':'停止任务','claude.stop':'停止任务','antigravity.stop':'停止任务','request.respond':'回应请求','claude.respond':'回应请求','antigravity.respond':'回应请求',
   'session.fork':'分叉会话','claude.fork':'分叉会话','session.rename':'重命名','claude.rename':'重命名',
   'session.archive':'归档','claude.archive':'归档','session.unarchive':'取消归档','session.resume':'恢复会话',
-  'project.create':'新建项目','projects.create':'新建项目','claude.project.save':'保存项目设置','runtime.reload':'更新连接器',
+  'project.create':'新建项目','projects.create':'新建项目','projects.update':'修改项目','projects.remove':'移除项目','claude.project.save':'保存项目设置','runtime.reload':'更新连接器',
 };
 const SERVICE_LABELS:Record<string,string>={codex:'Codex',claude:'Claude Code',antigravity:'Antigravity'};
 const STATE_LABELS:Record<string,string>={accepted:'',failed:'失败',uncertain:'待核实',queued:'已排队'};

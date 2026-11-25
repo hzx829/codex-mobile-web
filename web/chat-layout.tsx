@@ -5,11 +5,11 @@ import {OwnerBadge,type TeamMemberRef} from './team';
 
 export const workspaceName=(path:string)=>path.split(/[\\/]/).filter(Boolean).at(-1)||path;
 
-export function HomeHeader({project,machineName,connected,relayOnline,back,backDisabled,chooseComputer,more,identity}:{project:string;machineName:string;connected:boolean;relayOnline:boolean;back:()=>void;backDisabled?:boolean;chooseComputer:()=>void;more:()=>void;identity?:ReactNode}){
+export function HomeHeader({project,machineName,connected,relayOnline,back,backDisabled,chooseComputer,mobileSettings}:{project?:string;machineName:string;connected:boolean;relayOnline:boolean;back?:()=>void;backDisabled?:boolean;chooseComputer:()=>void;mobileSettings?:ReactNode}){
   return <header className="home-header">
-    {project?<><IconButton icon="back" label="返回全部项目" className="round" disabled={backDisabled} onClick={back}/><h1>{project}</h1></>:
+    {project&&back?<><IconButton icon="back" label="返回全部项目" className="round" disabled={backDisabled} onClick={back}/><h1>{project}</h1></>:
       <button className="home-identity" aria-label="选择电脑" onClick={chooseComputer}><span className="home-computer"><Icon name="computer" size={19}/></span><strong>Remote</strong><span className="home-machine"><i className={connected?'dot online':'dot'}/><span>{machineName}</span>{!connected&&<small>{relayOnline?'离线':'连接中…'}</small>}</span></button>}
-    <div className="home-header-actions">{identity}<IconButton icon="more" label="更多选项" className="round" onClick={more}/></div>
+    {mobileSettings&&<div className="home-header-actions mobile-only-actions">{mobileSettings}</div>}
   </header>;
 }
 

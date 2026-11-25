@@ -540,6 +540,61 @@ export class Control extends EventEmitter {
       throw new BridgeError('unavailable','无法连接本机 Codex 服务，请确认 Codex 可正常运行');
     }
   }
+  private async resolveCodexProjectId(input:{id?:string;path?:string}):Promise<string> {
+    if(typeof input.id==='string'&&input.id.trim())return input.id.trim();
+    const path=typeof input.path==='string'?input.path.trim():'';
+    if(!path)throw new BridgeError('invalid','缺少项目标识');
+    const list=await runtimeProjects((method,params,timeoutMs)=>this.runtime.rpc(method,params,timeoutMs)).catch(()=>{
+      throw new BridgeError('unsupported','当前电脑的 Codex 版本过旧，不支持修改项目，请更新 Codex 后重试');
+    });
+    const key=projectPathKey(path);
+    const match=list.find(item=>item.id&&(projectPathKey(item.path)===key||(item.roots||[]).some(r=>projectPathKey(r)===key)));
+    if(!match?.id)throw new BridgeError('not_found','在 Codex 中找不到该项目，请刷新列表后重试');
+    return match.id;
+  }
+  /** Renames a project in Codex via app-server `project/update`. */
+  async updateProject(input:{id?:string;path?:string;name:string}):Promise<{project:{id:string;name:string;path:string;roots?:string[]};notice?:string}> {
+    if(guestWorkspace())throw new BridgeError('unsupported','借用电脑暂不支持修改项目');
+    const name=textRequired(input.name,'项目名称',80);
+    const projectId=await this.resolveCodexProjectId(input);
+    try {
+      const res=await this.runtime.rpc('project/update',{projectId,name},10_000);
+      const updated=res?.project;
+      const roots=(Array.isArray(updated?.roots)?updated.roots:[]).map((r:Json)=>String(r?.path||'')).filter(Boolean);
+      const primary=roots[0]||input.path||'';
+      this.emit('change',null);
+      return {
+        project:{id:String(updated?.id||projectId),name:String(updated?.name||name),path:primary,...(roots.length?{roots}:{})},
+        notice:'Codex 桌面侧栏可能需要切换窗口或重启后才同步更新',
+      };
+    } catch(error) {
+      if(error instanceof BridgeError){
+        if(/unknown|not found|method not found|unsupported/i.test(error.message)){
+          if(/project not found/i.test(error.message))throw new BridgeError('not_found','该项目在 Codex 中已不存在，请刷新列表');
+          throw new BridgeError('unsupported','当前电脑的 Codex 版本过旧，不支持修改项目，请更新 Codex 后重试');
+        }
+        throw error;
+      }
+      throw new BridgeError('unavailable','无法连接本机 Codex 服务，请确认 Codex 可正常运行');
+    }
+  }
+  /** Removes a project from Codex via app-server `project/delete` (preserves folder and sessions). */
+  async removeProject(input:{id?:string;path?:string}):Promise<{removed:true;notice?:string}> {
+    if(guestWorkspace())throw new BridgeError('unsupported','借用电脑暂不支持移除项目');
+    const projectId=await this.resolveCodexProjectId(input);
+    try {
+      await this.runtime.rpc('project/delete',{projectId},10_000);
+      this.emit('change',null);
+      return {removed:true,notice:'已从 Codex 项目列表移除（文件夹与会话均已保留）'};
+    } catch(error) {
+      if(error instanceof BridgeError){
+        if(/project not found/i.test(error.message))throw new BridgeError('not_found','该项目已不在 Codex 列表中，请刷新');
+        if(/unknown|method not found|unsupported/i.test(error.message))throw new BridgeError('unsupported','当前电脑的 Codex 版本过旧，不支持移除项目，请更新 Codex 后重试');
+        throw error;
+      }
+      throw new BridgeError('unavailable','无法连接本机 Codex 服务，请确认 Codex 可正常运行');
+    }
+  }
   private async mutate(action:string,p:Json):Promise<Json> {
     if(action==='session.create') {
       const cwd=await projectDirectory(textRequired(p.cwd,'项目目录'));

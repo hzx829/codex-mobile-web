@@ -154,6 +154,8 @@ test('Codex prefers runtime project/list, creates projects with idempotencyKey, 
       this.calls.push({method, params});
       if (method === 'project/list') return {data: [{id: 'proj-1', name: 'Alpha', roots: [{path: rootA}], recencyAt: 999}], nextCursor: null};
       if (method === 'project/create') return {project: {id: 'proj-new', name: params.name, roots: params.roots}};
+      if (method === 'project/update') return {project: {id: params.projectId, name: params.name, roots: [{path: rootA}]}};
+      if (method === 'project/delete') return {};
       if (method === 'config/read') return {config: {model: 'gpt-5', model_provider: 'openai'}};
       if (method === 'model/list') return {data: []};
       throw Error(method);
@@ -183,6 +185,21 @@ test('Codex prefers runtime project/list, creates projects with idempotencyKey, 
       method: 'project/create',
       params: {name: 'NewProj', roots: [{path: rootB}], idempotencyKey: '123:abc:codex'},
     });
+
+    const updated = await control.updateProject({id: 'proj-1', path: rootA, name: 'Alpha Renamed'});
+    assert.equal(updated.project.name, 'Alpha Renamed');
+    assert.deepEqual(runtime.calls.find(c => c.method === 'project/update'), {
+      method: 'project/update',
+      params: {projectId: 'proj-1', name: 'Alpha Renamed'},
+    });
+
+    const removed = await control.removeProject({path: rootA});
+    assert.equal(removed.removed, true);
+    assert.deepEqual(runtime.calls.find(c => c.method === 'project/delete'), {
+      method: 'project/delete',
+      params: {projectId: 'proj-1'},
+    });
+    assert.equal(changes, 3);
   } finally {
     control.close();
     await removeTestTemp(home);

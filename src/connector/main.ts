@@ -131,10 +131,20 @@ const handleProjects=createProjectsHandler({
     ...(claudeCodeBridge?{claude:(opId,input)=>claudeCodeBridge!.registerProject(opId,input)}:{}),
     ...(antigravityBridge?{antigravity:(opId,input)=>antigravityBridge!.registerProject(opId,input)}:{}),
   },
+  updaters:{
+    ...(useCodex?{codex:(_opId,input)=>control.updateProject(input)}:{}),
+    ...(claudeCodeBridge?{claude:(_opId,input)=>claudeCodeBridge!.updateProject(input)}:{}),
+    ...(antigravityBridge?{antigravity:(opId,input)=>antigravityBridge!.updateProject(opId,input)}:{}),
+  },
+  removers:{
+    ...(useCodex?{codex:input=>control.removeProject(input)}:{}),
+    ...(claudeCodeBridge?{claude:input=>claudeCodeBridge!.removeProject(input)}:{}),
+    ...(antigravityBridge?{antigravity:input=>antigravityBridge!.removeProject(input)}:{}),
+  },
   onChanged:()=>{control.emit('change',null);},
 });
 const services=new ServiceRouter(bridges,request=>{
-  if(request.action==='projects.roots'||request.action==='projects.browse'||request.action==='projects.create'){
+  if(request.action==='projects.roots'||request.action==='projects.browse'||request.action==='projects.create'||request.action==='projects.update'||request.action==='projects.remove'){
     return handleProjects(request.action,request.payload,requestActor.getStore());
   }
   if(guest&&(request.action==='runtime.reload'||request.action.startsWith('antigravity.')||request.action.startsWith('claude.')))

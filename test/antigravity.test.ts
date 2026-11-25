@@ -1333,6 +1333,13 @@ test('Antigravity formats file URIs, generates deterministic UUIDv5, registers p
     if (method === 'ReadProject') {
       return {project: {id: body.id, name: 'Git Repo'}};
     }
+    if (method === 'UpdateProject') {
+      const file = join(projectsDir, `${body.project.id}.json`);
+      const prev = JSON.parse(await readFile(file, 'utf8'));
+      const next = {...prev, ...body.project};
+      await writeFile(file, JSON.stringify(next));
+      return {};
+    }
     return {};
   }, projectsDir);
 
@@ -1359,4 +1366,18 @@ test('Antigravity formats file URIs, generates deterministic UUIDv5, registers p
 
   // Non-existent folder is rejected before CreateProject.
   await assert.rejects(() => bridge.registerProject(`${Date.now()}:${randomUUID()}`, {name: 'Missing', path: join(dir, 'missing')}), /无法识别该目录/);
+
+  // Renaming via updateProject calls Hub UpdateProject and updates antigravity.list.
+  const renamed = await bridge.updateProject(`${Date.now()}:${randomUUID()}`, {id: toAntigravityFileUri(gitFolder), path: gitFolder, name: 'Renamed Repo'});
+  assert.equal(renamed.project.name, 'Renamed Repo');
+  const afterRename = await bridge.handle('antigravity.list', {});
+  assert.ok(afterRename.projects.some((p: any) => p.name === 'Renamed Repo' && p.id === toAntigravityFileUri(gitFolder)));
+
+  // Soft-archiving via removeProject calls UpdateProject({archived: true}) and hides it from antigravity.list.
+  const removed = await bridge.removeProject({id: toAntigravityFileUri(gitFolder), path: gitFolder});
+  assert.equal(removed.removed, true);
+  assert.equal(calls.at(-1)?.method, 'UpdateProject');
+  assert.equal(calls.at(-1)?.body.project.archived, true);
+  const afterRemove = await bridge.handle('antigravity.list', {});
+  assert.ok(!afterRemove.projects.some((p: any) => p.id === toAntigravityFileUri(gitFolder)));
 });

@@ -135,6 +135,13 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
               }
             }
           }
+        }else if(r.action==='projects.update'||r.action==='projects.remove'){
+          const svc=r.payload.service;
+          if(svc==='codex'||svc==='claude'||svc==='antigravity')recordedService=svc;
+          const name=typeof r.payload.name==='string'?r.payload.name.trim().slice(0,80):'';
+          const path=typeof r.payload.path==='string'?r.payload.path.trim():'';
+          const label=name||(path?path.split(/[\\/]/).filter(Boolean).at(-1)||path:typeof r.payload.id==='string'?r.payload.id:'');
+          detail=label.slice(0,200)||null;
         }
         team.addActivity({userId:member.user.id,deviceId:member.device.id,machineId:r.machineId,service:recordedService,action:r.action,threadId:threadOf(r.payload,result)??null,opId:typeof r.payload.opId==='string'?r.payload.opId:null,state,detail});
       }

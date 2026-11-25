@@ -164,6 +164,23 @@ test('Claude Code projects are folders: list, settings and new sessions', async 
     // Re-registering does not overwrite an existing CLAUDE.md.
     await bridge.registerProject(opId(), {name: '空项目改名', path: freshReal, initClaudeMd: '# Overwrite Attempt'});
     assert.equal(await readFile(join(freshReal, 'CLAUDE.md'), 'utf8'), '# Team Rules\n');
+
+    // Renaming and removing a Claude project updates/hides it from claude.list without deleting the folder.
+    const renamed = await bridge.updateProject({path: freshReal, name: '新名称'});
+    assert.equal(renamed.project.name, '新名称');
+    const afterRename = await bridge.handle('claude.list', {refresh: true});
+    assert.equal(afterRename.projects.find((p: any) => p.id === freshReal)?.name, '新名称');
+
+    const removed = await bridge.removeProject({path: freshReal});
+    assert.equal(removed.removed, true);
+    const afterRemove = await bridge.handle('claude.list', {refresh: true});
+    assert.equal(afterRemove.projects.find((p: any) => p.id === freshReal), undefined);
+    assert.equal(await readFile(join(freshReal, 'CLAUDE.md'), 'utf8'), '# Team Rules\n');
+
+    // Re-registering un-hides the project cleanly.
+    await bridge.registerProject(opId(), {name: '恢复项目', path: freshReal});
+    const afterRestore = await bridge.handle('claude.list', {refresh: true});
+    assert.equal(afterRestore.projects.find((p: any) => p.id === freshReal)?.name, '恢复项目');
   } finally {
     bridge?.close();ledger.close();
     await removeTestTemp(root);

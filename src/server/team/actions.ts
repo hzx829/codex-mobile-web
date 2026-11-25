@@ -38,7 +38,7 @@ export function refreshSenderNames(store: TeamStore, result: Json) {
 export const SEND_ACTIONS = ['session.create', 'turn.send', 'turn.steerQueued', 'turn.edit', 'claude.create', 'claude.send', 'claude.steerQueued', 'claude.edit', 'antigravity.create', 'antigravity.send', 'antigravity.steerQueued'];
 /** Requests that change something on a computer; each one is written to the activity log. */
 export const MUTATION_ACTIONS = new Set([
-  'project.create', 'projects.create', 'runtime.reload', 'session.create', 'session.fork', 'session.resume', 'session.rename', 'session.archive', 'session.unarchive',
+  'project.create', 'projects.create', 'projects.update', 'projects.remove', 'runtime.reload', 'session.create', 'session.fork', 'session.resume', 'session.rename', 'session.archive', 'session.unarchive',
   'turn.send', 'turn.cancelQueued', 'turn.withdrawQueued', 'turn.steerQueued', 'turn.edit', 'turn.stop', 'request.respond',
   'claude.create', 'claude.send', 'claude.stop', 'claude.respond', 'claude.project.save', 'claude.fork', 'claude.rename', 'claude.archive', 'claude.edit',
   'claude.steerQueued', 'claude.withdrawQueued', 'claude.cancelQueued',

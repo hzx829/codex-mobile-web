@@ -1,9 +1,10 @@
 import type {ReactNode} from 'react';
-export type IconName='back'|'more'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'redo'|'crop'|'trash'|'diff'|'team'|'bell'|'expand'|'collapse';
+export type IconName='back'|'more'|'ellipsis'|'computer'|'folder'|'search'|'compose'|'plus'|'mic'|'send'|'stop'|'chevron'|'close'|'refresh'|'settings'|'file'|'image'|'logout'|'check'|'chat'|'copy'|'browser'|'pin'|'archive'|'unread'|'shield'|'fork'|'edit'|'steer'|'now'|'undo'|'redo'|'crop'|'trash'|'diff'|'team'|'bell'|'expand'|'collapse';
 // One line-icon family: 24-unit grid, 1.75 stroke, round joins. Drawn at 20 px by default.
 const paths:Record<IconName,ReactNode>={
   back:<path d="M19 12H5m6-6.5L4.5 12l6.5 6.5"/>,
   more:<><circle cx="12" cy="5.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="18.5" r="1.4" fill="currentColor" stroke="none"/></>,
+  ellipsis:<><circle cx="5.5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor" stroke="none"/></>,
   computer:<><rect x="4" y="4.5" width="16" height="11" rx="1.75"/><path d="M2.5 19.5h19"/></>,
   folder:<path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4l2 2h8A1.5 1.5 0 0 1 20.5 9v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5Z"/>,
   search:<><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></>,

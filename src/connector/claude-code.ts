@@ -519,24 +519,47 @@ export class ClaudeCodeBridge {
     return {project: {id: path, name, path}};
   }
 
+  /** Renames a Claude Code project in the connector's registry (folder and sessions remain untouched). */
+  async updateProject(input: {id?: string; path?: string; name: string}): Promise<{project: {id: string; name: string; path: string}}> {
+    if (guestWorkspace()) throw new BridgeError('unsupported', '借用电脑暂不支持修改项目');
+    const rawPath = (typeof input.path === 'string' && input.path.trim()) || (typeof input.id === 'string' && input.id.trim()) || '';
+    const path = await projectDirectory(textRequired(rawPath, '项目目录', 4096));
+    const name = textRequired(input.name, '项目名称', 80);
+    this.ledger?.registerClaudeProject(path, name);
+    this.catalog = undefined;
+    return {project: {id: path, name, path}};
+  }
+
+  /** Removes/hides a Claude Code project from the sidebar list (folder and sessions remain untouched). */
+  async removeProject(input: {id?: string; path?: string}): Promise<{removed: true; notice?: string}> {
+    if (guestWorkspace()) throw new BridgeError('unsupported', '借用电脑暂不支持移除项目');
+    const rawPath = (typeof input.path === 'string' && input.path.trim()) || (typeof input.id === 'string' && input.id.trim()) || '';
+    const path = textRequired(rawPath, '项目目录', 4096);
+    this.ledger?.removeClaudeProject(path);
+    this.catalog = undefined;
+    return {removed: true, notice: '已从 Claude Code 项目列表移除（文件夹与会话均已保留）'};
+  }
+
   private async listedProjects(sessionPaths: string[]): Promise<{id: string; path: string; name?: string}[]> {
     if (guestWorkspace()) {
       return (await workspaceProjects(sessionPaths)).map(item => ({...item, id: item.path}));
     }
+    const hidden = this.ledger?.hiddenProjects('claude') || new Set<string>();
     const registered = this.ledger?.claudeProjects() || [];
     const alive: {id: string; path: string; name?: string}[] = [];
     const seen = new Set<string>();
     for (const item of registered) {
+      const key = projectPathKey(item.path);
+      if (hidden.has(key)) continue;
       const ok = await stat(item.path).then(info => info.isDirectory(), () => false);
       if (!ok) continue;
-      const key = projectPathKey(item.path);
       if (seen.has(key)) continue;
       seen.add(key);
       alive.push({id: item.path, path: item.path, ...(item.name ? {name: item.name} : {})});
     }
     for (const path of sessionPaths) {
       const key = projectPathKey(path);
-      if (seen.has(key)) continue;
+      if (hidden.has(key) || seen.has(key)) continue;
       seen.add(key);
       alive.push({id: path, path});
     }
