@@ -9,7 +9,7 @@ import { LiveDiff, RuntimeLive, type LiveFrame } from './live.js';
 import { approvalResult } from './approvals.js';
 import { createGuestProject, guestWorkspace, projectDirectory, readProjectFile, downloadProjectFile, openProjectDownload, workspaceProjects } from './project.js';
 import { nativeProjects, indexedSessions, indexedProjectPaths } from './projects.js';
-import { readPaginatedHistory } from './paginated-history.js';
+import { indexedTurnHasWriter, readPaginatedHistory } from './paginated-history.js';
 import { BridgeError, textRequired, turnFinished, type Json, type BridgeRequest, type SessionView, type ContextUsage, type ThreadStatus, type TurnCursor, type TurnView } from '../shared/types.js';
 import {imageBytes} from '../shared/images.js';
 import {validateAttachments,uploadId,fileAttachment} from '../shared/attachments.js';
@@ -88,7 +88,7 @@ export class Control extends EventEmitter {
   private closed=false;
   private restartTimer?:NodeJS.Timeout;
   private restartDelay=1000;
-  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions) {
+  constructor(public ledger:Ledger,public runtime=new AppServer(),public desktop=new Desktop(),private projects=nativeProjects,private history=readPaginatedHistory,private listSessions=indexedSessions,private externalTurnRunning=indexedTurnHasWriter) {
     super();
     runtime.on('event',(e:Json)=>{
       const {threadId,turnId}=e.params||{};
@@ -250,13 +250,20 @@ export class Control extends EventEmitter {
         if(e instanceof BridgeError&&e.code==='changed')throw e;
         const {raw,hasMore,notice,resumeUnavailable,nextCursor}=await this.runtimeThread(id,limit,cursor);
         nativeCursor=nextCursor;
-        const managed=Boolean(guestWorkspace()||this.ledger.owns(id))&&!resumeUnavailable;
+        const tail=raw.turns?.at(-1);
+        // An unloaded App Server may report an unfinished turn owned by another process as interrupted.
+        const externalRunning=!cursor&&raw.status?.type==='notLoaded'&&typeof tail?.id==='string'&&
+          (tail.status==='inProgress'||tail.status==='interrupted'&&tail.completedAt==null&&!tail.error)&&
+          await this.externalTurnRunning(id,tail.id);
+        if(externalRunning)raw.turns=[...raw.turns.slice(0,-1),{...tail,status:'inProgress'}];
+        const managed=Boolean(guestWorkspace()||this.ledger.owns(id))&&!resumeUnavailable&&!externalRunning;
         for(const [key,value] of Object.entries(this.settings.get(id)||{}))if(raw[key]===undefined||raw[key]===null||raw[key]==='')raw[key]=value;
         view=normalizeSession(raw,managed?'connector':'history',[],limit);
         if(managed){view.contextUsage=this.contexts.get(id)||null;for(const turn of view.turns)turn.diff=this.diffs.get(turn.id)||turn.diff;}
         view.hasMore=hasMore||view.hasMore;
         view.resumeUnavailable=resumeUnavailable;
-        if(!managed)view.notice=guestWorkspace()?'这条会话的历史格式暂不支持继续。':notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
+        if(externalRunning)view.notice='此任务正在另一个 Codex 进程中运行，这里只能查看进度。';
+        else if(!managed)view.notice=guestWorkspace()?'这条会话的历史格式暂不支持继续。':notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
       }
     }
     if(guestWorkspace())view.cwd=await projectDirectory(view.cwd);
@@ -525,7 +532,7 @@ export class Control extends EventEmitter {
     if(action==='session.resume') {
       if(session.source!=='history')throw new BridgeError('already_connected','会话已经接入，请刷新后直接发送');
       if(session.resumeUnavailable)throw new BridgeError('unsupported','此分页会话暂不能在连接器中继续，请在 Codex 桌面操作');
-      if(!p.confirmIdle||session.activeTurnId)throw new BridgeError('active','请先在电脑结束原任务，再继续会话');
+      if(!p.confirmIdle||session.running)throw new BridgeError('active','请先在电脑结束原任务，再继续会话');
       const r=await this.runtime.rpc('thread/resume',{threadId:id});
       this.loaded.add(id);this.ledger.claim(id);this.settings.set(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy,sessionId:r.thread?.sessionId||id});this.emit('change',id);return {threadId:id,model:r.model,provider:r.modelProvider};
     }

@@ -774,7 +774,7 @@ function App(){
         <button type="button" className="icon-button" aria-haspopup="dialog" aria-label={`会话状态：${contextSummary(view?.contextUsage)}`} title="上下文与额度限制" disabled={!selected} onClick={e=>openStatus(e.currentTarget)}><ContextIndicator usage={view?.contextUsage}/></button><button type="button" className="icon-button" aria-haspopup="dialog" aria-label="会话操作" disabled={!selected||busy} onClick={e=>openThreadMenu(e.currentTarget)}><Icon name="more"/></button>
       </ThreadHeader>
        {browserSession&&<BrowserPreviewPanel session={browserSession} onOpen={()=>showPreview({kind:'web',session:browserSession})} onClose={closeBrowser}/>}
-      {view?.notice&&!newChat&&<div className="banner">{view.notice}{!guest&&view.source==='history'&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
+      {view?.notice&&!newChat&&<div className="banner">{view.notice}{!guest&&view.source==='history'&&!view.running&&!view.resumeUnavailable&&<button disabled={!connected||busy||Boolean(pending)} onClick={()=>{if(window.confirm('确认原桌面或 CLI 中的任务已经结束？继续后将由本连接器运行。'))void mutate('session.resume',{threadId:selected,confirmIdle:true});}}>在这里继续</button>}</div>}
       <div className={`timeline ${newChat||(!loading&&view&&!view.turns.length)?'is-empty':''}`} ref={timeline} onScroll={()=>{const el=timeline.current!,up=el.scrollTop<lastScrollTop.current,distance=el.scrollHeight-el.scrollTop-el.clientHeight;lastScrollTop.current=el.scrollTop;
           // Content that shrinks at the bottom moves the position up without the user; still at the bottom means still following.
           sticky.current=distance<24&&(!up||distance<2);if(up&&el.scrollTop<160&&!historyError)void loadOlder();}}>
@@ -799,7 +799,7 @@ function App(){
           add={()=>setSheet('add')} addDisabled={busy||imageLoading}
           permission={<PermissionButton ref={permissionButton} options={APPROVALS} value={approval} current={{id:inheritedApproval||'',label:approvalName(inheritedApproval)}} expanded={Boolean(permissionPoint)} disabled={busy} open={setPermissionPoint}/>}
           model={<ModelButton ref={modelButton} label={modelLabel} details={[effortLabel,isFast?'极速':''].filter(Boolean)} expanded={Boolean(modelPoint)} disabled={busy} open={setModelPoint}/>}
-          running={view?.activeTurnId&&!newChat?{stop:()=>void mutate('turn.stop',target()),disabled:!canOperate,queue:true}:undefined}
+          running={view?.activeTurnId&&view.source!=='history'&&!newChat?{stop:()=>void mutate('turn.stop',target()),disabled:!canOperate,queue:true}:undefined}
           send={{label:queueNext?'完成后发送':'发送消息',sending,disabled:!canWrite||!draft.trim()&&!attachmentCount}}/>
         {pick.inputs}
       </div>
