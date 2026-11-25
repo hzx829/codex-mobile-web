@@ -236,7 +236,7 @@ function App(){
       setView(old=>{const result=applyLiveFrames(old,frames);if(result.resync)scheduleRefresh();return result.view;});
     });
   }
-  async function list(append=false,refresh=false){
+  async function list(append=false,refresh=false,showError=true){
     const c={...current.current};
     const key=(value:typeof c)=>JSON.stringify([value.service,value.machine,value.project,value.searchQuery,value.archived]);
     const here=()=>key(c)===key(current.current);
@@ -244,12 +244,12 @@ function App(){
       start:()=>setListBusy(true),
       result:r=>{
         if(!here())return;
-        setSessions(old=>append?[...old,...r.data.filter((n:Json)=>!old.some(s=>s.id===n.id))]:r.data);setCursor(r.nextCursor);
+        startTransition(()=>{setSessions(old=>append?[...old,...r.data.filter((n:Json)=>!old.some(s=>s.id===n.id))]:r.data);setCursor(r.nextCursor);});
         if(!append&&!c.searchQuery)rememberList(listKey(c.machine,c.project,c.archived),r.data);
         setPreferences(old=>{if(old.machine!==c.machine)return old;const values=rememberThreads(old.values,r.data,c.archived);if(values===old.values)return old;save(`thread-preferences:${c.machine}`,values);return {...old,values};});
         setProjects(old=>[...new Set<string>([...old,...r.data.map((s:Json)=>s.cwd).filter(Boolean)])]);
       },
-      error:e=>{if(here())fail(e);},
+      error:e=>{if(here()&&showError)fail(e);},
       finish:()=>setListBusy(false),
     });
   }
@@ -319,7 +319,7 @@ function App(){
   const codexSync=useThreadSync(codexSynced?syncLink:undefined,'codex',codexSynced?selected:'',()=>seedOf(cachedView<Json>(`${machine}:${selected}`),'turns'),machine);
   useSyncedPanel(codexSync.view,'turns',next=>{
     if(next.id!==current.current.selected)return;
-    setView({...next,nextCursor:next.truncated&&next.turns.length?{before:next.turns[0].id}:null,hasMore:Boolean(next.truncated)} as unknown as SessionView);setLoading(false);
+    startTransition(()=>{setView({...next,nextCursor:next.truncated&&next.turns.length?{before:next.turns[0].id}:null,hasMore:Boolean(next.truncated)} as unknown as SessionView);setLoading(false);});
   },update=>setError(update),'请更新这台电脑上的连接器。');
   useEffect(()=>{setPreferences({machine,values:load(`thread-preferences:${machine}`,{})});setThreadMenu(null);},[machine]);
   useEffect(()=>{
@@ -335,7 +335,7 @@ function App(){
     setServiceTier(undefined);
     // A message that is still being sent keeps its place when a new chat turns into its thread.
     const sending=optimisticRef.current?.key===scope;setOptimistic(old=>old?.key===scope?old:null);
-    setDraft(sending?'':load(draftKey,''));setPending(load(pendingKey,null));void refreshSession();
+    setDraft(sending?'':load(draftKey,''));setPending(load(pendingKey,null));if(!codexSynced)void refreshSession();
   },[machine,selected,newChat]);
   useEffect(()=>{
     if(!view||view.id!==selected)return;
@@ -355,7 +355,7 @@ function App(){
     window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',hidden);
     return()=>{flush();window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',hidden);};
   },[]);
-  useEffect(()=>{void refreshSession();},[connected,codexActive]);
+  useEffect(()=>{if(!codexSynced)void refreshSession();},[connected,codexActive,codexSynced]);
   useEffect(()=>{
     const viewport=window.visualViewport;if(!viewport)return;
     // Keyboard animations fire these events continuously. Write once per frame, and only
@@ -371,7 +371,7 @@ function App(){
     apply();viewport.addEventListener('resize',resize);viewport.addEventListener('scroll',resize);
     return()=>{cancelAnimationFrame(frame);viewport.removeEventListener('resize',resize);viewport.removeEventListener('scroll',resize);};
   },[]);
-  useLayoutEffect(()=>{const el=timeline.current;if(!el)return;const anchor=scrollAnchor.current;scrollAnchor.current=null;if(anchor?.element.isConnected)el.scrollTop+=anchor.element.getBoundingClientRect().top-anchor.top;else if(sticky.current)el.scrollTop=el.scrollHeight;lastScrollTop.current=el.scrollTop;},[view?.turns,loadingOlder]);
+  useLayoutEffect(()=>{const el=timeline.current;if(!el)return;const anchor=scrollAnchor.current;scrollAnchor.current=null;if(anchor?.element.isConnected)el.scrollTop+=anchor.element.getBoundingClientRect().top-anchor.top;else if(sticky.current)el.scrollTop=el.scrollHeight;lastScrollTop.current=el.scrollTop;},[view?.turns,loadingOlder,optimistic?.at]);
   useEffect(()=>{
     const el=timeline.current,content=timelineContent.current;if(!el||!content)return;
     let frame=0;
@@ -384,8 +384,12 @@ function App(){
     if(!connected||!codexActive)return;
     // A safety net for missed notices: the open thread also renews its live watch here.
     let ticks=0;
-    const foreground=()=>{if(document.visibilityState!=='visible'&&!(current.current.selected&&watchWhileHidden(viewRef.current?.running)))return;if(current.current.selected)void refreshSession();else void list();};
-    const timer=setInterval(()=>{if(current.current.selected&&++ticks%2)return;foreground();},5000);document.addEventListener('visibilitychange',foreground);
+    const foreground=(event?:Event)=>{
+      const visible=document.visibilityState==='visible';
+      if(visible)void list(false,false,false);
+      if(!current.current.synced&&current.current.selected&&(visible||watchWhileHidden(viewRef.current?.running))&&(event||++ticks%2===0))void refreshSession();
+    };
+    const timer=setInterval(foreground,5000);document.addEventListener('visibilitychange',foreground);
     return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',foreground);};
   },[connected,project,searchQuery,archived,codexActive]);
   useEffect(()=>{if(codexActive&&connected&&pending&&!busy)void checkPending();},[connected,pending?.opId,busy,codexActive]);
@@ -421,7 +425,7 @@ function App(){
     setOperation(null);if(!stillHere())return;
     if(result.queuedId)setView(old=>old?{...old,queuedMessages:old.queuedMessages?.filter(message=>message.id!==result.queuedId)}:old);
     setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='queue_withdrawn'?'已撤回到输入框':result.kind==='queue_cancelled'?'已删除排队消息':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='stop_requested'?'已请求停止':result.kind==='response_submitted'?'回应已提交':result.kind==='edited'?'已重新发送':'');
-    void refreshSession();void list();
+    void refreshSession();void list(false,false,false);
   }
   async function checkPending(){
     const record=load(pendingKey,null);if(!record||!connected)return;
@@ -460,7 +464,6 @@ function App(){
     if(images.length&&!canImage){setError('当前模型未确认图片能力，请更换模型或移除图片');return;}
     try{validateAttachments(images,files);}catch(error){fail(error);return;}
     submitting.current=true;sticky.current=true;
-    if(timeline.current){timeline.current.scrollTop=timeline.current.scrollHeight;lastScrollTop.current=timeline.current.scrollTop;}
     try{await sendDraft();}finally{submitting.current=false;}
   }
   async function sendDraft(){
@@ -507,7 +510,7 @@ function App(){
       if(here)setNotice('结果待核实，系统不会自动重发。');
       setOptimistic(old=>old?.at===message.at?{...old,state:'uncertain'}:old);
     }
-    setBusy(false);setUploadProgress(null);void refreshSession();void list();
+    setBusy(false);setUploadProgress(null);void refreshSession();void list(false,false,false);
   }
   /** The action and payload that read a thread's file: Codex's `file.*`, or the app's own with its conversation. */
   function fileAction(action:'read'|'download',threadId:string,payload:Json):{action:RequestAction;payload:Json}|null{
@@ -761,7 +764,9 @@ function App(){
       {!project&&!archived&&!searchQuery&&switcher}
       <div className="home-content">
         {!project&&!searchQuery&&<section className="project-section"><h2>项目</h2><button className="project-row" disabled={busy} onClick={startNew}><Icon name="chat"/><span>聊天</span></button>{projects.map(p=><button className="project-row" key={p} disabled={busy} onClick={()=>{setSessions([]);setCursor(null);navigate({...home,project:p});}} title={p}><Icon name="folder"/><span>{projectName(p)}</span></button>)}</section>}
-        <section className="recent-section">{!listedThreads.length&&<h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2>}{groupThreads(listedThreads,preferences,searchQuery?'搜索结果':archived?'归档会话':'最近').map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]} time={relativeTime(s.updatedAt)} open={()=>{changePreference(s.id,{unread:false});navigate({...route,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
+        <section className="recent-section">{!listedThreads.length&&<h2>{searchQuery?'搜索结果':archived?'归档会话':'最近'}</h2>}{groupThreads(listedThreads,preferences,searchQuery?'搜索结果':archived?'归档会话':'最近').map(group=><div className="thread-group" key={group.key}><h2>{group.label}</h2><nav aria-label={group.label}>{group.threads.map(s=><ThreadRow key={s.id} thread={s} selected={s.id===selected} disabled={busy} preference={preferences[s.id]}
+          time={relativeTime(s.updatedAt)} activeLabel="进行中" active={connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?view.running:s.status?.type==='active')}
+          open={()=>{changePreference(s.id,{unread:false});navigate({...route,thread:s.id,newChat:false});}} menu={point=>setThreadMenu({thread:s,point,machine,archived})}/>)}</nav></div>)}
           {listBusy&&!listedThreads.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:!listedThreads.length&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':searchQuery?'没有找到匹配的会话。':'还没有聊天，开始一个新任务吧。'}</p>}
           {cursor&&<button className="more-link" disabled={listBusy} onClick={()=>void list(true)}>{listBusy?'正在加载…':'加载更多'}</button>}
         </section>

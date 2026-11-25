@@ -67,6 +67,8 @@ export class Control extends EventEmitter {
   /** Whether the relay forwards live frames; an older relay only forwards change notices. */
   livePush=true;
   private loaded=new Set<string>();
+  private newThreads=new Map<string,Json>();
+  private runtimeActive=new Set<string>();
   private settings=new Map<string,Json>();
   private diffs=new Map<string,string>();
   private starting=new Map<string,string>();
@@ -100,8 +102,14 @@ export class Control extends EventEmitter {
       if(retry&&(e.method==='thread/closed'||e.method==='turn/started'||e.method==='turn/completed'||
         retry.turnId===turnId&&(e.method==='item/started'||e.method==='item/agentMessage/delta'||e.method==='error'&&e.params.willRetry===false)))this.retries.delete(threadId);
       if(e.method==='turn/diff/updated')this.diffs.set(e.params.turnId,e.params.diff);
-      if(e.method==='turn/completed')this.starting.delete(e.params.threadId);
-      if(e.method==='thread/closed'){this.loaded.delete(e.params.threadId);this.starting.delete(e.params.threadId);}
+      if(e.method==='thread/status/changed') {
+        if(e.params.status?.type==='active')this.runtimeActive.add(threadId);
+        else this.runtimeActive.delete(threadId);
+      }
+      if(e.method==='turn/completed'||e.method==='thread/closed') {
+        this.starting.delete(threadId);this.newThreads.delete(threadId);this.runtimeActive.delete(threadId);
+      }
+      if(e.method==='thread/closed')this.loaded.delete(threadId);
       if(e.method==='thread/tokenUsage/updated'){
         this.contexts.set(e.params.threadId,contextUsage(e.params.tokenUsage));
         const usage=e.params.tokenUsage;
@@ -115,7 +123,7 @@ export class Control extends EventEmitter {
       if(itemsOnly&&this.loaded.has(threadId)&&this.watched(threadId)&&hadRetry===this.retries.has(threadId))this.emit('stream',threadId);
       else this.emit('change',e.params?.threadId||e.params?.thread?.id||null);
     });
-    runtime.on('offline',()=>{this.turnTokens.clear();for(const [id,start] of this.turnStarts)if(!start.desktop)this.turnStarts.delete(id);this.loaded.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.live.clear();this.liveDiff.clear();this.generation=randomUUID();this.emit('change',null);this.scheduleRestart();});
+    runtime.on('offline',()=>{this.turnTokens.clear();for(const [id,start] of this.turnStarts)if(!start.desktop)this.turnStarts.delete(id);this.loaded.clear();this.newThreads.clear();this.runtimeActive.clear();this.starting.clear();this.retries.clear();this.settings.clear();this.contexts.clear();this.live.clear();this.liveDiff.clear();this.generation=randomUUID();this.emit('change',null);this.scheduleRestart();});
     desktop.on('change',(id:string,detail?:Json)=>{
       this.finishDesktopTurns(id);
       if(!this.loaded.has(id)&&this.watched(id)&&this.desktopItemsOnly(id,detail))this.emit('stream',id);
@@ -197,7 +205,15 @@ export class Control extends EventEmitter {
         const path=await projectDirectory(thread.cwd).catch(()=>undefined);
         return path?{...thread,cwd:path}:null;
       })):page.data;
-      return {...page,data:threads.flatMap(thread=>thread?[{...thread,status:this.desktop.states.get(thread.id)?.state.threadRuntimeStatus}]:[])};
+      const data=await Promise.all(threads.filter(thread=>thread!==null).map(async thread=>{
+        const id=thread.id;
+        if(this.loaded.has(id))return {...thread,status:this.runtimeActive.has(id)||this.starting.has(id)||this.live.has(id)?{type:'active'}:undefined};
+        const desktop=this.desktop.states.get(id)?.state,status=desktop?.threadRuntimeStatus;
+        if(status?.type==='active')return {...thread,status};
+        const running=Boolean(desktop&&liveLocation(desktop)?.turn.status==='inProgress')||await this.externalTurnRunning(id);
+        return {...thread,status:running?{type:'active'}:status};
+      }));
+      return {...page,data};
     }
     if(req.action==='session.read') {
       const cursor:TurnCursor|undefined=p.cursor==null?undefined:{before:textRequired(p.cursor.before,'历史位置',200)};
@@ -252,9 +268,10 @@ export class Control extends EventEmitter {
         nativeCursor=nextCursor;
         const tail=raw.turns?.at(-1);
         // An unloaded App Server may report an unfinished turn owned by another process as interrupted.
-        const externalRunning=!cursor&&raw.status?.type==='notLoaded'&&typeof tail?.id==='string'&&
+        const tailId=tail?.id||tail?.turnId;
+        const externalRunning=!cursor&&raw.status?.type==='notLoaded'&&typeof tailId==='string'&&
           (tail.status==='inProgress'||tail.status==='interrupted'&&tail.completedAt==null&&!tail.error)&&
-          await this.externalTurnRunning(id,tail.id);
+          await this.externalTurnRunning(id,tailId);
         if(externalRunning)raw.turns=[...raw.turns.slice(0,-1),{...tail,status:'inProgress'}];
         const managed=Boolean(guestWorkspace()||this.ledger.owns(id))&&!resumeUnavailable&&!externalRunning;
         for(const [key,value] of Object.entries(this.settings.get(id)||{}))if(raw[key]===undefined||raw[key]===null||raw[key]==='')raw[key]=value;
@@ -315,6 +332,9 @@ export class Control extends EventEmitter {
       const unsupportedTurns=e instanceof BridgeError&&/list_turns is not supported yet/i.test(e.message);
       if(!paginated&&!unsupportedTurns) {
         if(e instanceof BridgeError&&/not materialized yet/.test(e.message)) {
+          // A freshly created thread already has metadata, even before its rollout exists.
+          const created=!cursor?this.newThreads.get(id):undefined;
+          if(created)return {raw:{...created},hasMore:false};
           const r=await this.runtime.rpc('thread/read',{threadId:id,includeTurns:false});
           return {raw:r.thread,hasMore:false};
         }
@@ -466,7 +486,8 @@ export class Control extends EventEmitter {
       const policy=approvalPolicy(p.approvalPolicy);if(policy)options.approvalPolicy=policy;
       const r=await this.runtime.rpc('thread/start',options);
       this.loaded.add(r.thread.id);this.ledger.claim(r.thread.id);this.settings.set(r.thread.id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy||policy,sessionId:r.thread.sessionId||r.thread.id});
-      this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider};
+      this.newThreads.set(r.thread.id,{...r.thread,turns:[]});
+      this.emit('change',r.thread.id);return {threadId:r.thread.id,model:r.model,provider:r.modelProvider,generation:this.generation};
     }
     const id=textRequired(p.threadId,'会话');
     if(action==='turn.cancelQueued'||action==='turn.withdrawQueued') {
@@ -521,12 +542,12 @@ export class Control extends EventEmitter {
       await this.runtime.rpc('thread/unarchive',{threadId:id});
       this.emit('change',id);return {threadId:id,archived:false};
     }
-    const session=await this.read(id);
+    const session=await this.read(id,action==='turn.send'?1:undefined);
     if(action==='session.archive') {
       if(session.running)throw new BridgeError('active','请等当前任务结束后再归档');
       if(this.ledger.queued(id).length)throw new BridgeError('active','请先处理排队消息再归档');
       await this.runtime.rpc('thread/archive',{threadId:id});
-      this.loaded.delete(id);this.settings.delete(id);this.contexts.delete(id);
+      this.loaded.delete(id);this.newThreads.delete(id);this.runtimeActive.delete(id);this.settings.delete(id);this.contexts.delete(id);
       this.emit('change',id);return {threadId:id,archived:true};
     }
     if(action==='session.resume') {
@@ -549,11 +570,12 @@ export class Control extends EventEmitter {
       // Resume by ID: app-server's native ownership lock rejects another application's active thread.
       const r=await this.runtime.rpc('thread/resume',{threadId:id});
       this.loaded.add(id);this.rememberSettings(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy});
-      const connected=await this.read(id);
+      const connected=await this.read(id,1);
       if(connected.running||connected.activeTurnId!==session.activeTurnId)throw new BridgeError('changed','任务已发生变化，输入已保留，请刷新后发送');
     }
     const context={conversationId:id,hostId:this.desktop.states.get(id)?.hostId||'local'};
-    if(session.source==='desktop')await this.desktop.request('thread-owner-discovery',context,1500);
+    // A send is routed directly to the desktop owner by the follower request.
+    if(session.source==='desktop'&&action!=='turn.send')await this.desktop.request('thread-owner-discovery',context,1500);
     if(action==='turn.edit') {
       if(session.running||p.expectedTurnId!==session.activeTurnId)throw new BridgeError('active','请等当前任务结束后再编辑');
       const turnId=textRequired(p.turnId,'轮次',200),itemId=textRequired(p.itemId,'消息',200),text=textRequired(p.text,'输入');

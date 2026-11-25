@@ -76,18 +76,19 @@ test('completed, interrupted and failed turns can be forked while an active turn
   }
 });
 test('desktop reconnect updates a single conversation item and keeps its place in the turn',()=>{
-  const turn:{turnId:string;status:string;items:Json[]}={turnId:'t',status:'inProgress',items:[
+  const turn:{turnId:string;status:string;items:Json[];error?:Json}={turnId:'t',status:'inProgress',error:{message:'Reconnecting... 1/5'},items:[
     {id:'user',type:'userMessage',input:[{type:'text',text:'hello'}]},
     {id:'retry-1',type:'error',willRetry:true,message:'Reconnecting... 1/5',additionalDetails:'private proxy details'},
   ]};
   const read=()=>normalizeSession({id:'s',turns:[turn]},'desktop',[]).turns[0];
   assert.equal(read().items[1].text,'Codex 正在重连 1/5…');
+  assert.equal(read().error,undefined);
   turn.items.push({id:'retry-2',type:'error',willRetry:true,message:'Reconnecting 2/5'});
   assert.deepEqual(read().items.slice(1),[{id:'retry-1',type:'retry',role:'status',text:'Codex 正在重连 2/5…'}]);
   turn.items.push({id:'reply',type:'agentMessage',text:'back online'});
   assert.equal(read().items[1].text,'Codex 曾重连 2/5');
   assert.equal(read().items[2].text,'back online');
-  turn.status='failed';
+  turn.status='failed';delete turn.error;
   turn.items.push({id:'failure',type:'error',willRetry:false,message:'private proxy details',errorInfo:{responseStreamDisconnected:{httpStatusCode:null}}});
   assert.equal(read().error,'Codex 的连接中断，本轮未完成。');
 });

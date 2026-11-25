@@ -126,7 +126,6 @@ export class ThreadSync {
           const snapshot:SyncSnapshot=await this.link.request('sync.open',{service:this.service,threadId:this.threadId,have,...this.order.length?{from:this.order[0]}:{}});
           if(this.closed)return;
           this.applySnapshot(snapshot);
-          this.error=null;clearTimeout(this.retry);
         }catch(error){
           if(this.closed)return;
           this.error=error;
@@ -169,6 +168,7 @@ export class ThreadSync {
     this.buffered=[];
     this.phase='live';
     for(const frame of waiting)if(!this.apply(frame))break;
+    this.error=null;clearTimeout(this.retry);
     this.emit();
   }
 

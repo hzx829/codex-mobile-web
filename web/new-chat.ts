@@ -8,7 +8,9 @@ export async function createFirstTurn(call:Call,input:Json,onCreated:(threadId:s
     const created=await call('session.create',{cwd:input.cwd,model:input.model||undefined,approvalPolicy:input.approvalPolicy||undefined,opId:input.createId});
     if(created.state!=='accepted')return {stage,result:created};
     threadId=created.threadId;stage='send';onCreated(threadId!);
-    const session=await call('session.read',{threadId});
+    const session=typeof created.generation==='string'&&created.generation
+      ?{source:'connector',generation:created.generation,canControl:true,activeTurnId:null}
+      :await call('session.read',{threadId});
     if(!session.canControl||session.activeTurnId)return {stage,threadId,result:{state:'failed',error:{message:'会话已建立，请确认当前状态后发送。'}}};
     const files=await uploadAttachments(call,threadId!,input.files||[],progress);
     // Large uploads may outlive the operation's five-minute acceptance window.

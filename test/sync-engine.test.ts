@@ -73,6 +73,16 @@ test('an answer counting on an entry no longer held asks again without any', asy
   sync.close();
 });
 
+test('a recovered subscription publishes the successful snapshot with its error cleared',async()=>{
+  const fake=fakeLink(),sync=new ThreadSync(fake.link,'codex','c');
+  const failure={code:'runtime_error',message:'temporarily unavailable'};
+  fake.answers.push(()=>{throw failure;},()=>({epoch:'e',seq:0,head:{id:'c'},order:[],entries:[],hasMore:false}));
+  try{
+    await sync.open();assert.equal(sync.snapshot.error,failure);
+    await sync.open();assert.equal(sync.snapshot.phase,'live');assert.equal(sync.snapshot.error,null);
+  }finally{sync.close();}
+});
+
 test('pages add earlier entries; a new order joins onto what is held before it', async () => {
   const fake = fakeLink();
   fake.answers.push(() => ({epoch: 'e', seq: 0, head: {}, order: ['c1', 'c2'], entries: [entry(turn('c1', '1')), entry(turn('c2', '2'))], hasMore: true}));

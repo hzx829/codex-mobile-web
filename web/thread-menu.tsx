@@ -11,7 +11,7 @@ export function relativeTime(value:number){
   return minutes<1?'刚刚':minutes<60?`${minutes}分钟`:minutes<1440?`${Math.floor(minutes/60)}小时`:`${Math.floor(minutes/1440)}天`;
 }
 
-export function ThreadRow({thread,selected,disabled=false,preference={},time,open,menu}:{thread:Json;selected:boolean;disabled?:boolean;preference?:ThreadPreference;time:string;open:()=>void;menu?:(point:MenuPoint)=>void}){
+export function ThreadRow({thread,selected,disabled=false,preference={},time,active=thread.status?.type==='active',activeLabel,open,menu}:{thread:Json;selected:boolean;disabled?:boolean;preference?:ThreadPreference;time:string;active?:boolean;activeLabel?:string;open:()=>void;menu?:(point:MenuPoint)=>void}){
   const timer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),start=useRef<MenuPoint|null>(null),held=useRef(false);
   const cancel=()=>{clearTimeout(timer.current);start.current=null;};
   useEffect(()=>cancel,[]);
@@ -21,8 +21,8 @@ export function ThreadRow({thread,selected,disabled=false,preference={},time,ope
     onPointerMove={e=>{if(start.current&&Math.hypot(e.clientX-start.current.x,e.clientY-start.current.y)>10)cancel();}}
     onPointerUp={cancel} onPointerCancel={cancel} onPointerLeave={cancel}
     onKeyDown={menu?e=>{if(e.key==='Enter'||e.key===' ')held.current=false;if(e.key==='ContextMenu'||e.key==='F10'&&e.shiftKey){e.preventDefault();const rect=e.currentTarget.getBoundingClientRect();menu({x:rect.left+16,y:rect.bottom});}}:undefined}>
-    <span className="session-name">{thread.status?.type==='active'&&<i className="dot online"/>}{preference.unread&&<i className="dot unread-dot"/>}{thread.title}</span>
-    <span className="session-meta">{preference.pinned&&<Icon name="pin" size={14}/>}<time>{time}</time><OwnerBadge owner={thread.owner}/></span>
+    <span className="session-name">{active&&!activeLabel&&<i className="dot online"/>}{preference.unread&&<i className="dot unread-dot"/>}{thread.title}</span>
+    <span className="session-meta">{preference.pinned&&<Icon name="pin" size={14}/>}{active&&activeLabel?<span className="session-active">{activeLabel}</span>:<time>{time}</time>}<OwnerBadge owner={thread.owner}/></span>
   </button>;
 }
 

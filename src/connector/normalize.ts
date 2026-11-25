@@ -55,7 +55,7 @@ export function normalizeTurn(t:Json,index=0):TurnView {
   }
   if(t.params?.input?.length&&!items.some(i=>i.role==='user'))items.unshift(normalizeItem({id:id+':input',type:'userMessage',content:t.params.input}));
   const error=t.error||rawItems.findLast(item=>item.type==='error'&&item.willRetry===false);
-  const errorText=connectionError(error?.codexErrorInfo??error?.errorInfo)?'Codex 的连接中断，本轮未完成。':t.error?.message;
+  const errorText=t.status==='inProgress'?undefined:connectionError(error?.codexErrorInfo??error?.errorInfo)?'Codex 的连接中断，本轮未完成。':t.error?.message;
   return {id:id||`historical-${index}`,status:t.status,items,canFork:Boolean(id)&&turnFinished(t.status),diff:bounded(t.diff)||undefined,error:bounded(errorText)||undefined};
 }
 export function normalizeSession(raw:Json,source:SessionView['source'],requests:Json[],limit=20,before?:string):SessionView {
