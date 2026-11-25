@@ -1,5 +1,6 @@
 import {DatabaseSync} from 'node:sqlite';
 import {createHash} from 'node:crypto';
+import {watch, type FSWatcher} from 'node:fs';
 import {open, readFile, readdir, stat} from 'node:fs/promises';
 import {dirname, isAbsolute, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -20,7 +21,7 @@ import {
   type QueuedMessage,
 } from '../shared/types.js';
 import type {Ledger} from './ledger.js';
-import {callHub} from './antigravity-hub.js';
+import {callHub, closeHubPool} from './antigravity-hub.js';
 import {imageBytes, validateImages} from '../shared/images.js';
 import {MAX_ATTACHMENTS, type FileAttachment} from '../shared/attachments.js';
 import {attachmentIds, requestFiles, scopedUpload, withAttachmentLinks} from './attachments.js';
@@ -754,72 +755,163 @@ async function resolveMediaImages(items: Json[]): Promise<string[]> {
 const sameImages = (a?: string[], b?: string[]) =>
   (!a?.length && !b?.length) || (a?.length === b?.length && a!.every((url, index) => url === b![index]));
 
-async function transcript(path: string): Promise<{messages: AntigravityMessage[]; issue: AntigravityIssue | null; issueStep: number; clearStep: number}> {
-  const file = await open(path, 'r').catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== 'ENOENT') throw error;
-    return null;
-  });
-  if (!file) return {messages: [], issue: null, issueStep: -1, clearStep: -1};
-  try {
-    const {size} = await file.stat();
-    const start = Math.max(0, size - tailSize);
-    const data = Buffer.alloc(size - start);
-    const {bytesRead} = await file.read(data, 0, data.length, start);
-    const lines = data.toString('utf8', 0, bytesRead).split('\n');
-    if (start) lines.shift(); // The first line may start in the middle of a UTF-8 character.
-    const result = new Map<string, AntigravityMessage>();
-    const mediaById = new Map<string, Json[]>();
-    let issue: AntigravityIssue | null = null;
-    let issueStep = -1;
-    let clearStep = -1;
-    for (const line of lines) {
-      let step;
-      try { step = JSON.parse(line); } catch { continue; }
-      if (!Number.isSafeInteger(step?.step_index)) continue;
-      const id = String(step.step_index);
-      if (step.type === 'USER_INPUT' && (typeof step.content === 'string' || Array.isArray(step.media))) {
-        issue = null;
-        issueStep = -1;
-        if (step.step_index > clearStep) clearStep = step.step_index;
-        const content = typeof step.content === 'string' ? step.content : '';
-        const text = /^\s*<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>(?:\s*<ADDITIONAL_METADATA>|\s*$)/.exec(content)?.[1] ?? content;
-        const media = Array.isArray(step.media) && step.media.length ? step.media : metadataImageItems(content);
+const TRANSCRIPT_CACHE_LIMIT = 16;
+const TRANSCRIPT_TAIL_SIG_BYTES = 64;
+type TranscriptResult = {messages: AntigravityMessage[]; issue: AntigravityIssue | null; issueStep: number; clearStep: number};
+type TranscriptCacheEntry = {
+  mtimeNs: bigint;
+  size: bigint;
+  tailSig: Buffer;
+  items: Map<string, AntigravityMessage>;
+  issue: AntigravityIssue | null;
+  issueStep: number;
+  clearStep: number;
+  messages: AntigravityMessage[];
+};
+const transcriptCache = new Map<string, TranscriptCacheEntry>();
+
+function applyTranscriptLines(
+  lines: string[],
+  items: Map<string, AntigravityMessage>,
+  mediaById: Map<string, Json[]>,
+  state: {issue: AntigravityIssue | null; issueStep: number; clearStep: number},
+) {
+  for (const line of lines) {
+    if (!line) continue;
+    let step;
+    try { step = JSON.parse(line); } catch { continue; }
+    if (!Number.isSafeInteger(step?.step_index)) continue;
+    const id = String(step.step_index);
+    if (step.type === 'USER_INPUT' && (typeof step.content === 'string' || Array.isArray(step.media))) {
+      state.issue = null;
+      state.issueStep = -1;
+      if (step.step_index > state.clearStep) state.clearStep = step.step_index;
+      const content = typeof step.content === 'string' ? step.content : '';
+      const text = /^\s*<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>(?:\s*<ADDITIONAL_METADATA>|\s*$)/.exec(content)?.[1] ?? content;
+      const media = Array.isArray(step.media) && step.media.length ? step.media : metadataImageItems(content);
+      if (media.length) mediaById.set(id, media);
+      else mediaById.delete(id);
+      items.set(id, {id, role: 'user', text: text.trim()});
+    } else if (step.type === 'PLANNER_RESPONSE') {
+      state.issue = null;
+      state.issueStep = -1;
+      if (step.step_index > state.clearStep) state.clearStep = step.step_index;
+      const media = Array.isArray(step.media) && step.media.length ? step.media : [];
+      const hasText = typeof step.content === 'string' && Boolean(step.content.trim());
+      if (hasText || media.length) {
         if (media.length) mediaById.set(id, media);
         else mediaById.delete(id);
-        result.set(id, {id, role: 'user', text: text.trim()});
-      } else if (step.type === 'PLANNER_RESPONSE') {
-        issue = null;
-        issueStep = -1;
-        if (step.step_index > clearStep) clearStep = step.step_index;
-        const media = Array.isArray(step.media) && step.media.length ? step.media : [];
-        const hasText = typeof step.content === 'string' && Boolean(step.content.trim());
-        if (hasText || media.length) {
-          if (media.length) mediaById.set(id, media);
-          else mediaById.delete(id);
-          result.set(id, {id, role: 'assistant', text: hasText ? step.content : ''});
-        }
-        const tools = Array.isArray(step.tool_calls) ? step.tool_calls.map((tool: Json) => tool?.name).filter((n: unknown) => typeof n === 'string') : [];
-        if (tools.length) result.set(id + '-tools', {id: id + '-tools', role: 'tool', text: tools.join('、')});
-      } else if (step.type === 'ERROR_MESSAGE') {
-        issue = readIssue(step);
-        issueStep = step.step_index;
+        items.set(id, {id, role: 'assistant', text: hasText ? step.content : ''});
       }
+      const tools = Array.isArray(step.tool_calls) ? step.tool_calls.map((tool: Json) => tool?.name).filter((n: unknown) => typeof n === 'string') : [];
+      if (tools.length) items.set(id + '-tools', {id: id + '-tools', role: 'tool', text: tools.join('、')});
+    } else if (step.type === 'ERROR_MESSAGE') {
+      state.issue = readIssue(step);
+      state.issueStep = step.step_index;
     }
-    const kept = [...result.values()].slice(-100);
+  }
+}
+
+async function finalizeTranscriptMessages(items: Map<string, AntigravityMessage>, mediaById: Map<string, Json[]>): Promise<AntigravityMessage[]> {
+  const kept = [...items.values()].slice(-100);
+  if (mediaById.size) {
     await Promise.all(kept.map(async message => {
       const media = mediaById.get(message.id);
       if (!media?.length) return;
       const images = await resolveMediaImages(media);
       if (images.length) message.images = images;
     }));
-    const messages = kept.filter(message => message.role === 'tool' || Boolean(message.text) || Boolean(message.images?.length));
-    return {messages, issue, issueStep, clearStep};
+  }
+  return kept.filter(message => message.role === 'tool' || Boolean(message.text) || Boolean(message.images?.length));
+}
+
+function rememberTranscript(path: string, entry: TranscriptCacheEntry) {
+  transcriptCache.delete(path);
+  transcriptCache.set(path, entry);
+  while (transcriptCache.size > TRANSCRIPT_CACHE_LIMIT) {
+    transcriptCache.delete(transcriptCache.keys().next().value!);
+  }
+}
+
+async function transcript(path: string, knownStat?: {mtimeNs: bigint; size: bigint} | null): Promise<TranscriptResult> {
+  if (!path) return {messages: [], issue: null, issueStep: -1, clearStep: -1};
+  const cached = transcriptCache.get(path);
+  if (cached && knownStat && cached.mtimeNs === knownStat.mtimeNs && cached.size === knownStat.size) {
+    transcriptCache.delete(path);
+    transcriptCache.set(path, cached);
+    return {messages: cached.messages, issue: cached.issue, issueStep: cached.issueStep, clearStep: cached.clearStep};
+  }
+  const file = await open(path, 'r').catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error;
+    return null;
+  });
+  if (!file) {
+    transcriptCache.delete(path);
+    return {messages: [], issue: null, issueStep: -1, clearStep: -1};
+  }
+  try {
+    const info = await file.stat({bigint: true});
+    if (cached && cached.mtimeNs === info.mtimeNs && cached.size === info.size) {
+      transcriptCache.delete(path);
+      transcriptCache.set(path, cached);
+      return {messages: cached.messages, issue: cached.issue, issueStep: cached.issueStep, clearStep: cached.clearStep};
+    }
+
+    const sizeNum = Number(info.size);
+    // Append-only fast path: verify the previous tail signature and parse only newly appended lines,
+    // preserving object identity for earlier messages so ThreadHub's WeakMap rev cache hits.
+    if (
+      cached &&
+      info.size > cached.size &&
+      cached.tailSig.length > 0 &&
+      cached.tailSig[cached.tailSig.length - 1] === 0x0a &&
+      cached.size >= BigInt(cached.tailSig.length)
+    ) {
+      const added = Number(info.size - cached.size);
+      if (added > 0 && added <= tailSize) {
+        const sigLen = cached.tailSig.length;
+        const deltaBuf = Buffer.alloc(sigLen + added);
+        const {bytesRead} = await file.read(deltaBuf, 0, deltaBuf.length, Number(cached.size) - sigLen);
+        if (bytesRead === deltaBuf.length && deltaBuf.subarray(0, sigLen).equals(cached.tailSig)) {
+          const items = new Map(cached.items);
+          const mediaById = new Map<string, Json[]>();
+          const state = {issue: cached.issue, issueStep: cached.issueStep, clearStep: cached.clearStep};
+          const newLines = deltaBuf.toString('utf8', sigLen, bytesRead).split('\n');
+          applyTranscriptLines(newLines, items, mediaById, state);
+          while (items.size > 200) items.delete(items.keys().next().value!);
+          const messages = await finalizeTranscriptMessages(items, mediaById);
+          const tailSig = Buffer.from(deltaBuf.subarray(Math.max(0, bytesRead - TRANSCRIPT_TAIL_SIG_BYTES), bytesRead));
+          rememberTranscript(path, {mtimeNs: info.mtimeNs, size: info.size, tailSig, items, ...state, messages});
+          return {messages, ...state};
+        }
+      }
+    }
+
+    const start = Math.max(0, sizeNum - tailSize);
+    const data = Buffer.alloc(sizeNum - start);
+    const {bytesRead} = await file.read(data, 0, data.length, start);
+    const lines = data.toString('utf8', 0, bytesRead).split('\n');
+    if (start) lines.shift(); // The first line may start in the middle of a UTF-8 character.
+    const items = new Map<string, AntigravityMessage>();
+    const mediaById = new Map<string, Json[]>();
+    const state = {issue: null as AntigravityIssue | null, issueStep: -1, clearStep: -1};
+    applyTranscriptLines(lines, items, mediaById, state);
+    const messages = await finalizeTranscriptMessages(items, mediaById);
+    const tailSig = bytesRead > 0 ? Buffer.from(data.subarray(Math.max(0, bytesRead - TRANSCRIPT_TAIL_SIG_BYTES), bytesRead)) : Buffer.alloc(0);
+    rememberTranscript(path, {mtimeNs: info.mtimeNs, size: info.size, tailSig, items, ...state, messages});
+    return {messages, ...state};
   } finally { await file.close(); }
 }
 
 /** Checks of a followed conversation; see AntigravityBridge.followedSnapshot. */
 const FOLLOW_CHECK_MS = 200, FOLLOW_FULL_MS = 1300;
 const PENDING_CREATED_TTL_MS = 60_000, PENDING_CREATED_LIMIT = 32;
+const MODEL_CATALOG_TTL_MS = 30_000;
+const PERMISSION_SETTINGS_TTL_MS = 15_000;
+const DESKTOP_PROJECTS_TTL_MS = 15_000;
+const TRAJECTORIES_TTL_MS = 5_000;
+const CONVERSATION_META_TTL_MS = 15_000;
+const FS_WATCH_TTL_MS = 35_000;
 type Snapshot = Awaited<ReturnType<AntigravityBridge['snapshot']>>;
 type PendingCreated = {
   summary: Summary;
@@ -904,6 +996,20 @@ export class AntigravityBridge {
   private pendingCreated = new Map<string, PendingCreated>();
   /** Guards automatic draining right after a turn is dispatched while desktop SQLite still reports the prior idle summary. */
   private dispatchedTurn = new Map<string, {previousTurnKey: string; at: number}>();
+  /** Short-TTL caches to avoid repeating heavy Hub RPCs and disk scans across list/open/send/poll cycles. */
+  private catalogCache?: {at: number; value: ReturnType<typeof parseAntigravityModels>};
+  private catalogInflight?: Promise<ReturnType<typeof parseAntigravityModels>>;
+  private permissionCache?: {at: number; value: AntigravityPermissionMode | undefined};
+  private permissionInflight?: Promise<AntigravityPermissionMode | undefined>;
+  private projectsCache?: {at: number; dirMtimeNs: bigint | null; value: {id: string; name: string; path: string}[]};
+  private trajectoriesCache?: {at: number; summaries: Record<string, Json>};
+  private trajectoriesInflight?: Promise<Record<string, Json> | null>;
+  private conversationMetaCache = new Map<string, {trajectoryId?: string; permissionMode?: AntigravityPermissionMode; at: number}>();
+  /** Avoids re-fetching stepOffset=0 full history when an idle not_fully_idle conversation already scanned empty at the same step count. */
+  private olderScanEmpty = new Map<string, number>();
+  /** Active fs.watch handles for followed conversations (closed on idle expiry or bridge.close). */
+  private logWatchers = new Map<string, {watcher: FSWatcher; dir: string; until: number; timer?: NodeJS.Timeout}>();
+  private rootWatcher: {watcher: FSWatcher; timer?: NodeJS.Timeout} | null = null;
   private queueTimer: NodeJS.Timeout;
   private closed = false;
   private cancelTimeoutMs: number;
@@ -919,7 +1025,10 @@ export class AntigravityBridge {
     const intervalMs = options.queueIntervalMs ?? 1500;
     this.queueTimer = setInterval(() => {
       try {
-        if (!this.closed) for (const id of new Set(this.queue.queued().map(message => message.threadId))) this.drainSoon(id);
+        if (!this.closed) {
+          this.pruneWatchers();
+          for (const id of new Set(this.queue.queued().map(message => message.threadId))) this.drainSoon(id);
+        }
       } catch {}
     }, intervalMs);
     this.queueTimer.unref?.();
@@ -927,11 +1036,100 @@ export class AntigravityBridge {
 
   private get queue() { return this.ledger.antigravityQueue; }
   get busy() { return this.writing.size > 0 || Boolean(this.queue.queued().length); }
-  close() { this.closed = true; clearInterval(this.queueTimer); }
+  close() {
+    this.closed = true;
+    clearInterval(this.queueTimer);
+    for (const entry of this.logWatchers.values()) {
+      clearTimeout(entry.timer);
+      try { entry.watcher.close(); } catch {}
+    }
+    this.logWatchers.clear();
+    if (this.rootWatcher) {
+      clearTimeout(this.rootWatcher.timer);
+      try { this.rootWatcher.watcher.close(); } catch {}
+      this.rootWatcher = null;
+    }
+    if (this.hub === callHub) closeHubPool(this.daemonDir());
+  }
+  private pokeConversation(id: string) {
+    const followed = this.followed.get(id);
+    if (followed) followed.stale = true;
+    for (const listener of this.queueListeners) listener(id);
+  }
   private queueChanged(id: string) {
     this.queueVersions.set(id, (this.queueVersions.get(id) || 0) + 1);
-    const followed = this.followed.get(id);if (followed) followed.stale = true;
-    for (const listener of this.queueListeners) listener(id);
+    this.pokeConversation(id);
+  }
+  private pruneWatchers(now = Date.now()) {
+    for (const [id, entry] of this.logWatchers) {
+      if (entry.until >= now) continue;
+      clearTimeout(entry.timer);
+      try { entry.watcher.close(); } catch {}
+      this.logWatchers.delete(id);
+    }
+    if (!this.logWatchers.size && this.rootWatcher) {
+      clearTimeout(this.rootWatcher.timer);
+      try { this.rootWatcher.watcher.close(); } catch {}
+      this.rootWatcher = null;
+    }
+  }
+  private ensureWatchers(id: string) {
+    if (this.closed || !this.queueListeners.length) return;
+    const now = Date.now();
+    this.pruneWatchers(now);
+    const logsDir = join(this.root, 'brain', id, '.system_generated', 'logs');
+    const existing = this.logWatchers.get(id);
+    if (existing) {
+      existing.until = now + FS_WATCH_TTL_MS;
+    } else {
+      try {
+        const entry: {watcher: FSWatcher; dir: string; until: number; timer?: NodeJS.Timeout} = {
+          watcher: watch(logsDir, {persistent: false}, () => {
+            if (this.closed) return;
+            if (entry.timer) return;
+            entry.timer = setTimeout(() => {
+              entry.timer = undefined;
+              if (!this.closed) this.pokeConversation(id);
+            }, 25);
+            entry.timer.unref?.();
+          }),
+          dir: logsDir,
+          until: now + FS_WATCH_TTL_MS,
+        };
+        entry.watcher.on('error', () => {
+          clearTimeout(entry.timer);
+          try { entry.watcher.close(); } catch {}
+          if (this.logWatchers.get(id) === entry) this.logWatchers.delete(id);
+        });
+        entry.watcher.unref?.();
+        this.logWatchers.set(id, entry);
+      } catch { /* Logs directory may not exist yet for a newly created conversation. */ }
+    }
+    if (!this.rootWatcher) {
+      try {
+        const rootEntry: {watcher: FSWatcher; timer?: NodeJS.Timeout} = {
+          watcher: watch(this.root, {persistent: false}, (_event, filename) => {
+            if (this.closed) return;
+            const name = typeof filename === 'string' ? filename : '';
+            if (name && !name.startsWith('conversation_summaries.db')) return;
+            if (rootEntry.timer) return;
+            rootEntry.timer = setTimeout(() => {
+              rootEntry.timer = undefined;
+              if (this.closed) return;
+              for (const followedId of this.followed.keys()) this.pokeConversation(followedId);
+            }, 25);
+            rootEntry.timer.unref?.();
+          }),
+        };
+        rootEntry.watcher.on('error', () => {
+          clearTimeout(rootEntry.timer);
+          try { rootEntry.watcher.close(); } catch {}
+          if (this.rootWatcher === rootEntry) this.rootWatcher = null;
+        });
+        rootEntry.watcher.unref?.();
+        this.rootWatcher = rootEntry;
+      } catch { /* Root directory watch unavailable; polling fallback still runs. */ }
+    }
   }
   private drainSoon(id: string) { if (!this.closed) setImmediate(() => { this.drain(id).catch(() => {}); }); }
 
@@ -981,11 +1179,18 @@ export class AntigravityBridge {
       ...(opts?.deliveryStrategy ? {deliveryStrategy: opts.deliveryStrategy} : {}),
     };
     const explicitConfig = Boolean(payload.model || payload.permissionMode);
-    let base = await this.conversationConfig(summary, explicitConfig);
+    let base: Json | null;
     if (payload.model) {
-      base = await this.withModel(base, payload.model);
-    } else if (!hasConfiguredModel(base)) {
-      base = await this.withDefaultModel(base);
+      const [resolvedBase, catalog] = await Promise.all([
+        this.conversationConfig(summary, explicitConfig),
+        this.modelCatalog(),
+      ]);
+      base = this.applyModel(resolvedBase, payload.model, catalog.models);
+    } else {
+      base = await this.conversationConfig(summary, explicitConfig);
+      if (!hasConfiguredModel(base)) {
+        base = await this.withDefaultModel(base);
+      }
     }
     const cascadeConfig = payload.permissionMode ? this.withPermission(base, payload.permissionMode) : base;
     if (cascadeConfig && Object.keys(cascadeConfig).length) {
@@ -1003,11 +1208,13 @@ export class AntigravityBridge {
         annotations: {permissionPreset: payload.permissionMode},
         mergeAnnotations: true,
       }).catch(() => {});
+      this.rememberConversationMeta(id, {permissionMode: payload.permissionMode});
     }
     await this.hub(directory, 'SendUserCascadeMessage', message);
     if (!opts?.deliveryStrategy) {
       this.dispatchedTurn.set(id, {previousTurnKey: turnKey(summary), at: Date.now()});
     }
+    this.pokeConversation(id);
     // Antigravity reports no tokens; the turn still counts for whoever sent it.
     this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
     this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: payload.text});
@@ -1073,6 +1280,12 @@ export class AntigravityBridge {
 
   /** Desktop projects (`~/.gemini/config/projects`); a new conversation needs its project's ID to show under that project. */
   private async desktopProjects(): Promise<{id: string; name: string; path: string}[]> {
+    const dirInfo = await stat(this.projectsDir, {bigint: true}).catch(() => null);
+    const dirMtimeNs = dirInfo?.mtimeNs ?? null;
+    const now = Date.now();
+    if (this.projectsCache && this.projectsCache.dirMtimeNs === dirMtimeNs && now - this.projectsCache.at < DESKTOP_PROJECTS_TTL_MS) {
+      return this.projectsCache.value;
+    }
     const names = await readdir(this.projectsDir).catch(() => [] as string[]);
     const projects = await Promise.all(names.filter(name => name.endsWith('.json')).map(async name => {
       try {
@@ -1082,7 +1295,9 @@ export class AntigravityBridge {
         return typeof project.id === 'string' && roots.length === 1 ? [{id: project.id, name: typeof project.name === 'string' ? project.name : '', path: roots[0] as string}] : [];
       } catch { return []; }
     }));
-    return projects.flat();
+    const value = projects.flat();
+    this.projectsCache = {at: now, dirMtimeNs, value};
+    return value;
   }
 
   /** Settings of the latest message in this project (else anywhere), which the desktop sends with every message. */
@@ -1181,14 +1396,18 @@ export class AntigravityBridge {
     return {...config, plannerConfig};
   }
 
-  private async withModel(config: Json | null, model: string | undefined): Promise<Json | null> {
-    if (!model) return config;
-    const {models} = await this.modelCatalog();
+  private applyModel(config: Json | null, model: string, models: AntigravityModel[]): Json | null {
     if (!models.some(option => option.id === model)) throw new BridgeError('invalid', '所选模型已不可用，请重新选择');
     const plannerConfig = {...config?.plannerConfig, planModel: model};
     delete plannerConfig.requestedModel;
     delete plannerConfig.modelName;
     return {...config, plannerConfig};
+  }
+
+  private async withModel(config: Json | null, model: string | undefined): Promise<Json | null> {
+    if (!model) return config;
+    const {models} = await this.modelCatalog();
+    return this.applyModel(config, model, models);
   }
 
   private withPermission(config: Json | null, permissionMode: AntigravityPermissionMode | undefined): Json | null {
@@ -1207,18 +1426,80 @@ export class AntigravityBridge {
   }
 
   private async defaultPermissionMode(): Promise<AntigravityPermissionMode | undefined> {
-    const settings = await this.hub(this.daemonDir(), 'GetPermissionSettings', {}).catch(() => null);
-    return isPermissionPreset(settings?.globalPreset) ? settings.globalPreset : undefined;
+    const now = Date.now();
+    if (this.permissionCache && now - this.permissionCache.at < PERMISSION_SETTINGS_TTL_MS) {
+      return this.permissionCache.value;
+    }
+    if (!this.permissionInflight) {
+      this.permissionInflight = this.hub(this.daemonDir(), 'GetPermissionSettings', {})
+        .then(settings => {
+          const value = isPermissionPreset(settings?.globalPreset) ? settings.globalPreset : undefined;
+          this.permissionCache = {at: Date.now(), value};
+          return value;
+        })
+        .catch(() => this.permissionCache?.value)
+        .finally(() => { this.permissionInflight = undefined; });
+    }
+    return this.permissionInflight;
   }
 
-  private async trajectoryEntry(id: string): Promise<Json | null> {
-    const all = await this.hub(this.daemonDir(), 'GetAllCascadeTrajectories', {}).catch(() => null);
-    const entry = all?.trajectorySummaries?.[id];
+  private rememberConversationMeta(id: string, meta: {trajectoryId?: string; permissionMode?: AntigravityPermissionMode}) {
+    const prev = this.conversationMetaCache.get(id);
+    this.conversationMetaCache.delete(id);
+    this.conversationMetaCache.set(id, {
+      trajectoryId: meta.trajectoryId ?? prev?.trajectoryId,
+      permissionMode: meta.permissionMode ?? prev?.permissionMode,
+      at: Date.now(),
+    });
+    while (this.conversationMetaCache.size > 64) {
+      this.conversationMetaCache.delete(this.conversationMetaCache.keys().next().value!);
+    }
+  }
+
+  private async allTrajectories(force = false): Promise<Record<string, Json> | null> {
+    const now = Date.now();
+    if (!force && this.trajectoriesCache && now - this.trajectoriesCache.at < TRAJECTORIES_TTL_MS) {
+      return this.trajectoriesCache.summaries;
+    }
+    if (!this.trajectoriesInflight) {
+      this.trajectoriesInflight = this.hub(this.daemonDir(), 'GetAllCascadeTrajectories', {})
+        .then(all => {
+          const summaries = all?.trajectorySummaries && typeof all.trajectorySummaries === 'object'
+            ? all.trajectorySummaries as Record<string, Json>
+            : {};
+          this.trajectoriesCache = {at: Date.now(), summaries};
+          return summaries;
+        })
+        .catch(() => null)
+        .finally(() => { this.trajectoriesInflight = undefined; });
+    }
+    return this.trajectoriesInflight;
+  }
+
+  private async trajectoryEntry(id: string, force = false): Promise<Json | null> {
+    const summaries = await this.allTrajectories(force);
+    let entry = summaries?.[id];
+    if (!entry && !force) {
+      const fresh = await this.allTrajectories(true);
+      entry = fresh?.[id];
+    }
     return entry && typeof entry === 'object' ? entry : null;
   }
 
-  private async trajectoryMeta(id: string): Promise<{trajectoryId?: string; permissionMode?: AntigravityPermissionMode}> {
-    return trajectoryMetaOf(await this.trajectoryEntry(id));
+  private async trajectoryMeta(id: string, force = false): Promise<{trajectoryId?: string; permissionMode?: AntigravityPermissionMode}> {
+    const now = Date.now();
+    const cached = !force ? this.conversationMetaCache.get(id) : undefined;
+    if (cached && now - cached.at < CONVERSATION_META_TTL_MS) {
+      return {
+        ...(cached.trajectoryId ? {trajectoryId: cached.trajectoryId} : {}),
+        ...(cached.permissionMode ? {permissionMode: cached.permissionMode} : {}),
+      };
+    }
+    const summaries = await this.allTrajectories(force);
+    const entry = summaries?.[id];
+    const meta = trajectoryMetaOf(entry && typeof entry === 'object' ? entry : null);
+    this.rememberConversationMeta(id, meta);
+    return meta;
   }
 
   private async fetchSteps(id: string, stepOffset: number): Promise<Json[]> {
@@ -1262,9 +1543,10 @@ export class AntigravityBridge {
         backgroundTasks = [...keptOlder, ...backgroundTasks];
       } else {
         const olderTaskSteps = (await this.taskDirOffsets(id)).filter(idx => idx < tailOffset);
+        const alreadyScannedEmpty = !olderTaskSteps.length && this.olderScanEmpty.get(id) === summary.steps;
         const olderOffset = olderTaskSteps.length
           ? olderTaskSteps[0]
-          : (!conversationRunning && !backgroundTasks.length && !requests.length ? 0 : null);
+          : (!conversationRunning && !backgroundTasks.length && !requests.length && !alreadyScannedEmpty ? 0 : null);
         if (olderOffset !== null) {
           const wider = await this.fetchSteps(id, olderOffset);
           if (wider.length) {
@@ -1272,8 +1554,14 @@ export class AntigravityBridge {
             backgroundTasks = extractAntigravityBackgroundTasks(wider, olderOffset, conversationRunning);
             logPathMap = extractTaskLogPaths(wider, conversationRunning);
           }
+          if (olderOffset === 0) {
+            if (!backgroundTasks.length && !requests.length) this.olderScanEmpty.set(id, summary.steps);
+            else this.olderScanEmpty.delete(id);
+          }
         }
       }
+    } else if (!summary.notIdle) {
+      this.olderScanEmpty.delete(id);
     }
 
     const taskLogPaths = new Set<string>(opts?.scanOlder === false ? (opts.previousLogPaths || []) : []);
@@ -1305,9 +1593,14 @@ export class AntigravityBridge {
       action: 'antigravity.create', project, text, ...attached(images, files),
       ...(model ? {model} : {}), ...(permissionMode ? {permissionMode} : {}),
     }, async () => {
-      const prompt = await withAttachmentLinks(this.ledger, newScope(path), text, files);
-      const desktop = (await this.desktopProjects()).find(item => sameFolder(item.path, path));
-      let baseConfig = await this.withModel(await this.latestConfig(path), model);
+      const [prompt, projects, latest, catalog] = await Promise.all([
+        withAttachmentLinks(this.ledger, newScope(path), text, files),
+        this.desktopProjects(),
+        this.latestConfig(path),
+        model ? this.modelCatalog() : Promise.resolve(null),
+      ]);
+      const desktop = projects.find(item => sameFolder(item.path, path));
+      let baseConfig = model && catalog ? this.applyModel(latest, model, catalog.models) : latest;
       if (!hasConfiguredModel(baseConfig)) baseConfig = await this.withDefaultModel(baseConfig);
       const config = this.withPermission(baseConfig, permissionMode);
       const directory = this.daemonDir();
@@ -1317,6 +1610,7 @@ export class AntigravityBridge {
       if (typeof id !== 'string' || !guid.test(id)) throw new BridgeError('uncertain', '桌面未返回新会话，请在电脑核实', true);
       if (permissionMode) {
         await this.hub(directory, 'UpdateConversationAnnotations', {cascadeId: id, annotations: {permissionPreset: permissionMode}, mergeAnnotations: true}).catch(() => {});
+        this.rememberConversationMeta(id, {permissionMode});
       }
       const message: Json = {cascadeId: id, items: [{text: prompt}], ...(images.length ? {media: antigravityMedia(images)} : {}),
         clientMessageId: opId.split(':')[1], ...(config ? {cascadeConfig: config} : {})};
@@ -1364,6 +1658,7 @@ export class AntigravityBridge {
         }
         const interaction = buildAntigravityInteraction(trajectoryId || id, stepIndex, step, decision, answers);
         await this.hub(this.daemonDir(), 'HandleCascadeUserInteraction', {cascadeId: id, interaction});
+        this.pokeConversation(id);
         void summary;
         return {responded: true};
       } finally { this.writing.delete(id); }
@@ -1448,9 +1743,21 @@ export class AntigravityBridge {
     return row;
   }
 
-  private async modelCatalog() {
-    const result = await this.hub(this.daemonDir(), 'GetCascadeModelConfigData', {});
-    return parseAntigravityModels(result);
+  private async modelCatalog(force = false) {
+    const now = Date.now();
+    if (!force && this.catalogCache && now - this.catalogCache.at < MODEL_CATALOG_TTL_MS) {
+      return this.catalogCache.value;
+    }
+    if (!this.catalogInflight) {
+      this.catalogInflight = this.hub(this.daemonDir(), 'GetCascadeModelConfigData', {})
+        .then(result => {
+          const parsed = parseAntigravityModels(result);
+          this.catalogCache = {at: Date.now(), value: parsed};
+          return parsed;
+        })
+        .finally(() => { this.catalogInflight = undefined; });
+    }
+    return this.catalogInflight;
   }
 
   private async turnConfig(summary: Summary): Promise<Json> {
@@ -1464,7 +1771,13 @@ export class AntigravityBridge {
   private async snapshot(
     id: string,
     live?: LiveState,
-    opts?: {scanOlder?: boolean; previousBackgroundTasks?: AntigravityBackgroundTask[]; previousLogPaths?: string[]},
+    opts?: {
+      scanOlder?: boolean;
+      refreshMeta?: boolean;
+      previousLive?: LiveState;
+      previousBackgroundTasks?: AntigravityBackgroundTask[];
+      previousLogPaths?: string[];
+    },
   ) {
     let summary = this.summaryOrNull(id);
     let hubEntry: Json | null | undefined;
@@ -1485,13 +1798,18 @@ export class AntigravityBridge {
       });
       if (file) break;
     }
+    const fileStat = file ? {mtimeNs: file.mtimeNs, size: file.size} : null;
     const cwd = singleWorkspace(summary.workspaces);
     const activeOrWaiting = summary.status === active || Boolean(summary.notIdle);
     let resolved = live;
     if (!resolved) {
+      const skipMeta = opts?.refreshMeta === false && Boolean(opts.previousLive);
       const [meta, globalPreset, stepState] = await Promise.all([
-        hubEntry !== undefined ? Promise.resolve(trajectoryMetaOf(hubEntry)) : this.trajectoryMeta(id),
-        this.defaultPermissionMode(),
+        skipMeta ? Promise.resolve({permissionMode: opts!.previousLive!.permissionMode})
+          : hubEntry !== undefined ? Promise.resolve(trajectoryMetaOf(hubEntry))
+          : this.trajectoryMeta(id),
+        skipMeta ? Promise.resolve(opts!.previousLive!.defaultPermissionMode)
+          : this.defaultPermissionMode(),
         activeOrWaiting || summary.steps > 0
           ? this.liveSteps(id, summary, opts)
           : Promise.resolve({requests: [], backgroundTasks: [], taskLogPaths: [], hubIssue: EMPTY_HUB_ISSUE}),
@@ -1519,7 +1837,7 @@ export class AntigravityBridge {
     ]);
     const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint, taskFingerprint, issueFingerprint]);
     return {
-      path, revision, baseRevision, live: resolved, turn: turnKey(summary), title: summary.title || '未命名对话', cwd,
+      path, fileStat, revision, baseRevision, live: resolved, turn: turnKey(summary), title: summary.title || '未命名对话', cwd,
       running: summary.status === active, canSend: canSend(summary) && !requests.length,
       notIdle: Boolean(summary.notIdle),
       supportsModelSelection: true, supportsImages: true, supportsQueue: true,
@@ -1531,8 +1849,8 @@ export class AntigravityBridge {
     };
   }
 
-  private async readMessages(id: string, path: string) {
-    const tx = await transcript(path);
+  private async readMessages(id: string, path: string, knownStat?: {mtimeNs: bigint; size: bigint} | null) {
+    const tx = await transcript(path, knownStat);
     let items = tx.messages;
     const pending = this.pendingEntry(id);
     if (items.length) {
@@ -1543,10 +1861,16 @@ export class AntigravityBridge {
       if (text || images) items = [{id: '0', role: 'user', text, ...(images ? {images} : {})}];
     }
     // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
+    // Avoid mutating cached message objects so unchanged entries preserve object identity for ThreadHub.revOf.
     const records = this.ledger.senders('antigravity', id);
     if (records.length) {
       const senders = sendersByText(items.filter(item => item.role === 'user'), records);
-      for (const item of items) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
+      if (senders.size) {
+        items = items.map(item => {
+          const sender = senders.get(item.id);
+          return sender && item.sender?.id !== sender.id ? {...item, sender} : item;
+        });
+      }
     }
     return {tx, items};
   }
@@ -1579,6 +1903,8 @@ export class AntigravityBridge {
           } else if (activeOrWaiting && ticks % 2 === 0) {
             current = await this.snapshot(id, undefined, {
               scanOlder: false,
+              refreshMeta: false,
+              previousLive: current.live,
               previousBackgroundTasks: current.live.backgroundTasks,
               previousLogPaths: current.live.taskLogPaths,
             });
@@ -1592,8 +1918,8 @@ export class AntigravityBridge {
       } finally { this.watchers--; }
       if (known === current.revision) return {unchanged: true};
     }
-    const {path, baseRevision, live, ...view} = current;
-    const {tx, items} = await this.readMessages(id, path);
+    const {path, fileStat, baseRevision, live, ...view} = current;
+    const {tx, items} = await this.readMessages(id, path, fileStat);
     const issue = mergeAntigravityIssue(tx, live.hubIssue);
     this.recent.delete(id);
     this.recent.set(id, {revision: view.revision, baseRevision, live, messages: items});
@@ -1616,6 +1942,7 @@ export class AntigravityBridge {
    * index moved, or every {@link FOLLOW_FULL_MS} while a turn runs or waits. A queue change is checked at once.
    */
   private async followedSnapshot(id: string): Promise<Snapshot> {
+    this.ensureWatchers(id);
     const now = Date.now(), previous = this.followed.get(id);
     if (previous && !previous.stale && now - previous.checkedAt < FOLLOW_CHECK_MS) return previous.snapshot;
     let current: Snapshot, fullAt = previous?.fullAt ?? now;
@@ -1624,7 +1951,13 @@ export class AntigravityBridge {
       const local = await this.snapshot(id, previous.snapshot.live);
       if (local.baseRevision !== previous.snapshot.baseRevision) {current = await this.snapshot(id);fullAt = now;}
       else if ((local.running || !local.canSend) && now - previous.fullAt >= FOLLOW_FULL_MS) {
-        current = await this.snapshot(id, undefined, {scanOlder: false, previousBackgroundTasks: previous.snapshot.live.backgroundTasks, previousLogPaths: previous.snapshot.live.taskLogPaths});
+        current = await this.snapshot(id, undefined, {
+          scanOlder: false,
+          refreshMeta: false,
+          previousLive: previous.snapshot.live,
+          previousBackgroundTasks: previous.snapshot.live.backgroundTasks,
+          previousLogPaths: previous.snapshot.live.taskLogPaths,
+        });
         fullAt = now;
       } else current = local;
       // A turn that just ended sends the next queued message at once, as watching did.
@@ -1640,8 +1973,8 @@ export class AntigravityBridge {
     const cached = this.views.get(id);
     if (cached?.revision === current.revision) return cached.value;
     const value = (async () => {
-      const {path, baseRevision: _, live, revision: ___, ...head} = current;
-      const {tx, items: messages} = await this.readMessages(id, path);
+      const {path, fileStat, baseRevision: _, live, revision: ___, ...head} = current;
+      const {tx, items: messages} = await this.readMessages(id, path, fileStat);
       const issue = mergeAntigravityIssue(tx, live.hubIssue);
       return {head: {id, ...head, issue}, entries: messages};
     })();
@@ -1678,16 +2011,19 @@ export class AntigravityBridge {
       };
     }
     if (action === 'antigravity.list') {
-      const [named, defaultPermissionMode] = await Promise.all([this.desktopProjects(), this.defaultPermissionMode()]);
       const offset = Number.isSafeInteger(p.offset) && p.offset >= 0 ? p.offset : 0;
       const project=p.project?textRequired(p.project,'项目',4096):null;
       const search=p.search?textRequired(p.search,'搜索内容',200):null;
+      const includeProjects = !offset && !search;
+      const [named, defaultPermissionMode] = includeProjects
+        ? await Promise.all([this.desktopProjects(), this.defaultPermissionMode()])
+        : [[] as {id: string; name: string; path: string}[], this.permissionCache?.value];
       return this.index(db=>{
         const rows=db.prepare(`SELECT conversation_id AS id, title, status, last_modified_time AS modified FROM conversation_summaries
           WHERE (? IS NULL OR EXISTS (SELECT 1 FROM ${workspaceEntries} AS workspace WHERE workspace.value=?))
           AND (? IS NULL OR instr(lower(coalesce(nullif(title,''),'未命名对话')),lower(?))>0)
           ORDER BY last_modified_time DESC, conversation_id LIMIT 51 OFFSET ?`).all(project,project,search,search,offset);
-        const projects=!offset&&!search?db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text' ORDER BY uri`).all().flatMap(({uri})=>{
+        const projects=includeProjects?db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text' ORDER BY uri`).all().flatMap(({uri})=>{
           const path=localWorkspace(uri),name=named.find(item=>sameFolder(item.path,path))?.name;return path?[{id:uri,path,...(name?{name}:{})}]:[];
         }):undefined;
         const seenIds = new Set(rows.map(row => String(row.id)));
@@ -1852,6 +2188,7 @@ export class AntigravityBridge {
         this.writing.add(id);
         try {
           await this.hub(this.daemonDir(), 'CancelCascadeInvocation', {cascadeId: id, killBackgroundTasks});
+          this.pokeConversation(id);
           return {stopRequested: true};
         } finally { this.writing.delete(id); }
       }

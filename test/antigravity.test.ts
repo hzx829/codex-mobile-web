@@ -13,6 +13,10 @@ import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
 import {AntigravityBridge,parseAntigravityModels,extractAntigravityRequests,extractAntigravityBackgroundTasks,extractAntigravityIssue} from '../src/connector/antigravity.js';
+import {createHubClient} from '../src/connector/antigravity-hub.js';
+import {createServer} from 'node:http';
+import {connect as connectTcp} from 'node:net';
+import type {TLSSocket} from 'node:tls';
 import {BackgroundTasksBar,BackgroundTasksPanel} from '../web/antigravity.js';
 import {QueuedMessages} from '../web/queued-messages.js';
 import {antigravityModelSupportsImages,antigravityPickerModels,concreteAntigravityModel,splitAntigravityModel} from '../web/antigravity-model-picker.js';
@@ -1120,4 +1124,167 @@ test('new chat routes for Antigravity and Claude Code survive history, reload, a
     if (original) Object.defineProperty(globalThis, 'sessionStorage', original);
     else Reflect.deleteProperty(globalThis, 'sessionStorage');
   }
+});
+
+test('Hub client reuses verified keep-alive sockets, blocks CSRF on failed ownership, retries stale reads, and recovers on Hub restart', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-hub-pool-'));
+  const serverSockets = new Set<any>();
+  let receivedHeaders: string[] = [];
+  let serverRequests = 0;
+  const startServer = async () => {
+    const srv = createServer((req, res) => {
+      serverRequests++;
+      receivedHeaders.push(String(req.headers['x-codeium-csrf-token'] || ''));
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, {'content-type': 'application/json', connection: 'keep-alive'});
+        res.end(JSON.stringify({ok: true, path: req.url, count: serverRequests}));
+      });
+    });
+    srv.on('connection', sock => {
+      serverSockets.add(sock);
+      sock.on('close', () => serverSockets.delete(sock));
+    });
+    await new Promise<void>(resolve => srv.listen(0, '127.0.0.1', resolve));
+    const addr = srv.address();
+    assert.ok(addr && typeof addr === 'object');
+    return {srv, port: addr.port};
+  };
+
+  const first = await startServer();
+  const second = await startServer();
+  let ownsCalls = 0;
+  let allowOwnership = true;
+  const alivePids = new Set<number>([1001]);
+
+  const fakeConnectTls = (port: number): TLSSocket => {
+    const sock = connectTcp({host: '127.0.0.1', port});
+    sock.once('connect', () => sock.emit('secureConnect'));
+    return sock as unknown as TLSSocket;
+  };
+
+  const client = createHubClient({
+    ownsSocket: async () => {
+      ownsCalls++;
+      if (!allowOwnership) throw new Error('ownership check failed');
+    },
+    isPidAlive: pid => alivePids.has(pid),
+    connectTls: fakeConnectTls,
+    endpointTtlMs: 5_000,
+    idleSocketTimeoutMs: 10_000,
+  });
+  t.after(async () => {
+    client.close();
+    for (const sock of serverSockets) sock.destroy();
+    await Promise.all([
+      new Promise<void>(resolve => first.srv.close(() => resolve())),
+      new Promise<void>(resolve => second.srv.close(() => resolve())),
+    ]);
+    await rm(dir, {recursive: true, force: true});
+  });
+
+  await writeFile(join(dir, 'hub_1001.json'), JSON.stringify({pid: 1001, httpsPort: first.port, csrfToken: 'csrf-1'}));
+
+  // Failed ownership check rejects BEFORE any HTTP bytes or CSRF token reach the server.
+  allowOwnership = false;
+  await assert.rejects(
+    client.callHub(dir, 'SendUserCascadeMessage', {cascadeId: 'c1'}),
+    (error: BridgeError) => error.code === 'unavailable' && !error.uncertain,
+  );
+  assert.equal(ownsCalls, 1);
+  assert.equal(serverRequests, 0, 'CSRF must never be sent when ownsSocket fails.');
+
+  // Multiple sequential requests reuse the single verified keep-alive socket (only one ownsSocket call).
+  allowOwnership = true;
+  for (let i = 0; i < 5; i++) {
+    const res = await client.callHub(dir, 'GetPermissionSettings', {});
+    assert.equal(res.ok, true);
+  }
+  assert.equal(ownsCalls, 2, 'Keep-alive pool should verify the new socket once and reuse it for all 5 calls.');
+  assert.equal(receivedHeaders.length, 5);
+  assert.ok(receivedHeaders.every(token => token === 'csrf-1'));
+
+  // If the Hub closes an idle keep-alive socket, an idempotent read transparently reconnects and re-verifies.
+  for (const sock of serverSockets) sock.destroy();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const afterDrop = await client.callHub(dir, 'GetPermissionSettings', {});
+  assert.equal(afterDrop.ok, true);
+  assert.equal(ownsCalls, 3);
+
+  // If the Hub restarts under a new PID and port, the old endpoint & pool are dropped and re-verified.
+  alivePids.delete(1001);
+  alivePids.add(2002);
+  await writeFile(join(dir, 'hub_2002.json'), JSON.stringify({pid: 2002, httpsPort: second.port, csrfToken: 'csrf-2'}));
+  const afterRestart = await client.callHub(dir, 'GetPermissionSettings', {});
+  assert.equal(afterRestart.ok, true);
+  assert.equal(receivedHeaders.at(-1), 'csrf-2');
+  assert.equal(ownsCalls, 4);
+});
+
+test('Antigravity caches Hub metadata, skips extra list RPCs on pagination/search, and incrementally parses appended transcripts', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-perf-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  const id = randomUUID();
+  const project = pathToFileURL(dir).href;
+  const logs = join(dir, 'brain', id, '.system_generated', 'logs');
+  await mkdir(logs, {recursive: true});
+  const transcriptPath = join(logs, 'transcript_full.jsonl');
+  const line = (step: object) => JSON.stringify(step) + '\n';
+  await writeFile(transcriptPath,
+    line({type: 'USER_INPUT', step_index: 0, content: '<USER_REQUEST>first</USER_REQUEST>'}) +
+    line({type: 'PLANNER_RESPONSE', step_index: 1, content: 'reply-1'}));
+
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(id, 'Perf Test', 'CASCADE_RUN_STATUS_IDLE', '2026-11-25T02:00:00.000Z', 2, 0, 't0', 0, JSON.stringify([project]));
+
+  const counts: Record<string, number> = {};
+  const bridge = new AntigravityBridge(dir, ledger, async (_dir, method) => {
+    counts[method] = (counts[method] || 0) + 1;
+    if (method === 'GetPermissionSettings') return {globalPreset: 'AGENT_PERMISSION_PRESET_AUTO'};
+    if (method === 'GetAllCascadeTrajectories') return {trajectorySummaries: {[id]: {trajectoryId: 'traj-1', annotations: {permissionPreset: 'AGENT_PERMISSION_PRESET_DEFAULT'}}}};
+    if (method === 'GetCascadeModelConfigData') return {clientModelConfigs: [{label: 'A', modelOrAlias: {model: 'MODEL_A'}}]};
+    if (method === 'GetTrajectoryTurns') return {turns: [{startStepIndex: 0, firstStep: {userInput: {userConfig: {plannerConfig: {planModel: 'MODEL_A'}}}}}]};
+    return {};
+  }, undefined, {queueIntervalMs: 60_000});
+
+  const {ThreadHub} = await import('../src/connector/thread-hub.js');
+  const frames: any[] = [];
+  const hub = new ThreadHub(frame => { frames.push(frame); });
+  hub.register('antigravity', bridge.syncSource);
+  t.after(async () => { hub.close(); bridge.close(); db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+
+  // Search and offset pagination do not trigger GetPermissionSettings before cache is populated.
+  await bridge.handle('antigravity.list', {search: 'perf'});
+  await bridge.handle('antigravity.list', {offset: 50});
+  assert.equal(counts.GetPermissionSettings || 0, 0);
+
+  // Initial list + read + models share cached GetPermissionSettings, GetAllCascadeTrajectories, and GetCascadeModelConfigData.
+  await bridge.handle('antigravity.list', {});
+  await bridge.handle('antigravity.read', {conversationId: id});
+  await bridge.handle('antigravity.models', {conversationId: id});
+  await bridge.handle('antigravity.models', {conversationId: id});
+  assert.equal(counts.GetPermissionSettings, 1);
+  assert.equal(counts.GetAllCascadeTrajectories, 1);
+  assert.equal(counts.GetCascadeModelConfigData, 1);
+
+  // Opening via ThreadHub and appending to transcript_full.jsonl preserves object identity of earlier messages and pushes via fs.watch.
+  const opened = await hub.open({service: 'antigravity', threadId: id});
+  assert.equal(opened.entries.length, 2);
+  const firstRead = await bridge.handle('antigravity.read', {conversationId: id});
+  await appendFile(transcriptPath, line({type: 'PLANNER_RESPONSE', step_index: 2, content: 'reply-2'}));
+  const secondRead = await bridge.handle('antigravity.read', {conversationId: id});
+  assert.equal(secondRead.messages.length, 3);
+  assert.equal(secondRead.messages[0], firstRead.messages[0], 'Unchanged message keeps exact object identity on incremental append.');
+  assert.equal(secondRead.messages[1], firstRead.messages[1]);
+  assert.equal(secondRead.messages[2].text, 'reply-2');
+
+  // fs.watch triggers a ThreadHub live frame containing only the new appended message.
+  const deadline = Date.now() + 1500;
+  while (!frames.some(f => (f.entries || []).some((e: any) => e.id === '2')) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  const pushed = frames.find(f => (f.entries || []).some((e: any) => e.id === '2'));
+  assert.ok(pushed, 'Appending transcript should push a live frame.');
+  assert.deepEqual(pushed.entries.map((e: any) => e.id), ['2']);
 });

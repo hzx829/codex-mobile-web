@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {optimisticDelivered,optimisticMessage} from '../web/optimistic.js';
+import {optimisticDelivered,optimisticFlatDelivered,optimisticFlatMessage,optimisticMessage} from '../web/optimistic.js';
 import {cachedView,rememberView} from '../web/session-cache.js';
 import type {SessionView} from '../src/shared/types.js';
 
@@ -13,6 +13,17 @@ test('a sent message stays until the conversation shows a new user message after
   const accepted={...message,acceptedAt:Date.now()};
   assert.equal(optimisticDelivered(accepted,view(['a'])),false);
   assert.equal(optimisticDelivered(accepted,view(['a','b'])),true);
+});
+
+test('Antigravity flat optimistic message waits for acceptance and a new user message ID',()=>{
+  const before=[{id:'0',role:'user'},{id:'1',role:'assistant'}];
+  const after=[...before,{id:'2',role:'user'}];
+  const message=optimisticFlatMessage('antigravity:pc:c',before,'hi',[],[]);
+  assert.equal(optimisticFlatDelivered(message,after),false,'Not delivered before acceptance.');
+  const accepted={...message,acceptedAt:Date.now()};
+  assert.equal(optimisticFlatDelivered(accepted,before),false);
+  assert.equal(optimisticFlatDelivered(accepted,[...before,{id:'2',role:'assistant'}]),false);
+  assert.equal(optimisticFlatDelivered(accepted,after),true);
 });
 
 test('a cached thread is shown without live state and never replaces itself',()=>{

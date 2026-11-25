@@ -1,4 +1,4 @@
-import {useEffect,useState} from 'react';
+import {useEffect,useRef,useState} from 'react';
 import type {AntigravityModel,AntigravityModelGroup,Json} from '../src/shared/types';
 import {modelDisplayName,reasoningLabel,resolveModelSelection,type ModelSelection} from '../src/shared/models';
 import {ModelMenu} from './model-picker';
@@ -94,16 +94,24 @@ type Props = {
  * grouped models with a thinking-effort slider, concrete model + effort on the toolbar button,
  * and automatic fallback to a flat list for older connectors without `groups`.
  */
+const MODEL_REFRESH_TTL_MS = 15_000;
+
 export function AntigravityModelPicker({read, cached = null, turn, value, available, disabled, onChange, onCatalog}: Props) {
   const [catalog, setCatalog] = useState<AntigravityCatalog | null>(cached);
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
+  const lastFetchedAt = useRef(0);
+  const fetchedScope = useRef('');
   useEffect(() => {
     if (!available) return;
+    // Avoid re-fetching the whole catalog on every turn; refresh on initial mount, scope change, or explicit refresh.
+    if (refresh === 0 && fetchedScope.current === turn && lastFetchedAt.current > 0) return;
     let active = true;
     setError('');
     read().then(result => {
       if (!active) return;
+      lastFetchedAt.current = Date.now();
+      fetchedScope.current = turn;
       setCatalog(result);
       onCatalog?.(result);
     }).catch(failure => {
@@ -112,6 +120,12 @@ export function AntigravityModelPicker({read, cached = null, turn, value, availa
     });
     return () => { active = false; };
   }, [read, turn, refresh, available]);
+
+  function refreshIfStale() {
+    if (!catalog || error || Date.now() - lastFetchedAt.current >= MODEL_REFRESH_TTL_MS) {
+      setRefresh(n => n + 1);
+    }
+  }
 
   const pickerModels = antigravityPickerModels(catalog);
   const tuning = Boolean(catalog?.groups?.some(group => group.efforts && group.efforts.length > 0));
@@ -149,7 +163,7 @@ export function AntigravityModelPicker({read, cached = null, turn, value, availa
     resettable={false}
     disabled={disabled}
     unavailable={!available}
-    opened={() => setRefresh(n => n + 1)}
+    opened={refreshIfStale}
     models={pickerModels}
     value={{model: valueSplit.model, effort: valueSplit.effort}}
     current={currentModel}

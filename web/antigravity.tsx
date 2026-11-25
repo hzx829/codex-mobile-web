@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState} from 'react';
+import {useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
 import {useComposerAttachments} from './composer-attachments';
 import {useVoiceInput} from './use-voice-input';
@@ -17,7 +17,9 @@ import {MAX_ATTACHMENTS} from '../src/shared/attachments';
 import {MAX_TOTAL_IMAGE_BYTES,imageBytes} from '../src/shared/images';
 import {AntigravityErrorNotice,AntigravityMessages,antigravityIssueText} from './antigravity-messages';
 import {AntigravityModelPicker,antigravityModelSupportsImages,type AntigravityCatalog} from './antigravity-model-picker';
-import {connectionLost,ConversationStatus,elapsedLabel} from './conversation';
+import {connectionLost,ConversationStatus,elapsedLabel,PendingMessage} from './conversation';
+import {DraftSave} from './draft-save';
+import {OPTIMISTIC_ACCEPTED_MS,optimisticFlatDelivered,optimisticFlatMessage,type OptimisticMessage} from './optimistic';
 import {ThreadHeader,useComposerHeight,workspaceName} from './chat-layout';
 import {IconButton} from './icon-button';
 import {Icon} from './icons';
@@ -157,8 +159,10 @@ export function AntigravityPanel(props:Props){
   },[view]);
   const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[submitting,setSubmitting]=useState(false);
   const [draft,setDraft]=useState(()=>saved(`${key}:draft`)),[pending,setPending]=useState(()=>saved(`${key}:pending`));
+  const [outgoing,setOutgoing]=useState<OptimisticMessage|null>(null);
   const [watchError,setWatchError]=useState('');
   const lock=useRef(false),alive=useRef(true),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
+  const draftSave=useRef(new DraftSave(store));
   const settleTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
   const [settling,setSettling]=useState(()=>!creating&&recentCreatedRemaining(machine,conversationId)>0);
   useComposerHeight(composer,draft,true);
@@ -187,7 +191,8 @@ export function AntigravityPanel(props:Props){
     if(creating)store(`antigravity:${machine}:model`,id);
     else store(`${key}:model`,id);
   }
-  function edit(text:string){setDraft(text);store(`${key}:draft`,text);}
+  function edit(text:string){setDraft(text);draftSave.current.write(`${key}:draft`,text);}
+  function clearDraftNow(){draftSave.current.flush();setDraft('');store(`${key}:draft`,'');}
   const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
   // Photos are compressed into the message; other files are uploaded to the project when it is sent.
   const connectorImages=creating?createImages:view?Boolean(view.supportsImages):null;
@@ -196,7 +201,7 @@ export function AntigravityPanel(props:Props){
   const attachments=useComposerAttachments({draftKey:key,disabled:busy||Boolean(pending),imagesBlocked:imagesBlockedReason,notify:setError,added:()=>setAdding(false)});
   const {images,files,setImages,setFiles}=attachments;
   const pick=useAttachmentPickers(chosen=>void attachments.add(chosen));
-  function sent(){edit('');setImages([]);setFiles([]);if(creating)setPermissionMode('');}
+  function sent(){clearDraftNow();setImages([]);setFiles([]);if(creating)setPermissionMode('');}
   const voice=useVoiceInput(props.voiceMode,key,connected,{
     keyboard:()=>{composer.current?.focus();setNotice('请使用系统键盘上的麦克风听写。');},
     request:(action,payload)=>request.current(action,payload),
@@ -206,9 +211,9 @@ export function AntigravityPanel(props:Props){
   const voiceBusy=voice.state!=='idle';
   useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice]);
   /** Uploads the documents into the project on the computer; the message then links to them. */
-  async function upload(scope:Json):Promise<Json>{
-    if(!files.length)return {};
-    try{return {files:await uploadAttachments(request.current,{prefix:'antigravity.',scope},files,value=>{if(alive.current)setUploadProgress(value);})};}
+  async function upload(scope:Json,selectedFiles=files):Promise<Json>{
+    if(!selectedFiles.length)return {};
+    try{return {files:await uploadAttachments(request.current,{prefix:'antigravity.',scope},selectedFiles,value=>{if(alive.current)setUploadProgress(value);})};}
     finally{if(alive.current)setUploadProgress(null);}
   }
   const imagesBlocked=()=>{if(images.length&&imagesBlockedReason){setError(imagesBlockedReason);return true;}if(images.length&&connectorImages===false){setError(IMAGES_BLOCKED);return true;}return false;};
@@ -258,8 +263,21 @@ export function AntigravityPanel(props:Props){
   }
   useEffect(()=>{
     alive.current=true;
-    return()=>{alive.current=false;clearTimeout(settleTimer.current);};
+    const flush=()=>draftSave.current.flush();
+    const hidden=()=>{if(document.visibilityState==='hidden')flush();};
+    window.addEventListener('pagehide',flush);
+    document.addEventListener('visibilitychange',hidden);
+    return()=>{
+      alive.current=false;
+      flush();
+      window.removeEventListener('pagehide',flush);
+      document.removeEventListener('visibilitychange',hidden);
+      clearTimeout(settleTimer.current);
+    };
   },[]);
+  // A sent message shows at once, until the conversation has it (or a while after the computer accepted it).
+  useEffect(()=>{if(outgoing&&optimisticFlatDelivered(outgoing,view?.messages))setOutgoing(null);},[view,outgoing]);
+  useEffect(()=>{if(!outgoing?.acceptedAt)return;const timer=setTimeout(()=>setOutgoing(null),OPTIMISTIC_ACCEPTED_MS);return()=>clearTimeout(timer);},[outgoing?.acceptedAt]);
   useEffect(()=>{
     if(!syncing)void refresh(true);
   },[connected]);
@@ -321,37 +339,53 @@ export function AntigravityPanel(props:Props){
     void refresh(true);
   }
   /** Opens a conversation this page created, keeping the message as its draft when the desktop's receipt was lost. */
-  function opened(result:Json){
+  function opened(result:Json,submittedText=draft){
     markCreated(machine,result.conversationId);
-    if(!result.submitted)store(`antigravity:${machine}:${result.conversationId}:draft`,draft);
+    if(!result.submitted)store(`antigravity:${machine}:${result.conversationId}:draft`,submittedText);
     sent();props.created?.(result.conversationId);
   }
   /** Locks the panel and uploads the documents; null when the upload failed (its error is shown). */
-  async function prepare(scope:Json):Promise<Json|null>{
+  async function prepare(scope:Json,selectedFiles=files):Promise<Json|null>{
     lock.current=true;setBusy(true);setError('');
-    try{return await upload(scope);}
+    try{return await upload(scope,selectedFiles);}
     catch(e){failed(e);lock.current=false;if(alive.current)setBusy(false);return null;}
   }
-  // With documents the links carry the message, so typed text is optional.
-  const message=()=>({text:draft.trim()?draft:'',...(images.length?{images}:{})});
   async function start(){
     if(lock.current||pending||!connected||!draft.trim()&&!files.length)return;
     if(!target){setError('请选择项目');return;}
     if(imagesBlocked())return;
-    const attached=await prepare({project:target});if(!attached)return;
+    draftSave.current.flush();
+    const sentText=draft,sentImages=[...images],sentFiles=[...files];
+    const optimistic=optimisticFlatMessage(key,null,sentText.trim(),sentImages,sentFiles.map(file=>file.name));
+    stick.current=true;
+    setOutgoing(optimistic);
+    setDraft('');setImages([]);setFiles([]);
+    const restore=()=>{
+      setOutgoing(old=>old===optimistic?null:old);
+      setDraft(old=>old.trim()?old:sentText);
+      if(sentImages.length)setImages(old=>old.length?old:sentImages);
+      if(sentFiles.length)setFiles(old=>old.length?old:sentFiles);
+    };
+    const attached=await prepare({project:target},sentFiles);
+    if(!attached){if(alive.current)restore();return;}
     setSubmitting(true);
     const opId=operationId();remember(opId);
     try{
       const result=await request.current('antigravity.create',{
-        project:target,...message(),...attached,opId,
+        project:target,text:sentText.trim()?sentText:'',...(sentImages.length?{images:sentImages}:{}),...attached,opId,
         ...(model?{model}:{}),
         ...(permissionMode?{permissionMode}:{}),
       });
       if(!alive.current)return;
-      if(result.state==='accepted'){remember('');opened(result);}
-      else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
-      else setError(result.error?.message||'结果待核实，请在电脑查看是否已新建对话。');
-    }catch(e:any){if(!e?.uncertain&&alive.current)remember('');failed(e);}
+      if(result.state==='accepted'){remember('');setOutgoing(null);opened(result,sentText);}
+      else if(result.state==='failed'){remember('');restore();setError(result.error?.message||'操作未完成');}
+      else{setOutgoing(old=>old===optimistic?{...old,state:'uncertain'}:old);setError(result.error?.message||'结果待核实，请在电脑查看是否已新建对话。');}
+    }catch(e:any){
+      if(!alive.current)return;
+      if(!e?.uncertain){remember('');restore();}
+      else setOutgoing(old=>old===optimistic?{...old,state:'uncertain'}:old);
+      failed(e);
+    }
     finally{lock.current=false;if(alive.current){setBusy(false);setSubmitting(false);}}
   }
   const backgroundTasks:AntigravityBackgroundTask[]=Array.isArray(view?.backgroundTasks)?view.backgroundTasks:[];
@@ -367,30 +401,58 @@ export function AntigravityPanel(props:Props){
     if(action==='stop'&&!view?.running&&!(killBackgroundTasks&&hasBackgroundTasks))return;
     if(action==='send'&&imagesBlocked())return;
     if(action==='send'&&model&&!view?.supportsModelSelection){setError('请更新电脑连接器后使用所选模型，或恢复当前对话模型。');return;}
+    draftSave.current.flush();
+    const sentText=draft,sentImages=[...images],sentFiles=[...files];
+    // Queued messages appear in the queue; direct sends appear immediately in the timeline.
+    const optimistic=action==='send'&&!queueNext?optimisticFlatMessage(key,view?.messages,sentText.trim(),sentImages,sentFiles.map(file=>file.name)):null;
+    const restore=()=>{
+      if(!optimistic)return;
+      setOutgoing(old=>old===optimistic?null:old);
+      setDraft(old=>old.trim()?old:sentText);
+      if(sentImages.length)setImages(old=>old.length?old:sentImages);
+      if(sentFiles.length)setFiles(old=>old.length?old:sentFiles);
+    };
+    if(optimistic){
+      stick.current=true;
+      setOutgoing(optimistic);
+      setDraft('');setImages([]);setFiles([]);
+    }
     let attached:Json|null={};
-    if(action==='send')attached=await prepare({conversationId});
+    if(action==='send')attached=await prepare({conversationId},sentFiles);
     else{lock.current=true;setBusy(true);setError('');}
-    if(!attached)return;
+    if(!attached){if(alive.current)restore();return;}
     if(action==='send')setSubmitting(true);
     const opId=operationId();remember(opId);
     try{
       const result=await request.current(`antigravity.${action}`,{
         conversationId,opId,turn:view?.turn,
-        ...(action==='send'?{...message(),...attached,...(model?{model}:{}),...(permissionMode?{permissionMode}:{})}:{}),
+        ...(action==='send'?{text:sentText.trim()?sentText:'',...(sentImages.length?{images:sentImages}:{}),...attached,...(model?{model}:{}),...(permissionMode?{permissionMode}:{})}:{}),
         ...(killBackgroundTasks?{killBackgroundTasks:true}:{}),
       });
       if(!alive.current)return;
       if(result.state==='accepted'){
         if(action==='send'){
           sent();if(permissionMode)setPermissionMode('');
+          if(optimistic){
+            if(result.kind==='queued')setOutgoing(old=>old===optimistic?null:old);
+            else setOutgoing(old=>old===optimistic?{...old,acceptedAt:Date.now()}:old);
+          }
           setNotice(result.kind==='queued'?'已加入队列，当前任务结束后发送':result.kind==='steer_accepted'?'已追加到当前任务':result.kind==='sent_now'?'已立即发送':'');
         }
         if(killBackgroundTasks)setNotice('已请求结束后台任务');
         remember('');stick.current=true;
       }
-      else if(result.state==='failed'){remember('');setError(result.error?.message||'操作未完成');}
-      else setError(result.error?.message||'结果待核实，请刷新聊天查看。');
-    }catch(e:any){if(!e?.uncertain&&alive.current)remember('');failed(e);}
+      else if(result.state==='failed'){remember('');restore();setError(result.error?.message||'操作未完成');}
+      else{
+        if(optimistic)setOutgoing(old=>old===optimistic?{...old,state:'uncertain'}:old);
+        setError(result.error?.message||'结果待核实，请刷新聊天查看。');
+      }
+    }catch(e:any){
+      if(!alive.current)return;
+      if(!e?.uncertain){remember('');restore();}
+      else if(optimistic)setOutgoing(old=>old===optimistic?{...old,state:'uncertain'}:old);
+      failed(e);
+    }
     finally{lock.current=false;if(alive.current){setBusy(false);setSubmitting(false);}}
     void refresh(true);
   }
@@ -435,16 +497,18 @@ export function AntigravityPanel(props:Props){
   }
   const issue=view?.issue;
   const requests:ApprovalRequest[]=view?.requests||[];
+  const pendingShown=outgoing&&!optimisticFlatDelivered(outgoing,view?.messages)?outgoing:null;
+  const senders=useMemo(()=>view?.messages?view.messages.map((message:{sender?:{id:string;name:string}})=>message.sender):[],[view?.messages]);
   useTurnNotice(key,view&&!cached?Boolean(view.running):undefined,requests.length,()=>({service:'Antigravity',title:view?.title,
     reply:view?.messages?.filter((message:Json)=>message.role==='assistant'&&message.text).at(-1)?.text}));
   const antigravityStatus=(
     !connected?(cached?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost):watchError||
-    (pending&&busy?'正在等待电脑确认…':cached?'正在同步最新内容…':issue&&issue.kind!=='error'?antigravityIssueText(issue,view!.canSend):
+    (pending&&busy&&!pendingShown?'正在等待电脑确认…':cached?'正在同步最新内容…':issue&&issue.kind!=='error'?antigravityIssueText(issue,view!.canSend):
       view&&!view.running&&!view.canSend&&!requests.length?'正在等待 Antigravity…':'')
   );
-  useEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,antigravityStatus]);
+  useLayoutEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,pendingShown,antigravityStatus]);
   const trackScroll=()=>{const element=scroll.current!;stick.current=element.scrollHeight-element.scrollTop-element.clientHeight<80;};
-  const checkPending=<><button disabled={!connected||busy} onClick={()=>void check()}>核实操作结果</button><button disabled={busy} onClick={()=>{if(window.confirm('请先在聊天和电脑页面确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></>;
+  const checkPending=<><button disabled={!connected||busy} onClick={()=>void check()}>核实操作结果</button><button disabled={busy} onClick={()=>{if(window.confirm('请先在聊天和电脑页面确认操作结果。解除提示不会重发消息。')){remember('');setOutgoing(null);setError('');}}}>我已核实</button></>;
   const feedback=error||previewError,sending=Boolean(pending&&busy&&submitting);
   // A cached view's state may be outdated; nothing is sent from it.
   const canOperate=connected&&!busy&&!pending&&!cached;
@@ -457,15 +521,16 @@ export function AntigravityPanel(props:Props){
     <ThreadHeader title={creating?'新的 Antigravity 对话':view?.title||'正在打开…'} project={creating?(chosen?projectName(chosen):'选择项目'):view?.cwd?workspaceName(view.cwd):'Antigravity'} machineName={props.machineName} connected={connected} back={()=>go('')}>
       {!creating&&<IconButton icon="refresh" label="刷新会话" disabled={!connected||busy} onClick={()=>void refresh()}/>}
     </ThreadHeader>
-    <div className={`timeline ${creating?'is-empty':''}`} ref={scroll} onScroll={trackScroll}><div className="timeline-content">
-      {creating&&<div className="new-chat-welcome"><h1>交给 Antigravity</h1>
+    <div className={`timeline ${creating&&!pendingShown?'is-empty':''}`} ref={scroll} onScroll={trackScroll}><div className="timeline-content">
+      {creating&&!pendingShown&&<div className="new-chat-welcome"><h1>交给 Antigravity</h1>
         <label className="claude-project"><Icon name="folder" size={18}/><select aria-label="项目" value={target} disabled={Boolean(pending)} onChange={e=>setTarget(e.target.value)}>
           {!target&&<option value="">{!projects?'正在读取项目…':'桌面上还没有项目'}</option>}
           {projects?.map(item=><option key={item.id} value={item.id}>{projectName(item)}</option>)}
         </select></label></div>}
-      {view&&<SenderScope senders={view.messages.map((message:{sender?:{id:string;name:string}})=>message.sender)}><AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/></SenderScope>}
-      {!view&&(busy||settling||syncedForPanel?.phase==='syncing'&&!syncedForPanel.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
-      {view&&!view.messages.length&&!issue&&<p className="muted">{view.running?'Antigravity 正在开始处理…':'桌面尚未记录可显示的消息。'}</p>}
+      {view&&<SenderScope senders={senders}><AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/></SenderScope>}
+      {pendingShown&&<PendingMessage message={pendingShown} openFile={openFile} openPreview={openPreview} onFollowup={followup}/>}
+      {!view&&!pendingShown&&(busy||settling||syncedForPanel?.phase==='syncing'&&!syncedForPanel.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
+      {view&&!view.messages.length&&!pendingShown&&!issue&&<p className="muted">{view.running?'Antigravity 正在开始处理…':'桌面尚未记录可显示的消息。'}</p>}
       {issue?.kind==='error'&&<AntigravityErrorNotice issue={issue}/>}
       {antigravityStatus&&<ConversationStatus>{antigravityStatus}</ConversationStatus>}
     </div></div>
@@ -490,7 +555,7 @@ export function AntigravityPanel(props:Props){
         voice={voice} voiceMode={props.voiceMode} voiceDisabled={busy||Boolean(pending)} onVoiceStart={()=>{setError('');setNotice('');}} connected={connected}
         add={()=>setAdding(true)} addDisabled={busy||Boolean(pending)||attachments.loading}
         permission={<PermissionMenu options={ANTIGRAVITY_MODES} value={permissionMode} current={{id:effectiveMode,label:modeLabel(effectiveMode)}} disabled={!canOperate} onChange={setPermissionMode}/>}
-        model={<AntigravityModelPicker read={readModels} cached={catalog} turn={creating?target:view?.turn||''} value={model} available={connected&&(creating?Boolean(target):Boolean(view?.supportsModelSelection))} disabled={!canOperate} onChange={selectModel}/>}
+        model={<AntigravityModelPicker read={readModels} cached={catalog} turn={creating?target:conversationId} value={model} available={connected&&(creating?Boolean(target):Boolean(view?.supportsModelSelection))} disabled={!canOperate} onChange={selectModel}/>}
         running={view?.running?{stop:()=>void mutate('stop'),disabled:!canOperate,queue:supportsQueue}:undefined}
         send={{label:queueNext?'完成后发送':'发送消息',sending,disabled:!canOperate||attachments.loading||voiceBusy||!canSendNow||!draft.trim()&&!files.length}}/>
       {pick.inputs}
