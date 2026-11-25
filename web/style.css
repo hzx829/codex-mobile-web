@@ -1008,9 +1008,14 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
   .settings-popover-status em { font-size: 13px; }
   .drawer-open .thread-header-mobile-right { visibility: hidden; }
   .project-action-btn { width: 34px; min-width: 34px; height: 34px; padding: 7px; border-radius: 9px; }
-  .project-children { padding: 2px 0 8px 20px; }
+  /* Project rows match the Recent list: same text size, padding and left edge. */
+  .project-row-wrap { border-radius: 12px; }
+  .project-row-wrap .project-row { font-size: 15.5px; padding: 10px 6px; gap: 12px; min-height: 46px; border-radius: 12px; }
+  .project-folder-icon { width: 20px; height: 20px; }
+  /* Child thread text aligns with the project name: 6px pad + 20px icon + 12px gap = 38px (32px + 6px row pad). */
+  .project-children { padding: 2px 0 8px 32px; }
   .project-children .session-row { min-height: 42px; padding: 8px 6px; }
-  .project-children .session-name { font-size: 15px; }
+  .project-children .session-name { font-size: 15.5px; }
   .project-expand-more { padding: 8px 8px; font-size: 14px; }
   .menu-shortcut { display: none; }
   .settings-inline-select { max-width: 58%; font-size: 14px; }
