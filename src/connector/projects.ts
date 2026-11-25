@@ -2,6 +2,7 @@ import {readFile} from 'node:fs/promises';
 import {homedir} from 'node:os';
 import {isAbsolute,join,normalize} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
+import {projectPathKey,windowsProjectPath} from '../shared/project-paths.js';
 import {BridgeError,type Json} from '../shared/types.js';
 
 export interface Project {path:string;name:string}
@@ -9,7 +10,7 @@ export function projectCatalog(state:Json,config:Json):Project[] {
   const projects:Project[]=[],seen=new Set<string>();
   function add(path:unknown,label?:unknown) {
     if(typeof path!=='string'||!isAbsolute(path))return;
-    const key=process.platform==='win32'?normalize(path).toLowerCase():normalize(path);
+    const key=process.platform==='win32'?projectPathKey(normalize(path)):normalize(path);
     if(seen.has(key))return;seen.add(key);
     projects.push({path,name:typeof label==='string'&&label?label:path.split(/[\\/]/).filter(Boolean).at(-1)||path});
   }
@@ -40,7 +41,12 @@ export function indexedSessions(options:{cwd?:string;archived:boolean;search?:st
   try {
     const where=["archived = ?","COALESCE(NULLIF(name,''),NULLIF(title,''),NULLIF(preview,'')) IS NOT NULL"],args:any[]=[options.archived?1:0];
     if(options.cwd){
-      const cwd=normalize(options.cwd),other=process.platform==='win32'?(cwd.startsWith('\\\\?\\')?cwd.slice(4):'\\\\?\\'+cwd):cwd;
+      const cwd=normalize(process.platform==='win32'?windowsProjectPath(options.cwd):options.cwd);
+      let other=cwd;
+      if(process.platform==='win32'){
+        if(/^[a-z]:\\/i.test(cwd))other='\\\\?\\'+cwd;
+        else if(/^\\\\[^?.]/.test(cwd))other='\\\\?\\UNC\\'+cwd.slice(2);
+      }
       where.push('(cwd = ? COLLATE NOCASE OR cwd = ? COLLATE NOCASE)');args.push(cwd,other);
     }
     if(options.search){where.push("instr(COALESCE(NULLIF(name,''),NULLIF(title,''),preview,''), ?) > 0");args.push(options.search);}

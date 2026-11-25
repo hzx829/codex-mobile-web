@@ -21,6 +21,7 @@ import {knownSnapshot,restoreSnapshot} from './session-snapshot';
 import {applyLiveFrames,keepLiveText,type LiveFrame} from './live';
 import {OPTIMISTIC_ACCEPTED_MS,optimisticDelivered,optimisticMessage,type OptimisticMessage} from './optimistic';
 import {cachedList,cachedProjects,cachedView,clearCache,flushCache,loadCache,rememberList,rememberProjects,rememberView,type CachedView} from './session-cache';
+import {mergeProjectPaths,projectPathKey} from '../src/shared/project-paths';
 import {BrowserPreviewPanel,PageViewer,WebViewer,type PreviewSession} from './browser-preview';
 import {belongsToThread,defaultPreviewUrl,openThreadPreview,previewUrlKey,previewWidthKey,reachable} from './thread-preview';
 import {PreviewPane,useCompactPreview} from './preview-pane';
@@ -247,7 +248,7 @@ function App(){
         startTransition(()=>{setSessions(old=>append?[...old,...r.data.filter((n:Json)=>!old.some(s=>s.id===n.id))]:r.data);setCursor(r.nextCursor);});
         if(!append&&!c.searchQuery)rememberList(listKey(c.machine,c.project,c.archived),r.data);
         setPreferences(old=>{if(old.machine!==c.machine)return old;const values=rememberThreads(old.values,r.data,c.archived);if(values===old.values)return old;save(`thread-preferences:${c.machine}`,values);return {...old,values};});
-        setProjects(old=>[...new Set<string>([...old,...r.data.map((s:Json)=>s.cwd).filter(Boolean)])]);
+        setProjects(old=>mergeProjectPaths([...old,...r.data.map((s:Json)=>s.cwd)]));
       },
       error:e=>{if(here()&&showError)fail(e);},
       finish:()=>setListBusy(false),
@@ -263,13 +264,13 @@ function App(){
   const voiceBusy=voice.state!=='idle',voiceLabel=voiceProviderLabel(voiceMode);
   function refreshInfo(){
     const seq=++infoSequence.current;if(!connected||!codexActive)return;
-    call('info',{cwd:effectiveCwd||undefined}).then(r=>{if(seq!==infoSequence.current)return;setInfo(r);setProjects(old=>[...new Set<string>([...r.roots,...old])]);setNewCwd(old=>old||r.roots[0]||'');}).catch(e=>{if(seq===infoSequence.current)fail(e);});
+    call('info',{cwd:effectiveCwd||undefined}).then(r=>{if(seq!==infoSequence.current)return;setInfo(r);setProjects(old=>mergeProjectPaths([...r.roots,...old]));setNewCwd(old=>old||r.roots[0]||'');}).catch(e=>{if(seq===infoSequence.current)fail(e);});
   }
   useEffect(refreshInfo,[connected,machine,effectiveCwd,codexActive]);
   useEffect(()=>{const timer=setTimeout(()=>setSearchQuery(search.trim()),250);return()=>clearTimeout(timer);},[search]);
   useEffect(()=>{if(searchQuery)return;const cached=cachedList(listKey(machine,project,archived));if(cached)setSessions(cached);},[machine,project,searchQuery,archived]);
   useEffect(()=>{if(connected&&codexActive)void list();},[connected,machine,project,searchQuery,archived,codexActive]);
-  useEffect(()=>{if(machine)setProjects(old=>old.length?old:cachedProjects(machine));},[machine]);
+  useEffect(()=>{if(machine)setProjects(old=>old.length?old:mergeProjectPaths(cachedProjects(machine)));},[machine]);
   useEffect(()=>{if(projects.length)rememberProjects(machine,projects);},[projects]);
   useEffect(()=>{
     if(!token)return;
@@ -627,7 +628,10 @@ function App(){
     else{setSessions(old=>old.filter(s=>s.id!==thread.id));if(current.current.selected===thread.id)navigate({...home,project:thread.cwd||''});}
     listLoader.current.invalidate();void list();
   }
-  const projectName=(path:string)=>info?.projects?.find((p:Json)=>p.path===path)?.name||name(path);
+  const projectName=(path:string)=>{
+    const key=projectPathKey(path);
+    return info?.projects?.find((p:Json)=>projectPathKey(p.path)===key)?.name||name(path);
+  };
   const queueNext=!newChat&&Boolean(view?.running||view?.queuedMessages?.length);
   const availableModels=(info?.models||[]).filter((m:Json)=>(view?.provider||info?.provider)==='openai'||m.model===(view?.model||info?.model));
   const currentModel={model:view?.model||info?.model,effort:view?.effort||(newChat?info?.effort:''),serviceTier:view?.serviceTier!==undefined?view.serviceTier:info?.serviceTier};
@@ -817,8 +821,8 @@ function App(){
      {sheet&&<SheetPanel title={sheet==='voice'?`语音输入 · ${serviceLabel(service)}`:({home:'选项',computer:'电脑',projects:'选择项目',add:'添加与选项',file:'查看项目文件',browser:'打开网页','claude-project':'项目',team:'团队'} as const)[sheet]} close={()=>{if(sheet==='browser'){browserSequence.current++;setBrowserRequest(null);setUnreachable('');}setSheet(null);}}>
        {sheet==='home'&&<><MenuItem icon="compose" disabled={!connected||busy} onClick={startNew}>新聊天</MenuItem><MenuItem icon="computer" onClick={()=>setSheet('computer')}>切换电脑</MenuItem>{teamItems}<MenuItem icon="refresh" disabled={!connected||listBusy} onClick={()=>{setSheet(null);refreshInfo();void list(false,true);}}>刷新项目与会话</MenuItem><MenuItem icon="chat" disabled={!connected||busy} onClick={()=>{setArchived(!archived);setSheet(null);}}>{archived?'查看最近会话':'查看归档会话'}</MenuItem><MenuItem icon="mic" onClick={()=>setSheet('voice')}>语音输入<span className="menu-detail">{voiceLabel}</span></MenuItem>{notifyItem}<MenuItem icon="logout" disabled={busy} onClick={logout}>{me?'退出登录':'断开连接'}</MenuItem></>}
       {sheet==='computer'&&computerOptions}
-       {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>selectProject(p)}><span>{projectName(p)}<small>{p}</small></span>{p===newCwd&&<Icon name="check" size={18}/>}</MenuItem>)}</div>
-         {guest?<GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setProjects(old=>[...new Set([...old,path])]);selectProject(path);}}/>:
+       {sheet==='projects'&&<><div className="project-choices">{projects.map(p=><MenuItem icon="folder" key={p} disabled={busy} onClick={()=>selectProject(p)}><span>{projectName(p)}<small>{p}</small></span>{projectPathKey(p)===projectPathKey(newCwd)&&<Icon name="check" size={18}/>}</MenuItem>)}</div>
+         {guest?<GuestProjectForm connected={connected&&!busy} call={call} select={path=>{setProjects(old=>mergeProjectPaths([...old,path]));selectProject(path);}}/>:
          <details className="other-project"><summary>其他项目目录</summary><form onSubmit={e=>{e.preventDefault();setSheet(null);}}><label>电脑上的完整项目路径<input value={newCwd} onChange={e=>setNewCwd(e.target.value)} required/></label><button className="primary">使用这个目录</button></form></details>}</>}
        {sheet==='voice'&&voiceOptions}
        {sheet==='team'&&teamPanel}
