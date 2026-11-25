@@ -185,7 +185,9 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
           const binding=primary?undefined:restricted.find(entry=>matches(suppliedBytes,entry.token));
           // A computer given its own token by an admin may only sign in with that token.
           const own=m.role==='connector'&&typeof m.machineId==='string'?team?.machineToken(m.machineId,supplied):undefined;
-          if(m.role==='phone'&&!primary||m.role==='connector'&&(own===false||own===undefined&&!primary&&!(binding&&m.machineId===binding.machineId))){ws.close(4401,'invalid_token');return;}
+          if(m.role==='phone'&&!primary||m.role==='connector'&&(own===false||own===undefined&&!primary&&!(binding&&m.machineId===binding.machineId))){
+            ws.close(4401,m.role==='connector'&&own===false?'machine_token_mismatch':'invalid_token');return;
+          }
           ownToken=own===true;bound=!ownToken&&Boolean(binding);
         }
         let machine:Machine|undefined;
@@ -202,6 +204,7 @@ export function createRelay(token:string,staticDir=resolve('dist'),previewPort=3
         peers.set(ws,peer);clearTimeout(authTimer);
         // `features` lets connectors push live frames only through a relay that forwards them.
         send(ws,{type:'ready',machines:machines(m.role==='phone'?peer:undefined),features:team?['live','sync','blob','blob.image','team']:['live','sync','blob','blob.image'],
+          ...m.role==='connector'?{teamMode:teamOn,ownToken}:{},
           ...member?{user:publicUser(member.user),device:{id:member.device.id,name:member.device.name}}:{},...deviceToken?{deviceToken}:{}});
         publish();return;
       }

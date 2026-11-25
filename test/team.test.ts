@@ -9,7 +9,7 @@ import {createRelay} from '../src/server/relay.js';
 import {TeamStore} from '../src/server/team/store.js';
 import {runTeamCommand} from '../src/server/team/cli.js';
 import {Ledger,requestActor} from '../src/connector/ledger.js';
-import {inviteCode,deviceName} from '../web/client.js';
+import {inviteCode,hashCredential,deviceName} from '../web/client.js';
 import {removeTestTemp} from '../scripts/test-temp.js';
 
 const MAIN='main-fixture-token-for-team-tests';
@@ -209,6 +209,9 @@ test('invite links and codes are recognised wherever they are pasted',()=>{
   assert.equal(inviteCode('  inv_abc  '),'inv_abc');
   assert.equal(inviteCode('0123456789abcdef0123456789abcdef'),null);
   assert.equal(inviteCode('dev_token'),null);
+  assert.equal(hashCredential('#invite=inv_abc-_9'),'inv_abc-_9');
+  assert.equal(hashCredential('#token=abc123'),'abc123');
+  assert.equal(hashCredential('#other=1'),null);
   assert.equal(deviceName('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1'),'iPhone Safari');
   assert.equal(deviceName('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36 Edg/120.0'),'Windows Edge');
 });

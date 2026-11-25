@@ -137,6 +137,7 @@ export class Ledger {
       .map(row=>({turnId:row.turn_id===null?null:String(row.turn_id),kind:String(row.kind) as SenderRecord['kind'],textHash:row.text_hash===null?null:String(row.text_hash),sender:{id:String(row.user_id),name:String(row.name)}}));
   }
   pendingUsage(limit=200):UsageEvent[] {return this.db.prepare('SELECT payload FROM usage_outbox ORDER BY created, id LIMIT ?').all(limit).map(row=>JSON.parse(String(row.payload)));}
+  pendingUsageCount():number {return Number(this.db.prepare('SELECT count(*) AS n FROM usage_outbox').get()?.n||0);}
   ackUsage(ids:unknown[]) {const remove=this.db.prepare('DELETE FROM usage_outbox WHERE id=?');for(const id of ids)if(typeof id==='string')remove.run(id);}
   claudeCursor(sessionId:string):Record<string,any>|undefined {
     const row=this.db.prepare('SELECT totals FROM claude_usage_cursor WHERE session_id=?').get(sessionId);

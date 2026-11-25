@@ -1,6 +1,6 @@
 import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Client,inviteCode,operationId} from './client';
+import {Client,hashCredential,inviteCode,operationId} from './client';
 import {AntigravityPanel} from './antigravity';
 import {AntigravitySidebar} from './antigravity-sidebar';
 import {ClaudeCodePanel} from './claude-code';
@@ -77,7 +77,8 @@ const siteName=(url:string)=>{try{return new URL(url).host;}catch{return '网页
 /** What the address form says about where a page will be loaded from. */
 const ROUTE_HINT={tunnel:'通过电脑打开：先在电脑或局域网里启动网页服务。',direct:'手机直接打开，不经过电脑。',external:'http 的公网地址不能嵌在这里，只能在浏览器里打开。',artifact:'claude.ai 页面，通过电脑打开。'} as const;
 // A team invite link (#invite=…) is kept like a Token until the relay exchanges it for this device's own token.
-function initialToken(){const params=new URLSearchParams(location.hash.slice(1));const invite=params.get('invite'),token=params.get('token')||(invite?inviteCode('#invite='+invite):null);if(token){save('connection',token);history.replaceState(history.state,'',location.pathname+location.search);}return token||load('connection','');}
+function consumeHashCredential(){const credential=hashCredential(location.hash);if(!credential)return null;save('connection',credential);history.replaceState(history.state,'',location.pathname+location.search);return credential;}
+function initialToken(){return consumeHashCredential()||load('connection','');}
 // Only the approval policy changes; the sandbox stays as configured on the computer.
 const APPROVALS:PermissionOption[]=[
   {id:'on-request',label:'按需审批',description:'需要时请你审批命令和文件修改'},
@@ -284,6 +285,16 @@ function App(){
     const stopStatus=c.onStatus(online=>{for(const listener of syncBus.current.status)listener(online);});
     return()=>{stopSync();stopStatus();c.close();clearTimeout(refreshTimer.current);cancelAnimationFrame(liveFrame.current);liveFrame.current=0;liveFrames.current=[];};
   },[token]);
+  useEffect(()=>{
+    const onHash=()=>{
+      const next=consumeHashCredential();
+      if(!next)return;
+      setTokenInput('');
+      setToken(next);
+    };
+    window.addEventListener('hashchange',onHash);
+    return()=>window.removeEventListener('hashchange',onHash);
+  },[]);
   const teamSheetOpen=sheet==='team';
   useEffect(()=>{
     if(!me||status!=='online'||!client.current||teamSheetOpen)return;

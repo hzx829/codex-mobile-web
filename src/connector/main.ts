@@ -25,6 +25,7 @@ import { traced } from './trace.js';
 import { ThreadHub } from './thread-hub.js';
 import { BLOB_ACTIONS, BLOB_UPLOADS, receiveBlob, sendBlob } from './blob.js';
 import { BlobStore } from './blob-store.js';
+import { LocalControlServer, type ActiveTask, type LocalControlStatus } from './local-control.js';
 const config=readConfig();
 if(config.codexBin)process.env.CODEX_BIN=config.codexBin;
 if(config.legacyCodexBin)process.env.CODEX_LEGACY_BIN=config.legacyCodexBin;
@@ -89,6 +90,7 @@ function handleVoiceStream(action:string,payload:Json):Promise<Json>{
 }
 function dropVoiceStreams(){voiceProviders.clear();claudeVoiceStreams.dropAll();antigravityVoiceStreams?.dropAll();}
 function closeVoiceStreams(){voiceProviders.clear();claudeVoiceStreams.close();antigravityVoiceStreams?.close();}
+let claudeCodeBridge:ClaudeCodeBridge|undefined,antigravityBridge:AntigravityBridge|undefined;
 if(available.includes('claude')){
   // CLAUDE_CODE_ENTRYPOINT: by default 'codex-mobile-web', which the terminal's `claude --resume` list shows; `claudeEntrypoint`
   // overrides it. A guest's sessions use 'sdk-ts', which that list hides. See docs/claude-local/M1-RESULTS.md.
@@ -101,6 +103,7 @@ if(available.includes('claude')){
   renewClaudeLogin=()=>claudeRuntime.renewLogin(guest?.workspace);
   claudeRuntime.on('turn',(session,result,opId)=>recordClaudeTurn(ledger,session.id,session.usageBaseline,result,opId));
   const claudeCode=new ClaudeCodeBridge(ledger,undefined,undefined,undefined,claudeRuntime);
+  claudeCodeBridge=claudeCode;
   hub.register('claude',claudeCode.syncSource);
   // claude.ai Artifacts open in a browser profile of the connector's own (signed in once from the phone) and reach the phone as static copies.
   // A guest's profile lives in the guest folder, so clearing the guest data removes that sign-in too.
@@ -110,6 +113,7 @@ if(available.includes('claude')){
 }
 if(!guest){
   const antigravity=new AntigravityBridge(join(homedir(),'.gemini','antigravity'),ledger);
+  antigravityBridge=antigravity;
   hub.register('antigravity',antigravity.syncSource);
   bridges.push({prefix:'antigravity',handle:(action,payload)=>antigravity.handle(action,payload),mutations:['antigravity.create','antigravity.send','antigravity.stop','antigravity.respond','antigravity.steerQueued','antigravity.withdrawQueued','antigravity.cancelQueued'],
     prepareReload:()=>{if(antigravity.busy)throw new BridgeError('active','Antigravity 排队消息正在处理，请稍后更新');},close:()=>antigravity.close()});
@@ -125,6 +129,9 @@ const services=new ServiceRouter(bridges,request=>{
 },()=>control.updating);
 let socket:WebSocket|undefined,stopping=false,backoff=1000,retry:NodeJS.Timeout|undefined,dirty:NodeJS.Timeout|undefined;
 let proxyBackpressure:NodeJS.Timeout|undefined;
+let relayState:LocalControlStatus['relay']='connecting',authReason:LocalControlStatus['authReason']=null;
+let teamMode=Boolean(config.token?.startsWith('cnt_')),ownToken=Boolean(config.token?.startsWith('cnt_'));
+const activeMachineName=config.machineName||hostname();
 // Finished turns go to a team relay in batches; each stays in the ledger until the relay confirms it.
 let usageRelay=false,usageSending=false;
 function flushUsage(){
@@ -157,9 +164,11 @@ function connect() {
   ws.on('open',()=>send({type:'hello',role:'connector',token:config.token,machineId:config.machineId,name:config.machineName||hostname(),services:available,protocol:PROTOCOL_VERSION,features:CONNECTOR_FEATURES,...guest?{guest:true}:{}}));
   ws.on('message',async data=>{
     let m:Json;try{m=JSON.parse(data.toString());}catch{return;}
-    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;control.livePush=Array.isArray(m.features)&&m.features.includes('live');
+    if(m.type==='ready'){ready=true;clearTimeout(authTimer);backoff=1000;relayState='ok';authReason=null;control.livePush=Array.isArray(m.features)&&m.features.includes('live');
       // Synced messages refer to images only through a relay that serves them.
-      hub.images=Array.isArray(m.features)&&m.features.includes('blob.image')?images:null;usageRelay=Array.isArray(m.features)&&m.features.includes('team');usageSending=false;console.log('电脑已连接中继');flushUsage();return;}
+      hub.images=Array.isArray(m.features)&&m.features.includes('blob.image')?images:null;usageRelay=Array.isArray(m.features)&&m.features.includes('team');
+      teamMode=m.teamMode===true||Boolean(config.token?.startsWith('cnt_'));ownToken=m.ownToken===true||Boolean(config.token?.startsWith('cnt_'));
+      usageSending=false;console.log('电脑已连接中继');flushUsage();return;}
     if(!ready)return;
     if(m.type==='usage.ack'){if(Array.isArray(m.ids))ledger.ackUsage(m.ids);usageSending=false;flushUsage();return;}
     if(typeof m.type==='string'&&m.type.startsWith('proxy.')){browserPreview.handle(m);return;}
@@ -215,15 +224,19 @@ function connect() {
       ...traceOn?{trace:{handleMs:Math.round((performance.now()-started)*10)/10,now:Date.now(),steps:{}}}:{}});}
   });
   ws.on('error',()=>{});
-  ws.on('close',code=>{
+  ws.on('close',(code,reason)=>{
     clearInterval(proxyBackpressure);proxyBackpressure=undefined;usageSending=false;
     void browserPreview.stop();dropVoiceStreams();
     clearTimeout(authTimer);clearInterval(pulse);if(stopping)return;
+    const reasonText=Buffer.isBuffer(reason)?reason.toString('utf8'):String(reason||'');
     if(code===4401||code===4409){
+      relayState=code===4401?'unauthorized':'unreachable';
+      authReason=code===4401?(reasonText==='machine_token_mismatch'?'machine_token_mismatch':'invalid_token'):'replaced';
       console.error(code===4401?(guest?'连接 Token 不匹配，请检查中继配置':'连接 Token 不匹配，请在电脑更新配置'):'同一电脑连接已被替换');
       if(guest){services.close();control.close();process.exit(1);}
       return;
     }
+    relayState='unreachable';authReason=null;
     retry=setTimeout(connect,backoff+Math.random()*500);backoff=Math.min(15_000,backoff*2);
   });
 }
@@ -249,6 +262,36 @@ control.on('change',(id:string|null)=>{
   dirtyIds.add(id);if(dirty)return;
   dirty=setTimeout(()=>{dirty=undefined;try{for(const threadId of dirtyIds)send({type:'changed',threadId,generation:control.generation});}catch{}dirtyIds.clear();},CHANGE_DELAY);
 });
+const localControl=new LocalControlServer({
+  dataDir:config.dataDir,
+  getStatus:async()=>{
+    const info=useCodex?await Promise.race([services.handle({id:'local-status',action:'info',payload:{}}).catch(()=>null),new Promise<null>(r=>setTimeout(()=>r(null),2500))]):null;
+    const claudeCheck=claudeCodeBridge?.artifacts?await Promise.race([claudeCodeBridge.handle('claude.artifact.login',{op:'check'}).catch(()=>null),new Promise<null>(r=>setTimeout(()=>r(null),2000))]):null;
+    const claudeSignIn=claudeCheck&&claudeCheck.available!==false&&(claudeCheck.signedIn==='yes'||claudeCheck.signedIn==='no'||claudeCheck.signedIn==='unknown')?claudeCheck.signedIn:undefined;
+    const activeTasks:ActiveTask[]=[
+      ...useCodex?control.activeTasks():[],
+      ...claudeCodeBridge?.activeTasks()||[],
+      ...antigravityBridge?.activeTasks()||[],
+    ];
+    return {
+      relay:relayState,
+      authReason,
+      connector:relayState==='ok'?'online':'offline',
+      teamMode,
+      ownToken,
+      machineId:config.machineId,
+      machineName:activeMachineName,
+      services:[...available],
+      ...info?.runtime?.version?{codexVersion:String(info.runtime.version)}:{},
+      ...info?{desktopOnline:Boolean(info.desktopOnline)}:{},
+      ...claudeSignIn?{claudeSignIn}:{},
+      activeTasks,
+      pendingUsage:ledger.pendingUsageCount(),
+    };
+  },
+  handleRequest:(action,payload)=>services.handle({id:'local',action:action as BridgeRequest['action'],payload}),
+});
+void localControl.start().catch(error=>console.error('本机控制通道未能启动：',error instanceof Error?error.message:error));
 connect();
 // Keep the relay connection independent of Codex startup and recovery.
 const codexStarted=useCodex?control.start():undefined;
@@ -264,4 +307,4 @@ if(guest&&process.env.BRIDGE_GUEST_CHECK!=='0'){
     void checkClaude(sdkQuery as unknown as ClaudeLoader,guest.workspace).then(result=>report('Claude Code',result));
   }
 }
-for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);void browserPreview.stop();closeVoiceStreams();hub.close();services.close();socket?.close();control.close();process.exit(0);});
+for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{stopping=true;clearTimeout(retry);clearTimeout(dirty);clearTimeout(liveTimer);localControl.close();void browserPreview.stop();closeVoiceStreams();hub.close();services.close();socket?.close();control.close();process.exit(0);});

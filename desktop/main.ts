@@ -3,11 +3,25 @@
 import QRCode from 'qrcode';
 
 type Mode = 'all' | 'connector' | 'relay';
-type Config = {mode?: Mode; relayUrl?: string; token?: string; codexBin?: string; codexHome?: string; claudeBin?: string; localRelay?: string};
+type Config = {mode?: Mode; relayUrl?: string; token?: string; machineName?: string; defaultMachineName?: string; codexBin?: string; codexHome?: string; claudeBin?: string; localRelay?: string};
 type Service = 'running' | 'partial' | 'stopped' | 'starting' | 'stopping' | 'saving';
-type HostState = {service: Service; configured: boolean; error?: string | null; autostart: boolean; config?: Config | null};
-type Health = {relay: 'ok' | 'unreachable' | 'unauthorized'; connector: 'online' | 'offline' | 'unknown'; services?: string[]; codexVersion?: string; desktopOnline?: boolean; claudeSignIn?: 'yes' | 'no' | 'unknown'};
-type Settings = {mode: Mode; relayUrl: string; token: string; codexBin: string; codexHome: string; claudeBin: string};
+type HostState = {service: Service; configured: boolean; error?: string | null; autostart: boolean; teamNotify?: boolean; config?: Config | null};
+type ActiveTask = {service: 'codex' | 'claude' | 'antigravity'; threadId: string; actorName?: string; queued?: boolean};
+type Health = {
+  relay: 'ok' | 'connecting' | 'unreachable' | 'unauthorized';
+  authReason?: 'machine_token_mismatch' | 'invalid_token' | 'replaced' | null;
+  connector: 'online' | 'offline' | 'unknown';
+  teamMode?: boolean;
+  ownToken?: boolean;
+  machineName?: string;
+  services?: string[];
+  codexVersion?: string;
+  desktopOnline?: boolean;
+  claudeSignIn?: 'yes' | 'no' | 'unknown';
+  activeTasks?: ActiveTask[];
+  pendingUsage?: number;
+};
+type Settings = {mode: Mode; relayUrl: string; token: string; machineName: string; codexBin: string; codexHome: string; claudeBin: string};
 type PathField = 'codexBin' | 'codexHome' | 'claudeBin';
 type FromHost =
   | {type: 'state'; state: HostState}
@@ -19,7 +33,7 @@ type FromHost =
   | {type: 'claudeSignIn'; state: 'started' | 'done' | 'closed' | 'failed'; error?: string};
 type ToHost =
   | {type: 'ready'} | {type: 'start'} | {type: 'stop'} | {type: 'exit'; stop: boolean}
-  | {type: 'save'; settings: Settings} | {type: 'autostart'; enabled: boolean}
+  | {type: 'save'; settings: Settings} | {type: 'autostart'; enabled: boolean} | {type: 'teamNotify'; enabled: boolean}
   | {type: 'logs'} | {type: 'open'; url: string} | {type: 'copy'; text: string}
   | {type: 'pick'; field: PathField} | {type: 'hide'} | {type: 'claudeSignIn'};
 
@@ -29,7 +43,9 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const host = window.chrome?.webview;
 if (new URLSearchParams(location.search).has('mica')) document.documentElement.classList.add('mica');
 
-let state: HostState = {service: 'stopped', configured: true, autostart: false};
+const SERVICE_NAMES: Record<ActiveTask['service'], string> = {codex: 'Codex', claude: 'Claude Code', antigravity: 'Antigravity'};
+
+let state: HostState = {service: 'stopped', configured: true, autostart: false, teamNotify: true};
 let health: Health | null = null;
 let screen: 'status' | 'settings' | null = null;
 let draftMode: Mode = 'all';
@@ -46,8 +62,19 @@ function send(message: ToHost) {
   else mock(message);
 }
 
-function link(config?: Config | null) {
-  if (!config?.relayUrl || !config.token) return '';
+function isTeamMode(config?: Config | null, currentHealth?: Health | null) {
+  return Boolean(currentHealth?.teamMode || config?.token?.startsWith('cnt_'));
+}
+
+function cleanRelayUrl(config?: Config | null) {
+  if (!config?.relayUrl) return '';
+  try {return new URL(config.relayUrl).origin;} catch {return '';}
+}
+
+function link(config?: Config | null, currentHealth?: Health | null) {
+  if (!config?.relayUrl) return '';
+  if (isTeamMode(config, currentHealth)) return cleanRelayUrl(config);
+  if (!config.token) return '';
   try {
     const url = new URL(config.relayUrl);
     url.hash = new URLSearchParams({token: config.token}).toString();
@@ -55,18 +82,36 @@ function link(config?: Config | null) {
   } catch {return '';}
 }
 
+function summarizeTasks(tasks: ActiveTask[] | undefined) {
+  if (!tasks?.length) return '';
+  return tasks.map(task => {
+    const app = SERVICE_NAMES[task.service] || task.service;
+    const suffix = task.queued ? '排队中' : '';
+    return task.actorName ? `${task.actorName}（${app}${suffix ? '·' + suffix : ''}）` : `${app}${suffix ? '·' + suffix : ''}`;
+  }).join('、');
+}
+
+function activeTaskWarning() {
+  const tasks = health?.activeTasks;
+  if (!tasks?.length) return '';
+  return `当前有 ${tasks.length} 个任务正在运行（${summarizeTasks(tasks)}），操作会立即中断这些任务。`;
+}
+
 const busy = () => ['starting', 'stopping', 'saving'].includes(state.service);
 const local = (mode?: Mode) => mode !== 'connector';
 
 function setText(id: string, text: string) {$(id).textContent = text;}
-function setDot(id: string, kind: 'ok' | 'bad' | 'idle') {$(id).className = 'dot' + (kind === 'idle' ? '' : ' ' + kind);}
+function setDot(id: string, kind: 'ok' | 'bad' | 'warn' | 'idle') {$(id).className = 'dot' + (kind === 'idle' ? '' : ' ' + kind);}
 
 function renderStatus() {
   const s = state.service, config = state.config || {}, running = s === 'running';
+  const h = running ? health : null;
+  const team = isTeamMode(config, h);
+  const ownToken = Boolean(h?.ownToken || config.token?.startsWith('cnt_'));
   const failed = !!state.error && (s === 'stopped' || s === 'partial');
   const titles: Record<Service, string> = {running: '运行中', partial: '部分服务未运行', stopped: '已停止', starting: '正在启动…', stopping: '正在停止…', saving: '正在保存设置…'};
   const subs: Record<Service, string> = {
-    running: '手机或任意浏览器都可以使用这台电脑上的 AI 编程助手',
+    running: team ? '已作为团队电脑节点运行，授权成员可通过网页使用这台电脑' : '手机或任意浏览器都可以使用这台电脑上的 AI 编程助手',
     partial: '中继或连接器已经停止，重新启动即可恢复',
     stopped: '服务未运行，手机和浏览器暂时无法连接这台电脑',
     starting: local(config.mode) ? '正在启动本机中继和连接器' : '正在启动连接器并连接你的中继',
@@ -75,41 +120,87 @@ function renderStatus() {
   };
   setText('title', failed ? '启动失败' : titles[s]);
   setText('subtitle', failed ? '服务没有启动成功' : subs[s]);
-  $('indicator').className = 'indicator ' + (busy() ? 'busy' : running ? 'running' : failed || s === 'partial' ? 'error' : '');
+  $('indicator').className = 'indicator ' + (busy() ? 'busy' : running ? (h?.relay === 'unauthorized' ? 'error' : 'running') : failed || s === 'partial' ? 'error' : '');
   $('error').hidden = !failed;
   setText('error-text', state.error || '');
 
-  const href = link(config);
-  if (href !== qrFor) {
-    qrFor = href;
-    if (href) QRCode.toString(href, {type: 'svg', margin: 0, errorCorrectionLevel: 'M', color: {dark: '#0d0d0dff', light: '#ffffffff'}}).then(svg => {if (qrFor === href) $('qr').innerHTML = svg;});
-    else $('qr').innerHTML = '';
+  const authIssue = running && h?.relay === 'unauthorized';
+  $('auth-banner').hidden = !authIssue;
+  if (authIssue) {
+    setText('auth-banner-text', h?.authReason === 'machine_token_mismatch'
+      ? '这台电脑的专用 Token 已在中继端更换或启用，当前 Token 已失效。请点击下方按钮粘贴管理员生成的新专用 Token。'
+      : '连接 Token 与中继不匹配，电脑未能上线。请检查并更新连接设置。');
   }
-  $('qr').classList.toggle('dim', !running);
-  $('qr-overlay').hidden = running;
-  setText('qr-overlay', busy() ? titles[s] : '启动服务后显示二维码');
-  setText('qr-caption', local(config.mode) ? '手机扫码（需连同一 Wi-Fi），或直接在浏览器打开' : '手机扫码，或在任意设备的浏览器打开链接');
+
+  const href = link(config, h);
+  $('qr-box').hidden = team;
+  $('team-node').hidden = !team;
+  if (team) {
+    qrFor = '';
+    setText('team-machine-name', h?.machineName || config.machineName || config.defaultMachineName || '本机');
+    const pill = $('team-token-pill');
+    pill.textContent = ownToken ? '专用 Token' : '共享 Token · 建议更换';
+    pill.className = 'token-pill' + (ownToken ? ' own' : '');
+    setText('qr-caption', '团队成员请通过管理员发送的邀请链接登录；已登录设备可直接打开网页');
+    setText('open-web-label', '打开团队网页');
+    setText('copy-label', '复制网页地址');
+  } else {
+    if (href !== qrFor) {
+      qrFor = href;
+      if (href) QRCode.toString(href, {type: 'svg', margin: 0, errorCorrectionLevel: 'M', color: {dark: '#0d0d0dff', light: '#ffffffff'}}).then(svg => {if (qrFor === href) $('qr').innerHTML = svg;});
+      else $('qr').innerHTML = '';
+    }
+    $('qr').classList.toggle('dim', !running);
+    $('qr-overlay').hidden = running;
+    setText('qr-overlay', busy() ? titles[s] : '启动服务后显示二维码');
+    setText('qr-caption', local(config.mode) ? '手机扫码（需连同一 Wi-Fi），或直接在浏览器打开' : '手机扫码，或在任意设备的浏览器打开链接');
+    setText('open-web-label', '在浏览器打开');
+    setText('copy-label', '复制链接');
+  }
   ($('copy') as HTMLButtonElement).disabled = !running || !href;
   ($('open-web') as HTMLButtonElement).disabled = !running || !href;
 
-  const relayText = config.relayUrl ? config.relayUrl + (config.mode === 'all' ? ' · 本机' : '') : '未设置';
-  const h = running ? health : null;
+  const relayText = config.relayUrl ? config.relayUrl + (config.mode === 'all' ? ' · 本机' : team ? ' · 团队' : '') : '未设置';
   if (!running) {
     setText('relay-value', relayText); setDot('relay-dot', 'idle');
+    setText('activity-value', '—'); setDot('activity-dot', 'idle'); $('activity-value').title = '';
+    $('usage-row').hidden = true;
     setText('codex-value', '—'); setDot('codex-dot', 'idle');
     setText('claude-value', '—'); setDot('claude-dot', 'idle');
     setText('antigravity-value', '—'); setDot('antigravity-dot', 'idle');
   } else if (!h) {
     setText('relay-value', relayText); setDot('relay-dot', 'idle');
+    setText('activity-value', '检查中…'); setDot('activity-dot', 'idle'); $('activity-value').title = '';
+    $('usage-row').hidden = true;
     setText('codex-value', '检查中…'); setDot('codex-dot', 'idle');
     setText('claude-value', '检查中…'); setDot('claude-dot', 'idle');
     setText('antigravity-value', '检查中…'); setDot('antigravity-dot', 'idle');
   } else {
     if (h.relay === 'ok') {setText('relay-value', relayText); setDot('relay-dot', 'ok');}
-    else {setText('relay-value', h.relay === 'unauthorized' ? 'Token 不匹配' : '无法连接中继'); setDot('relay-dot', 'bad');}
-    if (h.connector === 'online') {
+    else if (h.relay === 'connecting') {setText('relay-value', '正在连接中继…'); setDot('relay-dot', 'warn');}
+    else if (h.relay === 'unauthorized') {setText('relay-value', h.authReason === 'machine_token_mismatch' ? '专用 Token 已变更' : 'Token 不匹配'); setDot('relay-dot', 'bad');}
+    else if (h.authReason === 'replaced') {setText('relay-value', '同一电脑已在别处连接'); setDot('relay-dot', 'bad');}
+    else {setText('relay-value', '无法连接中继'); setDot('relay-dot', 'bad');}
+
+    const tasks = h.activeTasks || [];
+    if (tasks.length) {
+      const summary = `${tasks.length} 个任务 · ${summarizeTasks(tasks)}`;
+      setText('activity-value', summary);
+      $('activity-value').title = summary;
+      setDot('activity-dot', 'warn');
+    } else {
+      setText('activity-value', '空闲');
+      $('activity-value').title = '';
+      setDot('activity-dot', h.connector === 'online' ? 'ok' : 'idle');
+    }
+
+    const pendingUsage = h.pendingUsage || 0;
+    $('usage-row').hidden = !(pendingUsage > 0);
+    if (pendingUsage > 0) setText('usage-value', `${pendingUsage} 条用量待同步，恢复后自动补报`);
+
+    if (h.connector === 'online' || h.codexVersion || h.services?.length) {
       const has = (service: string) => !h.services || h.services.includes(service);
-      setText('codex-value', h.codexVersion ? `${h.codexVersion} · ${h.desktopOnline ? '官方桌面在线' : '官方桌面未打开'}` : has('codex') ? '已连接' : '未检测到');
+      setText('codex-value', h.codexVersion ? `${h.codexVersion} · ${h.desktopOnline ? '官方桌面在线' : '官方桌面未打开'}` : has('codex') ? (h.connector === 'online' ? '已连接' : '已启动') : '未检测到');
       setDot('codex-dot', h.codexVersion ? 'ok' : 'idle');
       for (const service of ['claude', 'antigravity']) {
         const found = !!h.services?.includes(service);
@@ -122,7 +213,7 @@ function renderStatus() {
       setText('antigravity-value', '—'); setDot('antigravity-dot', 'idle');
     }
   }
-  for (const id of ['relay-value', 'codex-value', 'claude-value', 'antigravity-value']) $(id).classList.toggle('muted', !running);
+  for (const id of ['relay-value', 'activity-value', 'codex-value', 'claude-value', 'antigravity-value']) $(id).classList.toggle('muted', !running);
 
   const needsSignIn = h?.connector === 'online' && !!h.services?.includes('claude') && h.claudeSignIn === 'no';
   $('claude-signin').hidden = !(running && (signIn !== 'idle' || needsSignIn && !declined()));
@@ -134,6 +225,8 @@ function renderStatus() {
 
   $('autostart').setAttribute('aria-checked', String(state.autostart));
   ($('autostart') as HTMLButtonElement).disabled = busy();
+  $('team-notify').setAttribute('aria-checked', String(state.teamNotify !== false));
+  ($('team-notify') as HTMLButtonElement).disabled = busy();
   const primary = $('primary') as HTMLButtonElement, stop = $('stop') as HTMLButtonElement;
   primary.hidden = running;
   primary.disabled = busy();
@@ -143,12 +236,22 @@ function renderStatus() {
   ($('open-settings') as HTMLButtonElement).disabled = busy();
 }
 
+function renderTokenHint() {
+  const value = ($('token') as HTMLInputElement).value.trim();
+  const isLocal = local(draftMode);
+  if (value.startsWith('cnt_')) setText('token-hint', '已识别为电脑专用 Token（仅用于这台电脑连接团队中继，不会生成扫码链接）。');
+  else if (isLocal) setText('token-hint', '本机首次留空将自动生成。');
+  else setText('token-hint', '填写服务器共享 Token，或在团队「电脑」页生成的电脑专用 Token（cnt_…）。');
+}
+
 function renderSettingsChrome() {
   const first = !state.configured, running = state.service === 'running' || state.service === 'partial';
   $('welcome').hidden = !first;
   $('settings-head').hidden = first;
   $('cancel').hidden = first;
   $('restart-warning').hidden = first || !running;
+  const activeWarn = activeTaskWarning();
+  setText('restart-warning-text', activeWarn || '保存会重新启动服务，电脑上由连接器管理的任务会被中断。');
   const save = $('save') as HTMLButtonElement;
   save.textContent = saving ? '正在保存…' : running ? '保存并重新启动' : '保存并启动';
   save.disabled = saving || busy();
@@ -156,7 +259,9 @@ function renderSettingsChrome() {
   const isLocal = local(draftMode);
   setText('relay-hint', isLocal ? '本机中继默认使用这台电脑的局域网地址，手机需连同一 Wi-Fi。' : '填写已部署中继的 HTTPS 地址。');
   ($('relay') as HTMLInputElement).placeholder = isLocal ? (state.config?.localRelay || 'http://192.168.1.2:3340') : 'https://codex.your-domain.com';
-  ($('token') as HTMLInputElement).placeholder = isLocal ? '本机首次留空，自动生成' : '填写服务器 .env 中的 Token';
+  ($('token') as HTMLInputElement).placeholder = isLocal ? '本机首次留空，自动生成' : '共享 Token 或电脑专用 Token（cnt_…）';
+  ($('machineName') as HTMLInputElement).placeholder = state.config?.defaultMachineName || '例如：办公室主力机';
+  renderTokenHint();
 }
 
 function openSettings() {
@@ -164,6 +269,7 @@ function openSettings() {
   draftMode = config.mode || 'all';
   ($('relay') as HTMLInputElement).value = config.relayUrl || '';
   ($('token') as HTMLInputElement).value = config.token || '';
+  ($('machineName') as HTMLInputElement).value = config.machineName || '';
   ($('codexBin') as HTMLInputElement).value = config.codexBin || '';
   ($('codexHome') as HTMLInputElement).value = config.codexHome || '';
   ($('claudeBin') as HTMLInputElement).value = config.claudeBin || '';
@@ -205,7 +311,11 @@ function dialog(title: string, text: string, buttons: DialogButton[]) {
 function closeDialog() {$('dialog').hidden = true;}
 
 function confirmStop() {
-  dialog('停止服务？', '电脑上由连接器管理的任务会被中断，手机和浏览器都将无法连接这台电脑。独立运行的 Codex、Claude Code、Antigravity 桌面程序不受影响。', [
+  const activeWarn = activeTaskWarning();
+  const body = activeWarn
+    ? `${activeWarn}停止后手机和浏览器将暂时无法连接这台电脑。`
+    : '电脑上由连接器管理的任务会被中断，手机和浏览器都将无法连接这台电脑。独立运行的 Codex、Claude Code、Antigravity 桌面程序不受影响。';
+  dialog(activeWarn ? '有任务正在运行，确定停止？' : '停止服务？', body, [
     {label: '取消', kind: 'outline', action: () => {}},
     {label: '停止服务', kind: 'danger', action: () => send({type: 'stop'})},
   ]);
@@ -213,7 +323,11 @@ function confirmStop() {
 
 function confirmExit() {
   if (state.service === 'stopped') {send({type: 'exit', stop: false}); return;}
-  dialog('退出 Codex 随行？', '可以只关闭托盘图标，让服务继续在后台运行；也可以同时停止服务，这会中断连接器管理的任务。', [
+  const activeWarn = activeTaskWarning();
+  const body = activeWarn
+    ? `${activeWarn}建议“只退出图标”让服务继续在后台完成任务。`
+    : '可以只关闭托盘图标，让服务继续在后台运行；也可以同时停止服务，这会中断连接器管理的任务。';
+  dialog('退出 Codex 随行？', body, [
     {label: '取消', kind: 'outline', action: () => {}},
     {label: '只退出图标', kind: 'outline', action: () => send({type: 'exit', stop: false})},
     {label: '停止服务并退出', kind: 'danger', action: () => send({type: 'exit', stop: true})},
@@ -258,6 +372,7 @@ function receive(message: FromHost) {
 }
 
 $('open-settings').addEventListener('click', openSettings);
+$('auth-fix').addEventListener('click', openSettings);
 $('back').addEventListener('click', () => show('status'));
 $('cancel').addEventListener('click', () => show('status'));
 $('primary').addEventListener('click', () => send({type: 'start'}));
@@ -271,8 +386,13 @@ $('claude-signin-skip').addEventListener('click', () => {
   toast('以后可以从托盘菜单“登录 claude.ai”');
 });
 $('autostart').addEventListener('click', () => send({type: 'autostart', enabled: !state.autostart}));
-$('copy').addEventListener('click', () => {const href = link(state.config); if (href) {send({type: 'copy', text: href}); toast('已复制连接链接');}});
-$('open-web').addEventListener('click', () => {const href = link(state.config); if (href) send({type: 'open', url: href});});
+$('team-notify').addEventListener('click', () => send({type: 'teamNotify', enabled: state.teamNotify === false}));
+$('copy').addEventListener('click', () => {
+  const href = link(state.config, health);
+  if (href) {send({type: 'copy', text: href}); toast(isTeamMode(state.config, health) ? '已复制网页地址' : '已复制连接链接');}
+});
+$('open-web').addEventListener('click', () => {const href = link(state.config, health); if (href) send({type: 'open', url: href});});
+$('token').addEventListener('input', renderTokenHint);
 $('toggle-token').addEventListener('click', () => {
   const input = $('token') as HTMLInputElement, visible = input.type === 'password';
   input.type = visible ? 'text' : 'password';
@@ -296,7 +416,7 @@ $('settings-form').addEventListener('submit', event => {
   saving = true;
   $('save-error').hidden = true;
   const value = (id: string) => ($(id) as HTMLInputElement).value.trim();
-  send({type: 'save', settings: {mode: draftMode === 'relay' ? 'all' : draftMode, relayUrl: value('relay'), token: value('token'), codexBin: value('codexBin'), codexHome: value('codexHome'), claudeBin: value('claudeBin')}});
+  send({type: 'save', settings: {mode: draftMode === 'relay' ? 'all' : draftMode, relayUrl: value('relay'), token: value('token'), machineName: value('machineName'), codexBin: value('codexBin'), codexHome: value('codexHome'), claudeBin: value('claudeBin')}});
   render();
 });
 document.addEventListener('keydown', event => {
@@ -311,19 +431,22 @@ send({type: 'ready'});
 
 // Browser preview without the tray: a scripted host so the page can be checked in any browser.
 function mock(message: ToHost) {
-  const config: Config = {mode: 'all', relayUrl: 'http://192.168.1.8:3340', token: 'preview-token-not-real', localRelay: 'http://192.168.1.8:3340'};
+  const params = new URLSearchParams(location.search);
+  const team = params.has('team');
+  const config: Config = {mode: team ? 'connector' : 'all', relayUrl: team ? 'https://codex.example.com' : 'http://192.168.1.8:3340', token: team ? 'cnt_preview-token-not-real' : 'preview-token-not-real', machineName: '办公室主力机', defaultMachineName: 'DESKTOP-DEMO', localRelay: 'http://192.168.1.8:3340'};
   const later = (fn: () => void, ms = 900) => setTimeout(fn, ms);
   const update = (patch: Partial<HostState>) => receive({type: 'state', state: {...state, ...patch}});
-  const params = new URLSearchParams(location.search);
   if (message.type === 'ready') {
     const first = params.get('state') === 'first';
-    update({service: first ? 'stopped' : (params.get('state') as Service) || 'running', configured: !first, autostart: true, config: first ? {localRelay: config.localRelay, relayUrl: config.localRelay, mode: 'all'} : config, error: params.get('error')});
-    if (!first) later(() => receive({type: 'health', health: {relay: 'ok', connector: 'online', services: ['codex', 'claude', 'antigravity'], codexVersion: '0.146.0', desktopOnline: true, claudeSignIn: params.get('signin') === 'yes' ? 'yes' : 'no'}}));
+    update({service: first ? 'stopped' : (params.get('state') as Service) || 'running', configured: !first, autostart: true, teamNotify: true, config: first ? {localRelay: config.localRelay, relayUrl: config.localRelay, mode: 'all', defaultMachineName: config.defaultMachineName} : config, error: params.get('error')});
+    if (!first) later(() => receive({type: 'health', health: {relay: 'ok', connector: 'online', teamMode: team, ownToken: team, machineName: config.machineName, services: ['codex', 'claude', 'antigravity'], codexVersion: '0.146.0', desktopOnline: true, claudeSignIn: params.get('signin') === 'yes' ? 'yes' : 'no', activeTasks: team ? [{service: 'codex', threadId: 't1', actorName: '张三'}] : [], pendingUsage: team ? 2 : 0}}));
   } else if (message.type === 'start') {
     update({service: 'starting', error: null});
-    later(() => {update({service: 'running'}); later(() => receive({type: 'health', health: {relay: 'ok', connector: 'online', services: ['codex', 'claude'], codexVersion: '0.146.0', desktopOnline: false}}));});
+    later(() => {update({service: 'running'}); later(() => receive({type: 'health', health: {relay: 'ok', connector: 'online', teamMode: team, ownToken: team, services: ['codex', 'claude'], codexVersion: '0.146.0', desktopOnline: false, activeTasks: [], pendingUsage: 0}}));});
   } else if (message.type === 'stop') {
     update({service: 'stopping'}); later(() => update({service: 'stopped'}));
+  } else if (message.type === 'teamNotify') {
+    update({teamNotify: message.enabled});
   } else if (message.type === 'claudeSignIn') {
     receive({type: 'claudeSignIn', state: 'started'});
     later(() => receive(params.has('signin-fails') ? {type: 'claudeSignIn', state: 'failed', error: '连接器未在线'} : {type: 'claudeSignIn', state: 'done'}), 1800);

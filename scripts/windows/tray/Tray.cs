@@ -81,7 +81,7 @@ enum ServiceState {Stopped, Partial, Running}
 
 sealed class TrayContext : ApplicationContext {
   const string Title = "Codex 随行";
-  readonly string root, local, configPath;
+  readonly string root, local, configPath, prefsPath;
   readonly bool webview;
   readonly NotifyIcon icon = new NotifyIcon();
   readonly ContextMenu menu = new ContextMenu();
@@ -96,13 +96,18 @@ sealed class TrayContext : ApplicationContext {
   string busy;            // "starting" | "stopping" | "saving" while an operation runs
   string lastError;       // shown in the window until the next start
   string lastPosted;
+  string balloonAction = "none"; // "logs" | "settings" | "window" | "none"
   Dictionary<string, object> config;
-  bool quiet, expectRunning, balloonOpensLogs, checkingHealth, quitting, signingIn;
+  bool quiet, expectRunning, checkingHealth, quitting, signingIn;
+  bool teamMode, teamNotify = true, authNotified;
+  int activeTaskCount;
 
   public TrayContext(string root, bool background, EventWaitHandle show) {
     this.root = root;
     local = Path.Combine(root, ".local");
     configPath = Path.Combine(local, "config.json");
+    prefsPath = Path.Combine(local, "tray-prefs.json");
+    LoadPrefs();
     IntPtr handle = invoker.Handle; // Creates the window used to marshal calls back to the UI thread.
     webview = File.Exists(Path.Combine(root, "build", "desktop", "index.html")) && Web.Available(Path.Combine(root, "runtime"));
 
@@ -130,7 +135,11 @@ sealed class TrayContext : ApplicationContext {
 
     icon.ContextMenu = menu;
     icon.MouseClick += delegate(object sender, MouseEventArgs e) {if (e.Button == MouseButtons.Left) ShowWindow();};
-    icon.BalloonTipClicked += delegate {if (balloonOpensLogs) OpenLogs();};
+    icon.BalloonTipClicked += delegate {
+      if (balloonAction == "logs") OpenLogs();
+      else if (balloonAction == "settings") OpenSettings();
+      else if (balloonAction == "window") ShowWindow();
+    };
     state = ReadState();
     UpdateUi();
     icon.Visible = true;
@@ -210,6 +219,8 @@ sealed class TrayContext : ApplicationContext {
       if (settings != null && busy == null) await Save(settings);
     } else if (type == "autostart") {
       SetAutostart(Equals(message.ContainsKey("enabled") ? message["enabled"] : null, true));
+    } else if (type == "teamNotify") {
+      SetTeamNotify(Equals(message.ContainsKey("enabled") ? message["enabled"] : null, true));
     } else if (type == "logs") OpenLogs();
     else if (type == "open") DesktopWindow.OpenExternal(Text(message, "url"));
     else if (type == "copy") {try {Clipboard.SetText(Text(message, "text"));} catch (Exception) {}}
@@ -230,6 +241,7 @@ sealed class TrayContext : ApplicationContext {
     body["configured"] = Configured;
     body["error"] = lastError;
     body["autostart"] = File.Exists(StartupLink);
+    body["teamNotify"] = teamNotify;
     body["config"] = config;
     string text = json.Serialize(body);
     if (text == lastPosted) return;
@@ -241,17 +253,92 @@ sealed class TrayContext : ApplicationContext {
   }
 
   async void CheckHealth() {
-    if (checkingHealth || window == null || window.IsDisposed || busy != null || state != ServiceState.Running) return;
+    if (checkingHealth || busy != null || state != ServiceState.Running) return;
     checkingHealth = true;
     try {
       ProcessResult result = await RunNode(new[] {"--status"}, null, 15000);
-      if (result.Code != 0 || window == null || state != ServiceState.Running) return;
-      Dictionary<string, object> message = new Dictionary<string, object>();
-      message["type"] = "health";
-      message["health"] = json.DeserializeObject(result.Output);
-      PostToWindow(message);
+      if (result.Code != 0 || state != ServiceState.Running) return;
+      object parsed = json.DeserializeObject(result.Output);
+      Dictionary<string, object> health = parsed as Dictionary<string, object>;
+      if (health != null) ProcessHealth(health);
+      if (window != null && !window.IsDisposed) {
+        Dictionary<string, object> message = new Dictionary<string, object>();
+        message["type"] = "health";
+        message["health"] = parsed;
+        PostToWindow(message);
+      }
     } catch (Exception) {
     } finally {checkingHealth = false;}
+  }
+
+  void ProcessHealth(Dictionary<string, object> health) {
+    bool nextTeam = Equals(health.ContainsKey("teamMode") ? health["teamMode"] : null, true) || UsesDedicatedToken();
+    string relay = Text(health, "relay");
+    string authReason = Text(health, "authReason");
+    object[] tasks = health.ContainsKey("activeTasks") ? health["activeTasks"] as object[] : null;
+    int nextTasks = tasks != null ? tasks.Length : 0;
+
+    if (relay == "unauthorized") {
+      if (!authNotified && teamNotify) {
+        authNotified = true;
+        string body = authReason == "machine_token_mismatch"
+          ? "管理员已更换或启用这台电脑的专用 Token，点击此处更新连接设置。"
+          : "连接 Token 与中继不匹配，点击此处检查连接设置。";
+        NotifyWithAction("电脑未能连上中继", body, ToolTipIcon.Warning, "settings");
+      }
+    } else if (relay == "ok") {
+      authNotified = false;
+    }
+
+    if (nextTeam && teamNotify && activeTaskCount == 0 && nextTasks > 0 && (window == null || window.IsDisposed || !window.Visible)) {
+      string summary = SummarizeTasks(tasks);
+      if (!string.IsNullOrEmpty(summary)) NotifyWithAction("团队成员正在使用这台电脑", summary, ToolTipIcon.Info, "window");
+    }
+
+    bool changed = nextTeam != teamMode || nextTasks != activeTaskCount;
+    teamMode = nextTeam;
+    activeTaskCount = nextTasks;
+    if (changed) UpdateUi();
+  }
+
+  static string SummarizeTasks(object[] tasks) {
+    if (tasks == null || tasks.Length == 0) return "";
+    List<string> parts = new List<string>();
+    foreach (object item in tasks) {
+      Dictionary<string, object> task = item as Dictionary<string, object>;
+      if (task == null) continue;
+      string svc = Text(task, "service");
+      string app = svc == "claude" ? "Claude Code" : svc == "antigravity" ? "Antigravity" : "Codex";
+      string actor = Text(task, "actorName");
+      parts.Add(string.IsNullOrEmpty(actor) ? app : actor + "（" + app + "）");
+    }
+    return string.Join("、", parts.ToArray());
+  }
+
+  bool UsesDedicatedToken() {
+    if (config == null) return false;
+    string token = Text(config, "token");
+    return token.StartsWith("cnt_", StringComparison.Ordinal);
+  }
+
+  void LoadPrefs() {
+    try {
+      if (!File.Exists(prefsPath)) return;
+      Dictionary<string, object> prefs = json.DeserializeObject(File.ReadAllText(prefsPath, Encoding.UTF8)) as Dictionary<string, object>;
+      if (prefs != null && prefs.ContainsKey("teamNotify")) teamNotify = Equals(prefs["teamNotify"], true);
+    } catch (Exception) {}
+  }
+
+  void SetTeamNotify(bool enable) {
+    teamNotify = enable;
+    try {
+      Directory.CreateDirectory(local);
+      Dictionary<string, object> prefs = new Dictionary<string, object>();
+      prefs["teamNotify"] = teamNotify;
+      File.WriteAllText(prefsPath, json.Serialize(prefs), new UTF8Encoding(false));
+    } catch (Exception) {}
+    lastPosted = null;
+    PostState();
   }
 
   // Viewing the pages Claude publishes needs the connector's own browser signed in to claude.ai, once per computer.
@@ -351,14 +438,28 @@ sealed class TrayContext : ApplicationContext {
 
   async void CopyLink() {
     if (config == null && Configured) await LoadConfig();
-    string link = ConnectionLink();
+    bool team = teamMode || UsesDedicatedToken();
+    string link = team ? RelayOrigin() : ConnectionLink();
     if (link == null) {Notify("还没有连接链接", "请先完成连接设置。", ToolTipIcon.Info, false); return;}
-    try {Clipboard.SetText(link); Notify("已复制连接链接", "在手机上打开它即可连接这台电脑。", ToolTipIcon.None, false);}
-    catch (Exception) {}
+    try {
+      Clipboard.SetText(link);
+      if (team) Notify("已复制网页地址", "团队成员请通过管理员发送的邀请链接登录。", ToolTipIcon.None, false);
+      else Notify("已复制连接链接", "在手机上打开它即可连接这台电脑。", ToolTipIcon.None, false);
+    } catch (Exception) {}
+  }
+
+  string RelayOrigin() {
+    if (config == null) return null;
+    object relay;
+    if (!config.TryGetValue("relayUrl", out relay) || relay == null) return null;
+    Uri uri;
+    if (!Uri.TryCreate(relay.ToString(), UriKind.Absolute, out uri)) return null;
+    return uri.GetLeftPart(UriPartial.Authority);
   }
 
   string ConnectionLink() {
     if (config == null) return null;
+    if (teamMode || UsesDedicatedToken()) return RelayOrigin();
     object relay, token;
     if (!config.TryGetValue("relayUrl", out relay) || !config.TryGetValue("token", out token) || relay == null || token == null) return null;
     Uri uri;
@@ -431,7 +532,7 @@ sealed class TrayContext : ApplicationContext {
       if (stopped.Code != 0) {SetIdle(); SaveResult(false, "停止服务失败：" + stopped.Error); return;}
     }
     Dictionary<string, object> payload = new Dictionary<string, object>();
-    foreach (string key in new[] {"mode", "relayUrl", "token", "codexBin", "codexHome", "claudeBin"}) payload[key] = settings.ContainsKey(key) ? settings[key] : "";
+    foreach (string key in new[] {"mode", "relayUrl", "token", "machineName", "codexBin", "codexHome", "claudeBin"}) payload[key] = settings.ContainsKey(key) ? settings[key] : "";
     ProcessResult saved = await RunNode(new[] {"--settings-stdin"}, json.Serialize(payload), 30000);
     SetIdle();
     if (saved.Code != 0) {
@@ -547,6 +648,7 @@ sealed class TrayContext : ApplicationContext {
   void RefreshStatus() {
     ServiceState previous = state;
     state = ReadState();
+    if (state != ServiceState.Running) {activeTaskCount = 0; authNotified = false;}
     if (busy == null) {
       if (state == ServiceState.Running) expectRunning = true;
       else if (expectRunning) {
@@ -563,7 +665,12 @@ sealed class TrayContext : ApplicationContext {
     if (busy == "starting") {icon.Icon = busyIcon; status = "正在启动…";}
     else if (busy == "stopping") {icon.Icon = busyIcon; status = "正在停止…";}
     else if (busy == "saving") {icon.Icon = busyIcon; status = "正在保存设置…";}
-    else if (state == ServiceState.Running) {icon.Icon = runningIcon; status = "运行中";}
+    else if (state == ServiceState.Running) {
+      icon.Icon = authNotified ? partialIcon : runningIcon;
+      if (authNotified) status = "Token 失效";
+      else if (activeTaskCount > 0) status = (teamMode ? "团队运行中" : "运行中") + "（" + activeTaskCount + " 个任务）";
+      else status = teamMode ? "团队节点运行中" : "运行中";
+    }
     else if (state == ServiceState.Partial) {icon.Icon = partialIcon; status = "部分服务未运行";}
     else if (lastError != null) {icon.Icon = partialIcon; status = "启动失败";}
     else {icon.Icon = stoppedIcon; status = Configured ? "已停止" : "尚未设置";}
@@ -573,6 +680,7 @@ sealed class TrayContext : ApplicationContext {
     bool idle = busy == null;
     toggleItem.Text = state == ServiceState.Running ? "停止服务" : state == ServiceState.Partial ? "重新启动服务" : "启动服务";
     toggleItem.Enabled = idle;
+    copyItem.Text = (teamMode || UsesDedicatedToken()) ? "复制网页地址" : "复制连接链接";
     copyItem.Enabled = state == ServiceState.Running;
     settingsItem.Enabled = idle;
     signInItem.Enabled = idle && !signingIn && state == ServiceState.Running;
@@ -610,7 +718,11 @@ sealed class TrayContext : ApplicationContext {
   }
 
   void Notify(string title, string message, ToolTipIcon kind, bool opensLogs) {
-    balloonOpensLogs = opensLogs;
+    NotifyWithAction(title, message, kind, opensLogs ? "logs" : "none");
+  }
+
+  void NotifyWithAction(string title, string message, ToolTipIcon kind, string action) {
+    balloonAction = action;
     icon.ShowBalloonTip(10000, title, string.IsNullOrEmpty(message) ? " " : message, kind);
   }
 

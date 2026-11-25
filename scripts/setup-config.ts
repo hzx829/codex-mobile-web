@@ -31,7 +31,14 @@ export async function prepareSettings(input:any,old:any={}) {
   if(!token&&mode==='connector'&&!(input.rotate&&old.token))throw new Error('请填写自托管中继使用的 Token');
   token=token||randomBytes(32).toString('base64url');
   if(typeof token!=='string'||token.length<24||/\s/.test(token))throw new Error('Token 至少需要 24 位，且不能包含空白');
-  const config:any={...old,token,mode,relayUrl:url.origin,port:old.port||3340,host:old.host||'0.0.0.0',machineId:old.machineId||randomUUID(),machineName:old.machineName||hostname()};
+  let machineName=old.machineName||hostname();
+  if(input.machineName!==undefined) {
+    if(typeof input.machineName!=='string')throw new Error('电脑名称无效');
+    const cleaned=input.machineName.replace(/\s+/g,' ').trim();
+    if(cleaned.length>64||/[\u0000-\u001f]/.test(cleaned))throw new Error('电脑名称不能超过 64 个字符');
+    machineName=cleaned||hostname();
+  }
+  const config:any={...old,token,mode,relayUrl:url.origin,port:old.port||3340,host:old.host||'0.0.0.0',machineId:old.machineId||randomUUID(),machineName};
   delete config.roots; // Legacy project allowlists no longer restrict this computer.
   // An explicit blank removes an override; omitted fields retain the user's settings.
   for(const key of ['codexBin','codexHome'] as const) {

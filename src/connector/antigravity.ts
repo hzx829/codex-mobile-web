@@ -1036,6 +1036,20 @@ export class AntigravityBridge {
 
   private get queue() { return this.ledger.antigravityQueue; }
   get busy() { return this.writing.size > 0 || Boolean(this.queue.queued().length); }
+  activeTasks(): {service: 'antigravity'; threadId: string; actorName?: string; queued?: boolean}[] {
+    const seen = new Set<string>(), tasks: {service: 'antigravity'; threadId: string; actorName?: string; queued?: boolean}[] = [];
+    for (const threadId of this.writing) {
+      seen.add(threadId);
+      tasks.push({service: 'antigravity', threadId});
+    }
+    for (const item of this.queue.queued()) {
+      if (seen.has(item.threadId)) continue;
+      seen.add(item.threadId);
+      const actor = this.ledger?.actor(item.opId)?.name;
+      tasks.push({service: 'antigravity', threadId: item.threadId, queued: true, ...actor ? {actorName: actor} : {}});
+    }
+    return tasks;
+  }
   close() {
     this.closed = true;
     clearInterval(this.queueTimer);

@@ -183,6 +183,11 @@ export class ClaudeRuntime extends EventEmitter {
   get ownEntrypoint() {return this.entrypoint || DEFAULT_ENTRYPOINT;}
   get(id: string) {return this.live.get(id);}
   get busy() {return [...this.live.values()].some(session => session.running || session.requests.size || session.inbox.size);}
+  activeSessions(): {threadId: string; opId?: string}[] {
+    return [...this.live.values()]
+      .filter(session => session.running || session.requests.size || session.inbox.size)
+      .map(session => ({threadId: session.id, opId: session.turnOpId}));
+  }
 
   private touch(session: LiveSession) {
     session.version++;

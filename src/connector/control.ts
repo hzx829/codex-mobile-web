@@ -84,6 +84,28 @@ export class Control extends EventEmitter {
   private watchers=new Map<string,number>();
   private reloading=false;
   get updating(){return this.reloading;}
+  /** Active Codex turns and queued messages managed by this connector, with their team actor if known. */
+  activeTasks():{service:'codex';threadId:string;actorName?:string;queued?:boolean}[]{
+    const seen=new Set<string>(),tasks:{service:'codex';threadId:string;actorName?:string;queued?:boolean}[]=[];
+    for(const entry of this.turnStarts.values()){
+      if(seen.has(entry.threadId))continue;
+      seen.add(entry.threadId);
+      const actor=this.ledger.actor(entry.opId)?.name;
+      tasks.push({service:'codex',threadId:entry.threadId,...actor?{actorName:actor}:{}});
+    }
+    for(const threadId of this.runtimeActive){
+      if(seen.has(threadId))continue;
+      seen.add(threadId);
+      tasks.push({service:'codex',threadId});
+    }
+    for(const item of this.ledger.queued()){
+      if(seen.has(item.threadId))continue;
+      seen.add(item.threadId);
+      const actor=this.ledger.actor(item.opId)?.name;
+      tasks.push({service:'codex',threadId:item.threadId,queued:true,...actor?{actorName:actor}:{}});
+    }
+    return tasks;
+  }
   private reloadLease?:NodeJS.Timeout;
   private queueTimer:NodeJS.Timeout;
   private draining=false;

@@ -1,10 +1,30 @@
+import {resolve} from 'node:path';
 import {WebSocket} from 'ws';
 import {randomUUID} from 'node:crypto';
 import {readConfig} from '../src/shared/config.js';
-const c=readConfig(),url=new URL('/ws',c.relayUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';
+import {fetchLocalStatus, localBridgeRequest} from '../src/connector/local-control.js';
+
+const c=readConfig();
+const local=await fetchLocalStatus(resolve('.local'),4000);
+if(local){
+  try{
+    const output:any={...local};
+    if(local.services.includes('codex')){
+      const [info,list]=await Promise.all([
+        localBridgeRequest(resolve('.local'),'info',{},10_000).catch(()=>null),
+        localBridgeRequest(resolve('.local'),'sessions.list',{},10_000).catch(()=>null),
+      ]);
+      if(info){output.provider=info.provider;output.model=info.model;output.desktopOnline=info.desktopOnline;}
+      if(list?.data)output.visibleSessions=list.data.length;
+    }
+    console.log(JSON.stringify(output));
+    process.exit(0);
+  }catch(e:any){console.error(e.message||'连接检查失败');process.exit(1);}
+}
+const url=new URL('/ws',c.relayUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';
 const ws=new WebSocket(url),pending=new Map<string,{resolve:(v:any)=>void;reject:(e:any)=>void}>();
 const deadline=setTimeout(()=>{console.error('电脑连接检查超时');ws.terminate();process.exitCode=1;},20_000);
-function rpc(action:string,payload:any={}){return new Promise<any>((resolve,reject)=>{const id=randomUUID();pending.set(id,{resolve,reject});ws.send(JSON.stringify({type:'request',id,machineId:c.machineId,action,payload}));});}
+function rpc(action:string,payload:any={}){return new Promise<any>((resolveResult,reject)=>{const id=randomUUID();pending.set(id,{resolve:resolveResult,reject});ws.send(JSON.stringify({type:'request',id,machineId:c.machineId,action,payload}));});}
 ws.on('open',()=>ws.send(JSON.stringify({type:'hello',role:'phone',token:c.token})));
 ws.on('message',async b=>{
   const m=JSON.parse(b.toString());
@@ -21,4 +41,4 @@ ws.on('message',async b=>{
   finally{clearTimeout(deadline);ws.close();}
 });
 ws.on('error',()=>{console.error('中继无法连接');clearTimeout(deadline);process.exitCode=1;});
-ws.on('close',code=>{clearTimeout(deadline);if(code===4401){console.error('Token 不匹配');process.exitCode=1;}});
+ws.on('close',code=>{clearTimeout(deadline);if(code===4401){console.error('Token 不匹配（或中继已启用团队模式且连接器未开启本机状态通道）');process.exitCode=1;}});

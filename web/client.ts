@@ -5,6 +5,8 @@ export function uuid(){return typeof crypto.randomUUID==='function'?crypto.rando
 export const operationId=()=>`${Date.now()}:${uuid()}`;
 /** A one-time team invite, from a pasted link or code; the relay swaps it for this device's own token. */
 export function inviteCode(value:string){const text=value.trim();const match=/[#&?]invite=([\w-]+)/.exec(text);return match?'inv_'+match[1].replace(/^inv_/,''):/^inv_[\w-]+$/.test(text)?text:null;}
+/** Extracts a token or team invite code from a URL hash (`#invite=…` or `#token=…`). */
+export function hashCredential(hash:string){const params=new URLSearchParams(hash.replace(/^#/,''));const invite=params.get('invite');return params.get('token')||(invite?inviteCode('#invite='+invite):null);}
 /** A short name for this browser, shown in the member's device list. */
 export function deviceName(agent=typeof navigator==='undefined'?'':navigator.userAgent){
   const system=/iPhone/.test(agent)?'iPhone':/iPad/.test(agent)?'iPad':/Android/.test(agent)?'Android':/Windows/.test(agent)?'Windows':/Mac OS X/.test(agent)?'Mac':/Linux/.test(agent)?'Linux':'设备';

@@ -25,20 +25,34 @@
       <span id="error-text"></span>
     </div>
 
+    <div id="auth-banner" class="banner error" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
+      <div class="banner-body"><span id="auth-banner-text"></span><button id="auth-fix" class="chip" type="button">更新连接设置</button></div>
+    </div>
+
     <section class="card qr-card">
-      <div class="qr-box">
+      <div id="qr-box" class="qr-box">
         <div id="qr" class="qr" role="img" aria-label="手机连接二维码"></div>
         <div id="qr-overlay" class="qr-overlay" hidden></div>
       </div>
+      <div id="team-node" class="team-node" hidden>
+        <div class="team-node-head">
+          <span class="team-badge">团队节点</span>
+          <span id="team-token-pill" class="token-pill"></span>
+        </div>
+        <div id="team-machine-name" class="team-machine-name"></div>
+      </div>
       <p id="qr-caption" class="caption"></p>
       <div class="chips">
-        <button id="open-web" class="chip strong" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>在浏览器打开</button>
-        <button id="copy" class="chip" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>复制链接</button>
+        <button id="open-web" class="chip strong" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg><span id="open-web-label">在浏览器打开</span></button>
+        <button id="copy" class="chip" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span id="copy-label">复制链接</span></button>
       </div>
     </section>
 
     <section class="card rows" aria-label="连接状态">
       <div class="info-row"><span id="relay-dot" class="dot"></span><span class="label">中继</span><span id="relay-value" class="value mono"></span></div>
+      <div class="info-row"><span id="activity-dot" class="dot"></span><span class="label">当前活动</span><span id="activity-value" class="value"></span></div>
+      <div id="usage-row" class="info-row" hidden><span id="usage-dot" class="dot warn"></span><span class="label">团队用量</span><span id="usage-value" class="value"></span></div>
       <div class="info-row"><span id="codex-dot" class="dot"></span><span class="label">Codex</span><span id="codex-value" class="value"></span></div>
       <div class="info-row"><span id="claude-dot" class="dot"></span><span class="label">Claude Code</span><span id="claude-value" class="value"></span></div>
       <div class="info-row"><span id="antigravity-dot" class="dot"></span><span class="label">Antigravity</span><span id="antigravity-value" class="value"></span></div>
@@ -54,6 +68,11 @@
 
     <button id="autostart" class="switch-row" type="button" role="switch" aria-checked="false">
       <span class="switch-text"><span>登录 Windows 时自动启动</span><small>开机后只在托盘显示图标，不弹出窗口</small></span>
+      <span class="switch" aria-hidden="true"><span class="knob"></span></span>
+    </button>
+
+    <button id="team-notify" class="switch-row" type="button" role="switch" aria-checked="true">
+      <span class="switch-text"><span>团队活动与异常提醒</span><small>有成员开始任务或电脑 Token 失效时弹出托盘提示</small></span>
       <span class="switch" aria-hidden="true"><span class="knob"></span></span>
     </button>
   </div>
@@ -95,6 +114,12 @@
           <input id="token" type="password" autocomplete="off" spellcheck="false">
           <button id="toggle-token" class="input-icon" type="button" aria-label="显示或隐藏 Token" aria-pressed="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>
         </span>
+        <small id="token-hint"></small>
+      </label>
+
+      <label class="field">电脑名称（在网页和团队列表中显示）
+        <input id="machineName" type="text" maxlength="64" autocomplete="off" spellcheck="false">
+        <small>留空默认使用本机主机名。</small>
       </label>
 
       <details id="advanced" class="advanced">
@@ -114,7 +139,7 @@
 
       <div id="restart-warning" class="banner warn" hidden>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4M12 17v.01"/></svg>
-        <span>保存会重新启动服务，电脑上由连接器管理的任务会被中断。</span>
+        <span id="restart-warning-text">保存会重新启动服务，电脑上由连接器管理的任务会被中断。</span>
       </div>
       <div id="save-error" class="banner error" hidden>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>

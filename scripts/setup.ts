@@ -1,5 +1,6 @@
 import {mkdir,writeFile,rename} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
+import {hostname} from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {createInterface} from 'node:readline/promises';
 import {stdin,stdout} from 'node:process';
@@ -16,7 +17,7 @@ try {
   const dir=resolve('.local'),file=join(dir,'config.json'),old=await savedSettings(file);
   if(args.includes('--defaults')) {
     // Consumed through redirected stdout by the local Windows form, never written to logs.
-    process.stdout.write(JSON.stringify({relayUrl:defaultRelay(),mode:'all',...old,localRelay:defaultRelay()}));
+    process.stdout.write(JSON.stringify({relayUrl:defaultRelay(),mode:'all',machineName:hostname(),...old,localRelay:defaultRelay(),defaultMachineName:hostname()}));
   } else if(args.includes('--status')) {
     // Polled by the desktop window while it is open; prints JSON and never changes anything.
     process.stdout.write(JSON.stringify(await relayStatus(old)));
@@ -50,7 +51,8 @@ try {
       try {const bin=resolveCodex(config.codexBin);codexVersion=execFileSync(bin,['--version'],{encoding:'utf8',timeout:10000,windowsHide:true,stdio:['ignore','pipe','ignore']}).trim().slice(0,100);}
       catch {throw new Error('未找到可用的 Codex。请先确认 Codex 在电脑上可以运行，或在配置窗口选择它的 codex.exe；不会自动安装或替换你的版本。');}
     }
-    const link=new URL(config.relayUrl);link.hash=new URLSearchParams({token:config.token}).toString();
+    const link=new URL(config.relayUrl);
+    if(!String(config.token||'').startsWith('cnt_'))link.hash=new URLSearchParams({token:config.token}).toString();
     const qr=await QRCode.toDataURL(link.href,{width:320,margin:2});
     await mkdir(dir,{recursive:true});
     await writeFile(join(dir,'connect-qr.png'),Buffer.from(qr.split(',')[1],'base64'));

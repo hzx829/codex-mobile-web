@@ -151,6 +151,21 @@ export class ClaudeCodeBridge {
   }
   private get queue() {return this.ledger?.claudeQueue;}
   get busy() {return this.runtime.busy || Boolean(this.queue?.queued().length);}
+  activeTasks(): {service: 'claude'; threadId: string; actorName?: string; queued?: boolean}[] {
+    const seen = new Set<string>(), tasks: {service: 'claude'; threadId: string; actorName?: string; queued?: boolean}[] = [];
+    for (const session of this.runtime.activeSessions()) {
+      seen.add(session.threadId);
+      const actor = session.opId ? this.ledger?.actor(session.opId)?.name : undefined;
+      tasks.push({service: 'claude', threadId: session.threadId, ...actor ? {actorName: actor} : {}});
+    }
+    for (const item of this.queue?.queued() || []) {
+      if (seen.has(item.threadId)) continue;
+      seen.add(item.threadId);
+      const actor = this.ledger?.actor(item.opId)?.name;
+      tasks.push({service: 'claude', threadId: item.threadId, queued: true, ...actor ? {actorName: actor} : {}});
+    }
+    return tasks;
+  }
   close() {this.closed = true;clearInterval(this.queueTimer);this.runtime.close();this.artifacts?.close();}
 
   private drainSoon(id: string) {if (!this.closed) this.drain(id).catch(() => {});}
