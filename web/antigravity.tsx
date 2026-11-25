@@ -29,6 +29,17 @@ import {useTurnNotice,watchWhileHidden} from './turn-notify';
 
 const IMAGES_BLOCKED='请更新这台电脑上的连接器后再给 Antigravity 发送图片。';
 const MODEL_IMAGES_BLOCKED='当前所选模型不支持图片，请更换模型或移除图片。';
+const RECENT_CREATED_MS=8_000,SETTLE_RETRY_MS=400;
+const recentCreated=new Map<string,number>();
+function markCreated(machine:string,id:string){if(id)recentCreated.set(`${machine}:${id}`,Date.now());}
+function clearCreated(machine:string,id:string){if(id)recentCreated.delete(`${machine}:${id}`);}
+function recentCreatedRemaining(machine:string,id:string){
+  const at=id?recentCreated.get(`${machine}:${id}`):undefined;
+  if(!at)return 0;
+  const remaining=RECENT_CREATED_MS-(Date.now()-at);
+  if(remaining<=0){recentCreated.delete(`${machine}:${id}`);return 0;}
+  return remaining;
+}
 
 /**
  * Antigravity's Local Permissions, worded to align organically with Claude Code's mode menu
@@ -133,6 +144,8 @@ export function AntigravityPanel(props:Props){
   const [draft,setDraft]=useState(()=>saved(`${key}:draft`)),[pending,setPending]=useState(()=>saved(`${key}:pending`));
   const [watchError,setWatchError]=useState('');
   const lock=useRef(false),alive=useRef(true),scroll=useRef<HTMLDivElement>(null),stick=useRef(true),composer=useRef<HTMLTextAreaElement>(null);
+  const settleTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
+  const [settling,setSettling]=useState(()=>!creating&&recentCreatedRemaining(machine,conversationId)>0);
   useComposerHeight(composer,draft,true);
   const request=useRef(call);request.current=call;
   // A saved conversation keeps its own model until changed here; the last choice seeds new conversations.
@@ -190,7 +203,27 @@ export function AntigravityPanel(props:Props){
   // With a connector that pushes conversations, the conversation follows its frames; reads and watches are for older ones.
   const synced=useThreadSync(creating?undefined:props.sync,'antigravity',conversationId,()=>seedOf(cachedView<Json>(cacheKey),'messages'),machine);
   const syncing=Boolean(props.sync&&!creating);
-  useSyncedPanel(synced.view,'messages',setView,setError,'请更新这台电脑上的连接器以使用 Antigravity。');
+  // Older connectors may briefly report `missing` while Antigravity flushes a newly created conversation to its SQLite index.
+  const hidingMissing=settling&&!view&&synced.view?.error?.code==='missing';
+  const syncedForPanel=hidingMissing&&synced.view?{...synced.view,error:null}:synced.view;
+  useSyncedPanel(syncedForPanel,'messages',setView,setError,'请更新这台电脑上的连接器以使用 Antigravity。');
+  useEffect(()=>{
+    if(!view||view.cached||creating)return;
+    clearCreated(machine,conversationId);
+    setSettling(false);
+  },[view,creating,machine,conversationId]);
+  useEffect(()=>{
+    if(!settling)return;
+    const remaining=recentCreatedRemaining(machine,conversationId);
+    if(remaining<=0){setSettling(false);return;}
+    const timer=setTimeout(()=>setSettling(false),remaining);
+    return()=>clearTimeout(timer);
+  },[settling,machine,conversationId]);
+  useEffect(()=>{
+    if(!hidingMissing||!connected)return;
+    const timer=setTimeout(()=>void synced.engine.current?.open(),SETTLE_RETRY_MS);
+    return()=>clearTimeout(timer);
+  },[hidingMissing,connected,synced.view]);
   async function refresh(quiet=false){
     if(!connected||creating)return;
     if(synced.engine.current){if(!quiet)setError('');await synced.engine.current.open();return;}
@@ -200,11 +233,16 @@ export function AntigravityPanel(props:Props){
       if(!alive.current)return;
       setView(value);setWatchError('');
       if(!quiet)setError('');
-    }catch(e){failed(e);}finally{lock.current=false;if(alive.current)setBusy(false);}
+    }catch(e:any){
+      if(e?.code==='missing'&&!view&&recentCreatedRemaining(machine,conversationId)>0){
+        clearTimeout(settleTimer.current);
+        settleTimer.current=setTimeout(()=>void refresh(true),SETTLE_RETRY_MS);
+      }else failed(e);
+    }finally{lock.current=false;if(alive.current)setBusy(false);}
   }
   useEffect(()=>{
     alive.current=true;
-    return()=>{alive.current=false;};
+    return()=>{alive.current=false;clearTimeout(settleTimer.current);};
   },[]);
   useEffect(()=>{
     if(!syncing)void refresh(true);
@@ -266,6 +304,7 @@ export function AntigravityPanel(props:Props){
   }
   /** Opens a conversation this page created, keeping the message as its draft when the desktop's receipt was lost. */
   function opened(result:Json){
+    markCreated(machine,result.conversationId);
     if(!result.submitted)store(`antigravity:${machine}:${result.conversationId}:draft`,draft);
     sent();props.created?.(result.conversationId);
   }
@@ -407,7 +446,7 @@ export function AntigravityPanel(props:Props){
           {projects?.map(item=><option key={item.id} value={item.id}>{projectName(item)}</option>)}
         </select></label></div>}
       {view&&<SenderScope senders={view.messages.map((message:{sender?:{id:string;name:string}})=>message.sender)}><AntigravityMessages messages={view.messages} running={Boolean(view.running)} openFile={openFile} openPreview={openPreview} onFollowup={followup} onCopy={copy}/></SenderScope>}
-      {!view&&(busy||synced.view?.phase==='syncing'&&!synced.view.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
+      {!view&&(busy||settling||syncedForPanel?.phase==='syncing'&&!syncedForPanel.error)&&<div className="conversation-skeleton" role="status" aria-label="正在同步会话"><div/><div/></div>}
       {view&&!view.messages.length&&!issue&&<p className="muted">{view.running?'Antigravity 正在开始处理…':'桌面尚未记录可显示的消息。'}</p>}
       {issue?.kind==='error'&&<AntigravityErrorNotice issue={issue}/>}
       {antigravityStatus&&<ConversationStatus>{antigravityStatus}</ConversationStatus>}

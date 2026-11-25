@@ -714,7 +714,51 @@ async function transcript(path: string): Promise<{messages: AntigravityMessage[]
 
 /** Checks of a followed conversation; see AntigravityBridge.followedSnapshot. */
 const FOLLOW_CHECK_MS = 200, FOLLOW_FULL_MS = 1300;
+const PENDING_CREATED_TTL_MS = 60_000, PENDING_CREATED_LIMIT = 32;
 type Snapshot = Awaited<ReturnType<AntigravityBridge['snapshot']>>;
+type PendingCreated = {
+  summary: Summary;
+  project: string;
+  prompt?: string;
+  config?: Json | null;
+  permissionMode?: AntigravityPermissionMode;
+  createdAt: number;
+  seenInDb: boolean;
+};
+
+function trajectorySummary(id: string, entry: Json): Summary {
+  const workspaces: string[] = [];
+  if (Array.isArray(entry.workspaces)) {
+    for (const ws of entry.workspaces) {
+      if (typeof ws === 'string' && ws) workspaces.push(ws);
+      else if (typeof ws?.workspaceFolderAbsoluteUri === 'string' && ws.workspaceFolderAbsoluteUri) {
+        workspaces.push(ws.workspaceFolderAbsoluteUri);
+      }
+    }
+  }
+  const status = typeof entry.status === 'string' && entry.status ? entry.status : idle;
+  const steps = Number.isSafeInteger(entry.stepCount) && entry.stepCount >= 0 ? entry.stepCount : 0;
+  return {
+    id,
+    title: typeof entry.summary === 'string' ? entry.summary : '',
+    status,
+    notIdle: entry.notFullyIdle || status === active ? 1 : 0,
+    modified: typeof entry.lastModifiedTime === 'string' ? entry.lastModifiedTime : '',
+    steps,
+    userStep: null,
+    userTime: null,
+    workspaces: JSON.stringify(workspaces),
+  };
+}
+
+function trajectoryMetaOf(entry: Json | null): {trajectoryId?: string; permissionMode?: AntigravityPermissionMode} {
+  if (!entry || typeof entry !== 'object') return {};
+  return {
+    ...(typeof entry.trajectoryId === 'string' && entry.trajectoryId ? {trajectoryId: entry.trajectoryId} : {}),
+    ...(isPermissionPreset(entry.annotations?.permissionPreset) ? {permissionMode: entry.annotations.permissionPreset} : {}),
+  };
+}
+
 type LiveState = {
   permissionMode?: AntigravityPermissionMode;
   defaultPermissionMode?: AntigravityPermissionMode;
@@ -737,6 +781,7 @@ export type AntigravityBridgeOptions = {
   cancelPollMs?: number;
   dispatchGraceMs?: number;
   queueIntervalMs?: number;
+  pendingCreatedTtlMs?: number;
 };
 
 export class AntigravityBridge {
@@ -749,6 +794,8 @@ export class AntigravityBridge {
   /** Conversations a phone follows (src/connector/thread-hub.ts): their last snapshot, as the watch loop below keeps it. */
   private followed = new Map<string, {snapshot: Snapshot; checkedAt: number; fullAt: number; stale: boolean}>();
   private views = new Map<string, {revision: string; value: Promise<{head: Json; entries: Json[]}>}>();
+  /** Conversations just created from web before Antigravity flushes them to `conversation_summaries.db` and transcript logs. */
+  private pendingCreated = new Map<string, PendingCreated>();
   /** Guards automatic draining right after a turn is dispatched while desktop SQLite still reports the prior idle summary. */
   private dispatchedTurn = new Map<string, {previousTurnKey: string; at: number}>();
   private queueTimer: NodeJS.Timeout;
@@ -756,11 +803,13 @@ export class AntigravityBridge {
   private cancelTimeoutMs: number;
   private cancelPollMs: number;
   private dispatchGraceMs: number;
+  private pendingCreatedTtlMs: number;
   constructor(private root: string, private ledger: Ledger, private hub = callHub,
     private projectsDir = join(dirname(root), 'config', 'projects'), options: AntigravityBridgeOptions = {}) {
     this.cancelTimeoutMs = options.cancelTimeoutMs ?? 8000;
     this.cancelPollMs = options.cancelPollMs ?? 150;
     this.dispatchGraceMs = options.dispatchGraceMs ?? 15_000;
+    this.pendingCreatedTtlMs = options.pendingCreatedTtlMs ?? PENDING_CREATED_TTL_MS;
     const intervalMs = options.queueIntervalMs ?? 1500;
     this.queueTimer = setInterval(() => {
       try {
@@ -996,12 +1045,21 @@ export class AntigravityBridge {
    * the latest user step had no `userConfig`.
    */
   private async conversationConfig(summary: Summary, strict = false): Promise<Json | null> {
+    const pending = this.pendingEntry(summary.id);
     let primary: Json | null = null;
-    if (strict) primary = await this.turnConfig(summary);
-    else primary = await this.turnConfig(summary).catch(() => null);
+    if (strict) {
+      try { primary = await this.turnConfig(summary); }
+      catch (error) {
+        if (hasConfiguredModel(pending?.config)) return pending!.config!;
+        throw error;
+      }
+    } else {
+      primary = await this.turnConfig(summary).catch(() => null);
+    }
     if (hasConfiguredModel(primary)) return primary;
     const earlier = await this.earlierTurnConfig(summary);
     if (earlier) return earlier;
+    if (hasConfiguredModel(pending?.config)) return pending!.config!;
     const fallback = await this.latestConfig(singleWorkspace(summary.workspaces)).catch(() => null);
     if (fallback) return fallback;
     return primary && Object.keys(primary).length ? primary : null;
@@ -1047,14 +1105,14 @@ export class AntigravityBridge {
     return isPermissionPreset(settings?.globalPreset) ? settings.globalPreset : undefined;
   }
 
-  private async trajectoryMeta(id: string): Promise<{trajectoryId?: string; permissionMode?: AntigravityPermissionMode}> {
+  private async trajectoryEntry(id: string): Promise<Json | null> {
     const all = await this.hub(this.daemonDir(), 'GetAllCascadeTrajectories', {}).catch(() => null);
     const entry = all?.trajectorySummaries?.[id];
-    if (!entry || typeof entry !== 'object') return {};
-    return {
-      ...(typeof entry.trajectoryId === 'string' && entry.trajectoryId ? {trajectoryId: entry.trajectoryId} : {}),
-      ...(isPermissionPreset(entry.annotations?.permissionPreset) ? {permissionMode: entry.annotations.permissionPreset} : {}),
-    };
+    return entry && typeof entry === 'object' ? entry : null;
+  }
+
+  private async trajectoryMeta(id: string): Promise<{trajectoryId?: string; permissionMode?: AntigravityPermissionMode}> {
+    return trajectoryMetaOf(await this.trajectoryEntry(id));
   }
 
   private async fetchSteps(id: string, stepOffset: number): Promise<Json[]> {
@@ -1160,10 +1218,14 @@ export class AntigravityBridge {
         await this.hub(directory, 'SendUserCascadeMessage', message);
       } catch (error) {
         // The conversation exists either way: open it, and its history shows whether the message arrived.
-        if (error instanceof BridgeError && error.uncertain) return {conversationId: id, submitted: false, uncertain: true};
+        if (error instanceof BridgeError && error.uncertain) {
+          this.rememberCreated(id, {project, submitted: false, prompt, config, permissionMode});
+          return {conversationId: id, submitted: false, uncertain: true};
+        }
         await this.hub(directory, 'DeleteCascadeTrajectory', {cascadeId: id}).catch(() => {});
         throw error;
       }
+      this.rememberCreated(id, {project, submitted: true, prompt, config, permissionMode});
       this.ledger.recordUsage({id: `antigravity:${id}:${opId}`, service: 'antigravity', threadId: id, turnId: opId, opId, models: []});
       this.ledger.recordSender({service: 'antigravity', threadId: id, opId, kind: 'text', text: prompt});
       return {conversationId: id, submitted: true};
@@ -1212,8 +1274,68 @@ export class AntigravityBridge {
     } finally { db?.close(); }
   }
 
-  private summary(id: string) {
+  private rememberCreated(id: string, input: {
+    project: string;
+    submitted: boolean;
+    prompt: string;
+    config: Json | null;
+    permissionMode?: AntigravityPermissionMode;
+  }) {
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    const summary: Summary = {
+      id,
+      title: '',
+      status: input.submitted ? active : idle,
+      notIdle: input.submitted ? 1 : 0,
+      modified: nowIso,
+      steps: input.submitted ? 1 : 0,
+      userStep: input.submitted ? 0 : null,
+      userTime: input.submitted ? nowIso : null,
+      workspaces: JSON.stringify([input.project]),
+    };
+    this.pendingCreated.delete(id);
+    this.pendingCreated.set(id, {
+      summary,
+      project: input.project,
+      prompt: input.submitted ? input.prompt : undefined,
+      config: input.config,
+      permissionMode: input.permissionMode,
+      createdAt: now,
+      seenInDb: false,
+    });
+    while (this.pendingCreated.size > PENDING_CREATED_LIMIT) {
+      this.pendingCreated.delete(this.pendingCreated.keys().next().value!);
+    }
+    if (input.submitted) {
+      this.dispatchedTurn.set(id, {previousTurnKey: JSON.stringify([null, null]), at: now});
+    }
+  }
+
+  private pendingEntry(id: string): PendingCreated | undefined {
+    const pending = this.pendingCreated.get(id);
+    if (!pending) return undefined;
+    if (Date.now() - pending.createdAt >= this.pendingCreatedTtlMs) {
+      this.pendingCreated.delete(id);
+      return undefined;
+    }
+    return pending;
+  }
+
+  private summaryOrNull(id: string): Summary | null {
     const row = this.index(db => db.prepare(`SELECT ${columns} FROM conversation_summaries WHERE conversation_id=?`).get(id)) as Summary | undefined;
+    const pending = this.pendingEntry(id);
+    if (row) {
+      if (pending) pending.seenInDb = true;
+      return row;
+    }
+    if (pending && !pending.seenInDb) return pending.summary;
+    if (pending) this.pendingCreated.delete(id);
+    return null;
+  }
+
+  private summary(id: string) {
+    const row = this.summaryOrNull(id);
     if (!row) throw new BridgeError('missing', '桌面上找不到这条 Antigravity 会话');
     return row;
   }
@@ -1236,7 +1358,14 @@ export class AntigravityBridge {
     live?: LiveState,
     opts?: {scanOlder?: boolean; previousBackgroundTasks?: AntigravityBackgroundTask[]; previousLogPaths?: string[]},
   ) {
-    const summary = this.summary(id);
+    let summary = this.summaryOrNull(id);
+    let hubEntry: Json | null | undefined;
+    if (!summary) {
+      hubEntry = await this.trajectoryEntry(id);
+      if (!hubEntry) throw new BridgeError('missing', '桌面上找不到这条 Antigravity 会话');
+      summary = trajectorySummary(id, hubEntry);
+    }
+    const pending = this.pendingEntry(id);
     // transcript.jsonl cuts long steps short ("<truncated N bytes>"); transcript_full.jsonl keeps them whole.
     const logs = join(this.root, 'brain', id, '.system_generated', 'logs');
     let path = '', file = null;
@@ -1253,14 +1382,14 @@ export class AntigravityBridge {
     let resolved = live;
     if (!resolved) {
       const [meta, globalPreset, stepState] = await Promise.all([
-        this.trajectoryMeta(id),
+        hubEntry !== undefined ? Promise.resolve(trajectoryMetaOf(hubEntry)) : this.trajectoryMeta(id),
         this.defaultPermissionMode(),
         activeOrWaiting || summary.steps > 0
           ? this.liveSteps(id, summary, opts)
           : Promise.resolve({requests: [], backgroundTasks: [], taskLogPaths: [], hubIssue: EMPTY_HUB_ISSUE}),
       ]);
       resolved = {
-        permissionMode: meta.permissionMode,
+        permissionMode: meta.permissionMode ?? pending?.permissionMode,
         defaultPermissionMode: globalPreset,
         requests: stepState.requests,
         backgroundTasks: stepState.backgroundTasks,
@@ -1278,7 +1407,7 @@ export class AntigravityBridge {
     const issueFingerprint = hubIssue.issue ? JSON.stringify([hubIssue.issueStep, hubIssue.issue]) : `clear:${hubIssue.clearStep}`;
     const baseRevision = JSON.stringify([
       summary.modified, summary.steps, summary.status, summary.notIdle, turnKey(summary), summary.title, cwd,
-      String(file?.mtimeNs), String(file?.size), taskLogStat, queueVersion, queueFingerprint,
+      String(file?.mtimeNs), String(file?.size), pending?.prompt ? 1 : 0, taskLogStat, queueVersion, queueFingerprint,
     ]);
     const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint, taskFingerprint, issueFingerprint]);
     return {
@@ -1292,6 +1421,25 @@ export class AntigravityBridge {
       backgroundTasks,
       queuedMessages,
     };
+  }
+
+  private async readMessages(id: string, path: string) {
+    const tx = await transcript(path);
+    let items = tx.messages;
+    const pending = this.pendingEntry(id);
+    if (items.length) {
+      if (pending) pending.prompt = undefined;
+    } else if (pending?.prompt) {
+      const text = pending.prompt.trim();
+      if (text) items = [{id: '0', role: 'user', text}];
+    }
+    // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
+    const records = this.ledger.senders('antigravity', id);
+    if (records.length) {
+      const senders = sendersByText(items.filter(item => item.role === 'user'), records);
+      for (const item of items) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
+    }
+    return {tx, items};
   }
 
   private async read(id: string, known?: string) {
@@ -1336,15 +1484,8 @@ export class AntigravityBridge {
       if (known === current.revision) return {unchanged: true};
     }
     const {path, baseRevision, live, ...view} = current;
-    const tx = await transcript(path);
-    const items = tx.messages;
+    const {tx, items} = await this.readMessages(id, path);
     const issue = mergeAntigravityIssue(tx, live.hubIssue);
-    // Messages sent from the phone carry their sender, matched by the exact text the connector sent.
-    const records = this.ledger.senders('antigravity', id);
-    if (records.length) {
-      const senders = sendersByText(items.filter(item => item.role === 'user'), records);
-      for (const item of items) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
-    }
     this.recent.delete(id);
     this.recent.set(id, {revision: view.revision, baseRevision, live, messages: items});
     if (this.recent.size > 8) this.recent.delete(this.recent.keys().next().value!);
@@ -1390,14 +1531,8 @@ export class AntigravityBridge {
     if (cached?.revision === current.revision) return cached.value;
     const value = (async () => {
       const {path, baseRevision: _, live, revision: ___, ...head} = current;
-      const tx = await transcript(path);
-      const messages = tx.messages;
+      const {tx, items: messages} = await this.readMessages(id, path);
       const issue = mergeAntigravityIssue(tx, live.hubIssue);
-      const records = this.ledger.senders('antigravity', id);
-      if (records.length) {
-        const senders = sendersByText(messages.filter(item => item.role === 'user'), records);
-        for (const item of messages) {const sender = senders.get(item.id);if (sender) item.sender = sender;}
-      }
       return {head: {id, ...head, issue}, entries: messages};
     })();
     this.views.delete(id);this.views.set(id, {revision: current.revision, value});
@@ -1445,10 +1580,35 @@ export class AntigravityBridge {
         const projects=!offset&&!search?db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text' ORDER BY uri`).all().flatMap(({uri})=>{
           const path=localWorkspace(uri),name=named.find(item=>sameFolder(item.path,path))?.name;return path?[{id:uri,path,...(name?{name}:{})}]:[];
         }):undefined;
+        const seenIds = new Set(rows.map(row => String(row.id)));
+        const extra: {id: string; title: string; running: boolean; updatedAt: number}[] = [];
+        for (const pendingId of [...this.pendingCreated.keys()]) {
+          const pending = this.pendingEntry(pendingId);
+          if (!pending) continue;
+          if (seenIds.has(pendingId)) {
+            pending.seenInDb = true;
+            continue;
+          }
+          if (offset || pending.seenInDb) continue;
+          if (project && pending.project !== project) continue;
+          const title = pending.summary.title || '未命名对话';
+          if (search && !title.toLowerCase().includes(search.toLowerCase())) continue;
+          extra.push({
+            id: pendingId,
+            title,
+            running: pending.summary.status === active,
+            updatedAt: Date.parse(pending.summary.modified) || pending.createdAt,
+          });
+        }
+        extra.sort((a, b) => b.updatedAt - a.updatedAt);
+        const listed = [
+          ...extra,
+          ...rows.map(row => ({id: row.id, title: row.title || '未命名对话',
+            running: row.status === active, updatedAt: Date.parse(String(row.modified)) || 0})),
+        ];
         return {
-          data:rows.slice(0,50).map(row=>({id:row.id,title:row.title||'未命名对话',
-            running:row.status===active,updatedAt:Date.parse(String(row.modified))||0})),
-          hasMore:rows.length>50,
+          data: listed.slice(0, 50),
+          hasMore: listed.length > 50,
           projects,
           ...(defaultPermissionMode ? {defaultPermissionMode} : {}),
         };
@@ -1476,9 +1636,8 @@ export class AntigravityBridge {
     if (action === 'antigravity.file.read' || action === 'antigravity.file.download') {
       const path = textRequired(p.path, '文件路径', 4096);
       if (/^[\\/]{2}/.test(path)) throw new BridgeError('invalid', '请选择本机文件');
-      const row = this.index(db => db.prepare('SELECT workspace_uris FROM conversation_summaries WHERE conversation_id=?').get(id));
-      if (!row) throw new BridgeError('missing', '桌面上找不到这条 Antigravity 会话');
-      const cwd=isAbsolute(path)?'':singleWorkspace(String(row.workspace_uris));
+      const summary = this.summary(id);
+      const cwd = isAbsolute(path) ? '' : singleWorkspace(summary.workspaces);
       return action === 'antigravity.file.read' ? readProjectFile(cwd, path)
         : p.stream === true ? openProjectDownload(cwd, path, textRequired(p.revision, '文件版本', 64), p.range) as unknown as Promise<Json>
         : downloadProjectFile(cwd, path, textRequired(p.revision, '文件版本', 64), p.offset);

@@ -875,3 +875,132 @@ test('Antigravity preserves and self-heals cascadeConfig planModel across follow
   assert.equal((await bridge.handle('antigravity.send', {conversationId: freshId, text: 'from catalog', opId: makeOp()})).state, 'accepted');
   assert.deepEqual(writes.at(-1)!.body.cascadeConfig, {plannerConfig: {planModel: 'MODEL_DEFAULT'}});
 });
+
+test('newly created Antigravity conversation is immediately readable and syncable before SQLite or transcript flushes', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-new-'));
+  const ledger = new Ledger(':memory:'), db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  const project = pathToFileURL(dir).href;
+  const existingId = randomUUID(), createdId = randomUUID(), uncertainId = randomUUID(), hubOnlyId = randomUUID();
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const insert = db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)');
+  insert.run(existingId, 'Existing', 'CASCADE_RUN_STATUS_IDLE', '2026-11-25T01:00:00.000Z', 2, 0, 't0', 0, JSON.stringify([project]));
+  await writeFile(join(dir, 'hello.txt'), 'world');
+
+  let nextId = createdId;
+  let sendUncertain = false;
+  let hubTrajectories: Record<string, any> = {};
+  const bridge = new AntigravityBridge(dir, ledger, async (_dir, method, body) => {
+    if (method === 'GetCascadeModelConfigData') {
+      return {
+        defaultOverrideModelConfig: {modelOrAlias: {model: 'MODEL_A'}},
+        clientModelConfigs: [
+          {label: 'Model A', modelOrAlias: {model: 'MODEL_A'}},
+          {label: 'Model B', modelOrAlias: {model: 'MODEL_B'}},
+        ],
+      };
+    }
+    if (method === 'GetPermissionSettings' || method === 'GetCascadeTrajectorySteps') return {};
+    if (method === 'GetAllCascadeTrajectories') return {trajectorySummaries: hubTrajectories};
+    if (method === 'GetTrajectoryTurns') return {turns: []};
+    if (method === 'StartCascade') return {cascadeId: nextId};
+    if (method === 'SendUserCascadeMessage') {
+      if (sendUncertain) throw new BridgeError('uncertain', 'lost receipt', true);
+      return {};
+    }
+    if (method === 'UpdateConversationAnnotations') return {};
+    return {body};
+  }, undefined, {queueIntervalMs: 60_000});
+
+  const {ThreadHub} = await import('../src/connector/thread-hub.js');
+  const frames: any[] = [];
+  const hub = new ThreadHub(frame => { frames.push(frame); });
+  hub.register('antigravity', bridge.syncSource);
+  t.after(async () => { hub.close(); bridge.close(); db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+
+  const makeOp = () => `${Date.now()}:${randomUUID()}`;
+  const created = await bridge.handle('antigravity.create', {
+    project, text: '你好 Antigravity', opId: makeOp(), model: 'MODEL_B', permissionMode: 'AGENT_PERMISSION_PRESET_AUTO',
+  });
+  assert.deepEqual(created, {state: 'accepted', conversationId: createdId, submitted: true});
+
+  // Immediately after create, neither conversation_summaries.db nor transcript.jsonl has the new conversation yet.
+  const snap = await hub.open({service: 'antigravity', threadId: createdId});
+  assert.equal(snap.head.cwd, dir);
+  assert.equal(snap.head.running, true);
+  assert.equal(snap.head.permissionMode, 'AGENT_PERMISSION_PRESET_AUTO');
+  assert.deepEqual(snap.entries.map(e => e.body), [{id: '0', role: 'user', text: '你好 Antigravity'}]);
+
+  const read = await bridge.handle('antigravity.read', {conversationId: createdId});
+  assert.equal(read.cwd, dir);
+  assert.equal(read.running, true);
+  assert.deepEqual(read.messages, [{id: '0', role: 'user', text: '你好 Antigravity'}]);
+
+  const models = await bridge.handle('antigravity.models', {conversationId: createdId});
+  assert.equal(models.current, 'MODEL_B');
+
+  const listed = await bridge.handle('antigravity.list', {project});
+  assert.equal(listed.data[0].id, createdId);
+  assert.equal(listed.data[0].running, true);
+
+  const file = await bridge.handle('antigravity.file.read', {conversationId: createdId, path: 'hello.txt'});
+  assert.equal(file.text, 'world');
+
+  // Sending another message right away queues cleanly instead of failing with missing.
+  const queued = await bridge.handle('antigravity.send', {conversationId: createdId, text: '补充一句', opId: makeOp()});
+  assert.deepEqual(queued, {state: 'accepted', conversationId: createdId, kind: 'queued'});
+
+  // Once SQLite gets the row (before transcript is written), the submitted user message stays visible without flicker.
+  insert.run(createdId, '打招呼', 'CASCADE_RUN_STATUS_RUNNING', '2026-11-25T02:00:00.000Z', 1, 0, 't1', 1, JSON.stringify([project]));
+  const afterDb = await bridge.handle('antigravity.read', {conversationId: createdId});
+  assert.equal(afterDb.title, '打招呼');
+  assert.deepEqual(afterDb.messages, [{id: '0', role: 'user', text: '你好 Antigravity'}]);
+
+  // Once transcript_full.jsonl is written, real transcript messages replace the synthetic entry and push via ThreadHub.
+  const logs = join(dir, 'brain', createdId, '.system_generated', 'logs');
+  await mkdir(logs, {recursive: true});
+  const line = (step: object) => JSON.stringify(step) + '\n';
+  await writeFile(join(logs, 'transcript_full.jsonl'),
+    line({type: 'USER_INPUT', step_index: 0, content: '<USER_REQUEST>你好 Antigravity</USER_REQUEST>'}) +
+    line({type: 'PLANNER_RESPONSE', step_index: 1, content: '你好！有什么可以帮你的？'}));
+  await new Promise(resolve => setTimeout(resolve, 650));
+  const afterTranscript = await bridge.handle('antigravity.read', {conversationId: createdId});
+  assert.deepEqual(afterTranscript.messages, [
+    {id: '0', role: 'user', text: '你好 Antigravity'},
+    {id: '1', role: 'assistant', text: '你好！有什么可以帮你的？'},
+  ]);
+  assert.ok(frames.some(frame => (frame.entries || []).some((entry: any) => entry.body?.text === '你好！有什么可以帮你的？')));
+
+  // Once seen in SQLite, deleting the row from SQLite (with Hub empty) properly reports missing again.
+  db.exec(`DELETE FROM conversation_summaries WHERE conversation_id='${createdId}'`);
+  await assert.rejects(bridge.handle('antigravity.read', {conversationId: createdId}), (error: BridgeError) => error.code === 'missing');
+
+  // Uncertain create still avoids missing, without fabricating a user message.
+  nextId = uncertainId;
+  sendUncertain = true;
+  const uncertain = await bridge.handle('antigravity.create', {project, text: '待确认', opId: makeOp()});
+  assert.deepEqual(uncertain, {state: 'accepted', conversationId: uncertainId, submitted: false, uncertain: true});
+  const uncertainRead = await bridge.handle('antigravity.read', {conversationId: uncertainId});
+  assert.equal(uncertainRead.running, false);
+  assert.deepEqual(uncertainRead.messages, []);
+
+  // Even without pendingCreated (e.g. after connector restart), snapshot falls back to GetAllCascadeTrajectories if SQLite lags.
+  hubTrajectories = {
+    [hubOnlyId]: {
+      trajectoryId: 'traj-hub',
+      summary: 'Hub Live',
+      status: 'CASCADE_RUN_STATUS_RUNNING',
+      stepCount: 1,
+      lastModifiedTime: '2026-11-25T02:05:00.000Z',
+      workspaces: [{workspaceFolderAbsoluteUri: project}],
+      annotations: {permissionPreset: 'AGENT_PERMISSION_PRESET_DEFAULT'},
+    },
+  };
+  const hubRead = await bridge.handle('antigravity.read', {conversationId: hubOnlyId});
+  assert.equal(hubRead.title, 'Hub Live');
+  assert.equal(hubRead.cwd, dir);
+  assert.equal(hubRead.running, true);
+  assert.equal(hubRead.permissionMode, 'AGENT_PERMISSION_PRESET_DEFAULT');
+
+  // A genuinely unknown conversation still throws missing.
+  await assert.rejects(bridge.handle('antigravity.read', {conversationId: randomUUID()}), (error: BridgeError) => error.code === 'missing');
+});
