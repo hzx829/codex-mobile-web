@@ -143,8 +143,6 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .session-row.selected { background: var(--selected); }
 .session-row.unread .session-name { font-weight: 600; }
 .session-meta { display: flex; align-items: center; flex-shrink: 0; gap: 6px; color: var(--fg-3); }
-.session-active { color: #1b7838; }
-@media (prefers-color-scheme: dark) { .session-active { color: #7bd896; } }
 .thread-group + .thread-group { margin-top: 14px; }
 .dot.unread-dot { background: var(--link); }
 .session-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; color: var(--fg); }
