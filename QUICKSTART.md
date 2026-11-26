@@ -123,4 +123,4 @@ powershell -ExecutionPolicy Bypass -File scripts/windows/autostart.ps1 -Disable
 
 包内 `VERSION.txt` 记录源码提交、Node 版本及协议检查组合，ZIP 旁的 `.sha256` 可用于核对下载完整性。首次配置窗口、扫码和真实手机操作按 [人工验收](ACCEPTANCE.md) 执行。
 
-已知限制：尚无 macOS 安装验收；不支持独立 CLI 活动任务接管；每次最多显示最近 100 轮，大输出会截断；不提供大文件下载、后台推送、音频上传、嵌套 MCP 表单或外部 OAuth 授权页面。手机听写使用系统键盘。以上不影响继续完成核心场景验收，但暂不宣传完整移动端功能对齐。
+已知限制：尚无 macOS 安装验收（移植清单见 [docs/macos/PORTING.md](docs/macos/PORTING.md)）；不支持独立 CLI 活动任务接管；每次最多显示最近 100 轮，大输出会截断；不提供大文件下载、后台推送、音频上传、嵌套 MCP 表单或外部 OAuth 授权页面。手机听写使用系统键盘。以上不影响继续完成核心场景验收，但暂不宣传完整移动端功能对齐。
