@@ -67,6 +67,24 @@ type Props={
 };
 const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
 const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:TurnView)=>turn.items.filter(item=>item.role==='user').map(item=>item.id)):[];
+/**
+ * Shell commands, Monitors and subagents Claude left running. After the turn ends they keep the session open on the
+ * computer and each reports back with a turn of its own, so the phone says the work is not finished yet.
+ */
+function BackgroundWork({tasks,running}:{tasks:{id:string;title:string}[];running:boolean}){
+  const [open,setOpen]=useState(false);
+  const label=`${tasks.length} 个后台任务运行中`;
+  return <div className="bg-work">
+    <button type="button" className="bg-tasks-bar" aria-expanded={open} onClick={()=>setOpen(value=>!value)}>
+      <i className="dot background-dot" aria-hidden="true"/>
+      <span className="bg-tasks-count">{label}</span>
+      {!open&&tasks[0]?.title&&<span className="bg-tasks-title">{tasks[0].title}</span>}
+      <span className="bg-tasks-open">{running?'':'完成后会自动继续'}<Icon name="chevron" size={14}/></span>
+    </button>
+    {open&&<ul className="bg-work-list">{tasks.map(task=><li key={task.id}>{task.title||task.id}</li>)}</ul>}
+  </div>;
+}
+
 function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
 type Place={id:string;path:string;name?:string};
 const OTHER='__other';
@@ -270,6 +288,7 @@ export function ClaudeCodePanel(props:Props){
   const selectedMode=mode==='bypassPermissions'&&view?.controlled&&!bypassLater?'':mode;
   const effectiveMode=view?.permissionMode||view?.defaultPermissionMode||defaultMode||'default';
   const queued:QueuedMessage[]=view?.queuedMessages||[];
+  const backgroundTasks:{id:string;title:string}[]=Array.isArray(view?.backgroundTasks)?view.backgroundTasks:[];
   // As in Codex: behind a running turn or waiting messages, a plain send waits on the computer until the turn ends.
   const queueNext=!creating&&(running||queued.length>0);
   function cleared(){edit('');setImages([]);setFiles([]);}
@@ -457,6 +476,7 @@ export function ClaudeCodePanel(props:Props){
       {(error||previewError)&&<div className="feedback error" role="alert"><span>{error||previewError}</span><IconButton icon="close" label="关闭提示" onClick={()=>{setError('');clearPreviewError();}}/></div>}
       {notice&&<div className="feedback" role="status">{notice}</div>}
       {pending&&!busy&&<div className="pending"><button onClick={()=>void check()} disabled={!connected}>核实操作结果</button><button onClick={()=>{if(window.confirm('请先在会话和电脑上确认操作结果。解除提示不会重发消息。')){remember('');setError('');}}}>我已核实</button></div>}
+      {!creating&&backgroundTasks.length>0&&<BackgroundWork tasks={backgroundTasks} running={running}/>}
       {!creating&&<QueuedMessages messages={queued} disabled={!connected||busy||Boolean(pending)} canSteer={controlledRun} withdrawBlocked={voiceBusy||attachments.loading}
         attachmentsFull={message=>attachmentCount+message.imageCount>MAX_IMAGES||images.reduce((sum,url)=>sum+imageBytes(url),0)+(message.imageBytes||0)>MAX_TOTAL_IMAGE_BYTES}
         onSteer={queuedId=>void mutate('claude.steerQueued',{conversationId,queuedId},()=>setNotice('已追加到当前任务'))}

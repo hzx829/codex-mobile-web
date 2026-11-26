@@ -36,7 +36,7 @@ export const offline:Record<CacheKind,(view:Json)=>Json>={
   codex:view=>({...view,requests:[],queuedMessages:[],running:false,retry:undefined}),
   // `revision` starts the panel's watch; without it the first fresh read comes first.
   claude:view=>({...view,requests:[],queuedMessages:[],running:false,error:'',revision:undefined,controlled:false,external:false,externalStatus:'',
-    waitingFor:undefined,heldBy:undefined,notice:'',suggestion:''}),
+    waitingFor:undefined,heldBy:undefined,notice:'',suggestion:'',backgroundTasks:[]}),
   antigravity:view=>({...view,requests:[],queuedMessages:[],backgroundTasks:[],running:false,notIdle:false,issue:null,revision:undefined,canSend:true,notice:''}),
 };
 

@@ -47,6 +47,13 @@ type Props={
   call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseComputer:()=>void;
 };
 
+const LIST_POLL_MS=5000;
+/** A fresh first page over a list that had more pages loaded: its sessions are replaced or put first, the rest stay. */
+export function refreshedPage<T extends {id:string}>(loaded:T[],first:T[]):T[]{
+  const fresh=new Set(first.map(item=>item.id));
+  return [...first,...loaded.filter(item=>!fresh.has(item.id))];
+}
+
 export function AntigravitySidebar({
   service,listAction='antigravity.list',appName='Antigravity',filter,
   projectsCollapsed=false,onToggleProjects,collapsedGroups=[],onToggleGroup,me=null,roster=[],ownerFilter='all',onOwnerFilterChange,claimOwner,
@@ -117,14 +124,16 @@ export function AntigravitySidebar({
   const members=useMemo(()=>mergeMembers(roster,allLoadedThreads),[roster,allLoadedThreads]);
   const ownerFiltered=Boolean(me&&ownerFilter!=='all');
 
-  const loadProject=useStableEvent((project:ProjectItem,more=false)=>{
+  /** `quiet`: a background re-read; it shows no loading or error, never cuts short a read the user started, and keeps pages loaded with "more". */
+  const loadProject=useStableEvent((project:ProjectItem,more=false,quiet=false)=>{
     if(!connected)return;
     const prev=projectPages[project.key];
+    if(quiet&&prev?.loading)return;
     const offset=more?prev?.offset||0:0;
     const seq=(projectReqSeq.current[project.key]||0)+1;
     projectReqSeq.current[project.key]=seq;
     const cache=listKey(listAction,machine,project.id||project.path);
-    setProjectPages(old=>{
+    if(!quiet)setProjectPages(old=>{
       const existing=old[project.key];
       const seed=existing?.items?.length?existing.items:(cachedList(cache) as Thread[]|null)||[];
       return {...old,[project.key]:{items:seed,offset:existing?.offset||0,hasMore:existing?.hasMore||false,loading:true,error:''}};
@@ -139,12 +148,15 @@ export function AntigravitySidebar({
         return {key:storage,values};
       });
       setProjectPages(old=>{
-        const prior=offset?old[project.key]?.items||[]:[];
+        const existing=old[project.key];
+        if(quiet&&existing&&existing.offset>result.data.length)
+          return {...old,[project.key]:{...existing,items:refreshedPage(existing.items,result.data),error:''}};
+        const prior=offset?existing?.items||[]:[];
         const merged=offset?[...new Map([...prior,...result.data].map(item=>[item.id,item])).values()]:result.data;
         return {...old,[project.key]:{items:merged,offset:offset+result.data.length,hasMore:Boolean(result.hasMore),loading:false,error:''}};
       });
     }).catch((failure:any)=>{
-      if(projectReqSeq.current[project.key]!==seq)return;
+      if(projectReqSeq.current[project.key]!==seq||quiet)return;
       setProjectPages(old=>{
         const existing=old[project.key];
         return {...old,[project.key]:{items:existing?.items||[],offset:existing?.offset||0,hasMore:existing?.hasMore||false,loading:false,error:failure?.message||'读取项目会话失败'}};
@@ -152,19 +164,24 @@ export function AntigravitySidebar({
     });
   });
 
-  const refreshExpanded=useStableEvent(()=>{
+  const refreshExpanded=useStableEvent((quiet=false)=>{
     if(!connected)return;
     for(const item of projectItems){
-      if(effectiveExpanded.has(item.key))loadProject(item,false);
+      if(effectiveExpanded.has(item.key))loadProject(item,false,quiet);
     }
   });
 
-  const load=useStableEvent((more=false)=>{
+  const load=useStableEvent((more=false,quiet=false)=>{
     if(!connected)return;
     const offset=more?current?.offset||0:0;
     void loader.current.load(key,():Promise<Page>=>call(listAction,{project:'',search:query,offset}),{
-      start:()=>{setBusy(true);setError('');setNotice('');},
+      start:()=>{if(!quiet){setBusy(true);setError('');setNotice('');}},
       result:result=>{
+        if(quiet&&current&&current.offset>result.data.length){
+          if(result.projects){setProjects(result.projects);rememberList(projectsCache,result.projects);}
+          setPage({...current,items:refreshedPage(current.items,result.data)});
+          return;
+        }
         if(result.projects){setProjects(result.projects);rememberList(projectsCache,result.projects);}
         if(!offset&&!query)rememberList(listCache,result.data);
         setPreferences(old=>{const base=old.key===storage?old.values:loadPreferences(storage),values=rememberThreads(base,result.data,false);if(values!==base)savePreferences(storage,values);return {key:storage,values};});
@@ -172,8 +189,8 @@ export function AntigravitySidebar({
         setPage({key,items:offset?[...new Map([...items,...result.data].map(item=>[item.id,item])).values()]:result.data,
           offset:offset+result.data.length,hasMore:result.hasMore});
       },
-      error:failure=>setError((failure as {message?:string})?.message||'读取会话失败'),
-      finish:()=>setBusy(false),
+      error:failure=>{if(!quiet)setError((failure as {message?:string})?.message||'读取会话失败');},
+      finish:()=>{if(!quiet)setBusy(false);},
     });
   });
 
@@ -183,6 +200,14 @@ export function AntigravitySidebar({
     const activeLoader=loader.current;
     return()=>activeLoader.invalidate();
   },[connected,key,revision,load]);
+
+  // Run state changes on the computer without any action here: re-read the shown lists while the page is in view, as Codex's list does.
+  useEffect(()=>{
+    if(!connected||query)return;
+    const tick=()=>{if(document.visibilityState==='visible'){load(false,true);refreshExpanded(true);}};
+    const timer=setInterval(tick,LIST_POLL_MS);document.addEventListener('visibilitychange',tick);
+    return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',tick);};
+  },[connected,query,load,refreshExpanded]);
 
   // Load any expanded projects once the project list arrives.
   const loadedExpandedFor=useRef(new Set<string>());

@@ -115,7 +115,7 @@ export class LiveSession {
    * completion notice wakes the session for another turn, and only this process can deliver it, so the
    * process is kept while any remains.
    */
-  background = new Set<string>();
+  background = new Map<string, {description: string; type: string}>();
   closed = false;
   interrupting = false;
   hint = '';
@@ -289,7 +289,8 @@ export class ClaudeRuntime extends EventEmitter {
           session.running = m.state !== 'idle' || session.inbox.size > 0;
         } else if (m.type === 'system' && m.subtype === 'background_tasks_changed' && Array.isArray(m.tasks)) {
           // The full live set each time; ambient ones (watchers) are not work anyone waits on.
-          session.background = new Set(m.tasks.filter((task: Json) => !task?.ambient).map((task: Json) => String(task?.task_id)));
+          session.background = new Map(m.tasks.filter((task: Json) => !task?.ambient)
+            .map((task: Json) => [String(task?.task_id), {description: String(task?.description || ''), type: String(task?.task_type || '')}]));
         } else if (m.type === 'result') {
           // Each result ends a turn; 'turn' listeners record its tokens against the sender of the turn.
           const opId = session.turnOpId;session.turnOpId = session.nowOpId;session.nowOpId = undefined;

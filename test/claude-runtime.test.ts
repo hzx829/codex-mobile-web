@@ -54,6 +54,10 @@ function fakeClaude(projects: string) {
         }
         if (text === 'plan') answers.push(await options!.canUseTool!('ExitPlanMode', {plan: '1. 改代码'}, {signal: new AbortController().signal} as any));
         if (text === 'slow') await until(() => interrupted || closed, Boolean, 5000);
+        // Background work as Claude Code reports it: the full live set, watchers marked ambient.
+        if (text === 'background') yield {type: 'system', subtype: 'background_tasks_changed', session_id: id,
+          tasks: [{task_id: 'b1', task_type: 'local_bash', description: 'Deploy to Prod'}, {task_id: 'w1', task_type: 'local_bash', description: 'Watch log', ambient: true}]};
+        if (text === 'background done') yield {type: 'system', subtype: 'background_tasks_changed', session_id: id, tasks: []};
         await write({type: 'assistant', message: {id: 'r', role: 'assistant', model: 'claude-test', content: [{type: 'text', text: interrupted ? '已停止' : `好的：${text}`}]}});
         yield {type: 'assistant', session_id: id, message: {}};
         yield {type: 'result', subtype: interrupted ? 'error_during_execution' : 'success', session_id: id, errors: []};
@@ -254,6 +258,34 @@ test('the connector default permission mode: skip prompts by default, and switch
     assert.equal(refused.state, 'failed');
   } finally {
     for (const bridge of bridges) bridge.close();
+    ledger.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
+    await removeTestTemp(root);
+  }
+});
+
+test("the phone sees a session's background work in its list and its view", async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-claude-bg-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const ledger = new Ledger(':memory:');
+  let bridge: ClaudeCodeBridge | undefined;
+  try {
+    const config = join(root, 'config'), cwd = join(root, 'repo');
+    await mkdir(join(config, 'projects', 'work'), {recursive: true});await mkdir(cwd);
+    process.env.CLAUDE_CONFIG_DIR = config;
+    const fake = fakeClaude(join(config, 'projects'));
+    bridge = new ClaudeCodeBridge(ledger, config, undefined, Date.now, new ClaudeRuntime(async () => fake.query, () => undefined, 60_000));
+    const id = (await bridge.handle('claude.create', {cwd, text: 'background', opId: opId()})).conversationId;
+    const view = await until(() => bridge!.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 1);
+    assert.deepEqual(view.backgroundTasks, [{id: 'b1', title: 'Deploy to Prod', type: 'local_bash'}], 'watchers are left out');
+    const listed = (await bridge.handle('claude.list', {})).data.find((item: any) => item.id === id);
+    assert.deepEqual([listed.running, listed.background], [false, 1]);
+    await bridge.handle('claude.send', {conversationId: id, text: 'background done', opId: opId()});
+    const after = await until(() => bridge!.handle('claude.read', {conversationId: id}), value => !value.running && value.turns.length === 2);
+    assert.deepEqual(after.backgroundTasks, []);
+    assert.equal((await bridge.handle('claude.list', {})).data.find((item: any) => item.id === id).background, 0);
+  } finally {
+    bridge?.close();
     ledger.close();
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR = previous;
     await removeTestTemp(root);

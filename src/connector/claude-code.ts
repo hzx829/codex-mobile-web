@@ -435,6 +435,8 @@ export class ClaudeCodeBridge {
       // The program that has the session open on the computer; what the phone adds runs in another process it never shows.
       ...(current.holder ? {heldBy: {app: holderName(current.holder.entrypoint), pid: current.holder.pid}} : {}),
       defaultPermissionMode: this.runtime.defaultMode, canBypass: Boolean(live?.canBypass), requests: live?.pending || [], error: live?.error || '',
+      // Shell commands, Monitors and subagents still at work after the turn; each reports back with a turn of its own.
+      backgroundTasks: live ? [...live.background].map(([taskId, task]) => ({id: taskId, title: task.description, type: task.type})) : [],
       queuedMessages: (this.queue?.queued(id) || []).map(message => ({id: message.id, text: message.payload.text || '',
         imageCount: message.payload.images?.length || 0, imageBytes: (message.payload.images || []).reduce((sum: number, url: string) => sum + imageBytes(url), 0),
         state: message.state, error: message.error})),
@@ -581,7 +583,8 @@ export class ClaudeCodeBridge {
       const peers = guestWorkspace() ? new Map<string, PeerStatus>() : await this.peerStatuses();
       const elsewhere = async (info: SessionInfo) => {const peer = peers.get(info.sessionId);return peer ? peer.status !== 'idle' : !guestWorkspace() && await this.listedElsewhere(info);};
       const data = await Promise.all(page.map(async info => ({id: info.sessionId, title: title(info), cwd: info.cwd || '', updatedAt: info.lastModified,
-        running: this.runtime.get(info.sessionId)?.running ?? await elsewhere(info)})));
+        running: this.runtime.get(info.sessionId)?.running ?? await elsewhere(info),
+        background: this.runtime.get(info.sessionId)?.background.size || 0})));
       return {data, hasMore: matches.length > offset + PAGE, projects,
         defaultPermissionMode: this.runtime.defaultMode};
     }

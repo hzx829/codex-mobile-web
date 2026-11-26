@@ -17,13 +17,16 @@ export function ThreadRow({thread,selected,disabled=false,preference={},time,act
   const cancel=()=>{clearTimeout(timer.current);start.current=null;};
   useEffect(()=>cancel,[]);
   const run=useRunMark(thread.id,active,selected);
+  // The turn is over but its background work (a deploy, a watcher) goes on and will report back; it outranks a "done" mark.
+  const background=!active&&Number(thread.background)>0;
   return <button className={`session-row${selected?' selected':''}${preference.unread?' unread':''}`} disabled={disabled} aria-haspopup={menu?'dialog':undefined} aria-current={selected||undefined} onClick={()=>{if(!held.current){clearRunDone(thread.id);open();}}}
     onContextMenu={menu?e=>{e.preventDefault();cancel();if(!held.current){held.current=true;menu({x:e.clientX,y:e.clientY});}}:undefined}
     onPointerDown={menu?e=>{held.current=false;cancel();if(e.pointerType==='mouse'||!e.isPrimary)return;const point={x:e.clientX,y:e.clientY};start.current=point;timer.current=setTimeout(()=>{held.current=true;menu(point);},500);}:undefined}
     onPointerMove={e=>{if(start.current&&Math.hypot(e.clientX-start.current.x,e.clientY-start.current.y)>10)cancel();}}
     onPointerUp={cancel} onPointerCancel={cancel} onPointerLeave={cancel}
     onKeyDown={menu?e=>{if(e.key==='Enter'||e.key===' ')held.current=false;if(e.key==='ContextMenu'||e.key==='F10'&&e.shiftKey){e.preventDefault();const rect=e.currentTarget.getBoundingClientRect();menu({x:rect.left+16,y:rect.bottom});}}:undefined}>
-    <span className="session-name">{run&&<i className={`dot online${run==='running'?' running-dot':''}`} title={run==='running'?'正在运行':'已完成'}/>}{preference.unread&&<i className="dot unread-dot"/>}{thread.title}</span>
+    <span className="session-name">{background?<i className="dot background-dot" title={`${thread.background} 个后台任务运行中`}/>
+      :run&&<i className={`dot online${run==='running'?' running-dot':''}`} title={run==='running'?'正在运行':'已完成'}/>}{preference.unread&&<i className="dot unread-dot"/>}{thread.title}</span>
     <span className="session-meta">{preference.pinned&&<Icon name="pin" size={14}/>}<time>{time}</time><OwnerBadge owner={thread.owner}/></span>
   </button>;
 }
