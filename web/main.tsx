@@ -8,7 +8,7 @@ import {ClaudeProjectEditor,GuestProjectForm} from './claude-projects';
 import {ProjectCreateSheet} from './project-create';
 import {loadExpandedProjects,ProjectEditSheet,ProjectTree,saveExpandedProjects,type ProjectItem,type ProjectThreadsState} from './project-tree';
 import {MobileSettingsTrigger,SettingsSheet,SidebarFooter,type SidebarFooterProps} from './settings-menu';
-import {GroupHeading,HomeHeader,SidebarActions,ThreadHeader,useComposerHeight} from './chat-layout';
+import {GroupHeading,HomeHeader,SidebarActions,ThreadHeader,useBottomAnchor,useComposerHeight} from './chat-layout';
 import {ServiceSwitch, switchRoute} from './service-switch';
 import {connectorHas,versionGap,versionGapNotice} from './features';
 import {fileOwner,previewOwner as previewOwnerOf,routeConversation,serviceHome,serviceLabel,serviceOf,supportedRoute,withConversation,type Service} from './services';
@@ -494,6 +494,7 @@ function App(){
     return()=>{observer.disconnect();cancelAnimationFrame(frame);};
   },[threadMounted]);
   useComposerHeight(composer,draft,threadMounted);
+  useBottomAnchor(timeline,threadMounted);
   useEffect(()=>{
     if(!connected||!codexActive)return;
     // A safety net for missed notices: the open thread also renews its live watch here.

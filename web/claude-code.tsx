@@ -7,7 +7,7 @@ import {useVoiceInput} from './use-voice-input';
 import type {MenuPoint} from './popover';
 import type {ThreadActions} from './antigravity-sidebar';
 import {voiceProviderLabel,type VoiceProvider} from '../src/shared/voice';
-import {ThreadHeader,useComposerHeight,workspaceName} from './chat-layout';
+import {ThreadHeader,useBottomAnchor,useComposerHeight,workspaceName} from './chat-layout';
 import {IconButton} from './icon-button';
 import {QueuedMessages} from './queued-messages';
 import {Icon} from './icons';
@@ -147,6 +147,7 @@ export function ClaudeCodePanel(props:Props){
   useEffect(()=>{from.current='';earlierRequest.current=null;setLoadingEarlier(false);setEarlierError('');},[conversationId]);
   const windowFor=()=>from.current?{from:from.current}:{};
   useComposerHeight(composer,draft,true);
+  useBottomAnchor(scroll,true);
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
   function edit(text:string){setDraft(text);store(`${scope}:draft`,text);}
   function remember(op:string){setPending(op);store(`${scope}:pending`,op);}

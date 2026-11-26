@@ -21,7 +21,7 @@ import {AntigravityModelPicker,antigravityModelSupportsImages,type AntigravityCa
 import {connectionLost,ConversationStatus,elapsedLabel,PendingMessage} from './conversation';
 import {DraftSave} from './draft-save';
 import {OPTIMISTIC_ACCEPTED_MS,optimisticFlatDelivered,optimisticFlatMessage,type OptimisticMessage} from './optimistic';
-import {ThreadHeader,useComposerHeight,workspaceName} from './chat-layout';
+import {ThreadHeader,useBottomAnchor,useComposerHeight,workspaceName} from './chat-layout';
 import {ThreadMenu} from './thread-menu';
 import {ContextIndicator,ThreadStatusPanel,contextSummary} from './thread-status';
 import type {MenuPoint} from './popover';
@@ -189,6 +189,7 @@ export function AntigravityPanel(props:Props){
   const settleTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
   const [settling,setSettling]=useState(()=>!creating&&recentCreatedRemaining(machine,conversationId)>0);
   useComposerHeight(composer,draft,true);
+  useBottomAnchor(scroll,true);
   const request=useRef(call);request.current=call;
   // A saved conversation keeps its own model and permission mode until changed here; the last choice seeds new conversations.
   const [model,setModel]=useState(()=>creating?saved(`antigravity:${machine}:model`):saved(`${key}:model`));

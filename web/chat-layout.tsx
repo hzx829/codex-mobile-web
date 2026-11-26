@@ -81,8 +81,32 @@ export function ThreadHeader({title,project,machineName,connected,back,menu,back
 }
 
 function resizeComposer(el:HTMLTextAreaElement){
+  // Measuring collapses the field to one row. The form keeps its height meanwhile, or the messages above would
+  // grow for a moment and a list scrolled to its end would be pushed back by the height of the collapsed lines.
+  const form=el.form;if(form)form.style.height=`${form.getBoundingClientRect().height}px`;
   el.style.overflowY='hidden';el.style.height='auto';const height=el.scrollHeight;
   el.style.height=`${Math.min(Math.max(height,44),144)}px`;el.style.overflowY=height>145?'auto':'hidden';
+  if(form)form.style.height='';
+}
+/**
+ * Keeps the messages still against the composer when the list changes height (a new line in the draft,
+ * an attachment, the keyboard): the list resizes from its lower edge, so that edge keeps showing the same content.
+ */
+export function useBottomAnchor(scroll:RefObject<HTMLElement|null>,mounted:boolean){
+  useLayoutEffect(()=>{
+    const el=scroll.current;if(!mounted||!el)return;
+    let height=el.clientHeight,edge=el.scrollTop+height;
+    const track=()=>{edge=el.scrollTop+el.clientHeight;};
+    const observer=new ResizeObserver(()=>{
+      const next=el.clientHeight;if(next===height)return;
+      height=next;
+      // Already at the end (the browser clamped it, or new content was just scrolled to): nothing to restore.
+      if(el.scrollHeight-el.scrollTop-next>=1)el.scrollTop=edge-next;
+      track();
+    });
+    observer.observe(el);el.addEventListener('scroll',track,{passive:true});
+    return()=>{observer.disconnect();el.removeEventListener('scroll',track);};
+  },[scroll,mounted]);
 }
 export function useComposerHeight(input:RefObject<HTMLTextAreaElement|null>,draft:string,mounted:boolean){
   useLayoutEffect(()=>{if(mounted&&input.current)resizeComposer(input.current);},[input,draft,mounted]);
