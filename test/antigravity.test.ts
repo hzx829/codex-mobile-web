@@ -13,6 +13,7 @@ import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {tmpdir} from 'node:os';
 import {AntigravityBridge,deterministicProjectUuid,toAntigravityFileUri,parseAntigravityModels,extractAntigravityRequests,extractAntigravityBackgroundTasks,extractAntigravityIssue} from '../src/connector/antigravity.js';
+import {ThreadHub} from '../src/connector/thread-hub.js';
 import {createHubClient} from '../src/connector/antigravity-hub.js';
 import {createServer} from 'node:http';
 import {connect as connectTcp} from 'node:net';
@@ -1380,4 +1381,140 @@ test('Antigravity formats file URIs, generates deterministic UUIDv5, registers p
   assert.equal(calls.at(-1)?.body.project.archived, true);
   const afterRemove = await bridge.handle('antigravity.list', {});
   assert.ok(!afterRemove.projects.some((p: any) => p.id === toAntigravityFileUri(gitFolder)));
+});
+
+test('Antigravity list reports background work, keeps canceling active, and sync refreshes background/permission/approval states', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmw-antigravity-status-sync-'));
+  const ledger = new Ledger(':memory:');
+  const db = new DatabaseSync(join(dir, 'conversation_summaries.db'));
+  let bridge: AntigravityBridge | undefined;
+  t.after(async () => { bridge?.close(); db.close(); ledger.close(); await rm(dir, {recursive: true, force: true}); });
+
+  const bgId = randomUUID(), cancelId = randomUUID(), approveId = randomUUID(), idleId = randomUUID();
+  const project = pathToFileURL(dir).href;
+  db.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const insert = db.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)');
+  insert.run(bgId, 'Bg Session', 'CASCADE_RUN_STATUS_IDLE', '2026-11-26T10:03:00.000Z', 80, 10, 't10', 1, JSON.stringify([project]));
+  insert.run(cancelId, 'Canceling Session', 'CASCADE_RUN_STATUS_CANCELING', '2026-11-26T10:02:00.000Z', 12, 2, 't2', 1, JSON.stringify([project]));
+  insert.run(approveId, 'Approval Session', 'CASCADE_RUN_STATUS_IDLE', '2026-11-26T10:01:00.000Z', 15, 3, 't3', 1, JSON.stringify([project]));
+  insert.run(idleId, 'Idle Session', 'CASCADE_RUN_STATUS_IDLE', '2026-11-26T10:00:00.000Z', 5, 1, 't1', 0, JSON.stringify([project]));
+
+  let bgRunning = true;
+  let bgProgress = 'step 1';
+  let permissionPreset: string | undefined = 'AGENT_PERMISSION_PRESET_TURBO';
+  const interactions: any[] = [];
+  const bgStep = () => ({
+    type: 'CORTEX_STEP_TYPE_GENERIC',
+    status: bgRunning ? 'CORTEX_STEP_STATUS_RUNNING' : 'CORTEX_STEP_STATUS_DONE',
+    metadata: {startedAt: '2026-11-26T10:00:00.000Z', sourceTrajectoryStepInfo: {stepIndex: 20}},
+    taskDetails: {id: `${bgId}/task-20`, title: 'Background build', progress: bgProgress, movedToBackgroundAt: '2026-11-26T10:00:05.000Z'},
+  });
+  const foregroundStep = {
+    type: 'CORTEX_STEP_TYPE_GENERIC',
+    status: 'CORTEX_STEP_STATUS_RUNNING',
+    metadata: {toolCall: {name: 'read_file'}, sourceTrajectoryStepInfo: {stepIndex: 11}},
+  };
+  const waitingStepObj = {
+    status: 'CORTEX_STEP_STATUS_WAITING',
+    metadata: {sourceTrajectoryStepInfo: {stepIndex: 14}},
+    requestedInteraction: {runCommand: {}},
+    runCommand: {commandLine: 'npm test'},
+  };
+
+  bridge = new AntigravityBridge(dir, ledger, async (_d, method, body) => {
+    if (method === 'GetPermissionSettings') return {globalPreset: 'AGENT_PERMISSION_PRESET_DEFAULT'};
+    if (method === 'GetAllCascadeTrajectories') {
+      return {
+        trajectorySummaries: {
+          [bgId]: {trajectoryId: 'traj-bg', annotations: permissionPreset ? {permissionPreset} : {}},
+          [approveId]: {trajectoryId: 'traj-approve', annotations: {}},
+        },
+      };
+    }
+    if (method === 'GetCascadeTrajectorySteps') {
+      if (body.cascadeId === bgId) {
+        return body.stepOffset <= 20
+          ? {steps: [bgStep(), {metadata: {sourceTrajectoryStepInfo: {stepIndex: 79}}, status: 'CORTEX_STEP_STATUS_DONE'}]}
+          : {steps: [{metadata: {sourceTrajectoryStepInfo: {stepIndex: 79}}, status: 'CORTEX_STEP_STATUS_DONE'}]};
+      }
+      if (body.cascadeId === cancelId) return {steps: [foregroundStep]};
+      if (body.cascadeId === approveId) return {steps: [waitingStepObj]};
+      return {steps: []};
+    }
+    if (method === 'HandleCascadeUserInteraction') {
+      interactions.push(body);
+      return {};
+    }
+    return {};
+  });
+
+  // 1. List surfaces background=true for idle not_fully_idle rows, running=true for canceling, and omits background for plain idle rows.
+  const listed = await bridge.handle('antigravity.list', {});
+  const byId = new Map(listed.data.map((row: any) => [row.id, row]));
+  assert.equal((byId.get(bgId) as any).running, false);
+  assert.equal((byId.get(bgId) as any).background, true);
+  assert.equal((byId.get(cancelId) as any).running, true);
+  assert.equal((byId.get(cancelId) as any).background, undefined);
+  assert.equal((byId.get(idleId) as any).running, false);
+  assert.equal('background' in (byId.get(idleId) as any), false);
+
+  // 2. Canceling conversation reports canceling=true, running=false, canSend=false, and does NOT misclassify foreground steps as background tasks.
+  const cancelView = await bridge.handle('antigravity.read', {conversationId: cancelId});
+  assert.equal(cancelView.running, false);
+  assert.equal(cancelView.canceling, true);
+  assert.equal(cancelView.canSend, false);
+  assert.deepEqual(cancelView.backgroundTasks, []);
+
+  // 3. Waiting approval step with only metadata.sourceTrajectoryStepInfo.stepIndex extracts & responds using step 14.
+  const extracted = extractAntigravityRequests([waitingStepObj], 0);
+  assert.equal(extracted.length, 1);
+  assert.equal(extracted[0].id, '14');
+  const approveRes = await bridge.handle('antigravity.respond', {conversationId: approveId, requestId: '14', decision: 'allow', opId: `${Date.now()}:${randomUUID()}`});
+  assert.equal(approveRes.state, 'accepted');
+  assert.equal(interactions[0].interaction.stepIndex, 14);
+  assert.equal(interactions[0].interaction.trajectoryId, 'traj-approve');
+
+  // 4. Followed sync: opening bgId populates exact count in list; clearing permissionPreset + finishing older bg task updates on explicit refresh.
+  const frames: any[] = [];
+  const hub = new ThreadHub(frame => frames.push(frame));
+  t.after(() => hub.close());
+  hub.register('antigravity', bridge.syncSource);
+
+  const open1 = await hub.open({service: 'antigravity', threadId: bgId});
+  assert.equal(open1.head.backgroundTasks.length, 1);
+  assert.equal(open1.head.backgroundTasks[0].output, 'step 1');
+  assert.equal(open1.head.permissionMode, 'AGENT_PERMISSION_PRESET_TURBO');
+
+  // Once followed, list reports the exact numeric background task count (1) and hides background for approval-only wait.
+  await hub.open({service: 'antigravity', threadId: approveId});
+  const listedFollowed = await bridge.handle('antigravity.list', {});
+  const byIdFollowed = new Map(listedFollowed.data.map((row: any) => [row.id, row]));
+  assert.equal((byIdFollowed.get(bgId) as any).background, 1);
+  assert.equal((byIdFollowed.get(approveId) as any).background, undefined);
+
+  // Hub-only changes (output update, then task finished, and permissionMode cleared on desktop) propagate via refresh=true without SQLite changing.
+  bgProgress = 'step 1\nstep 2';
+  const open2 = await hub.open({service: 'antigravity', threadId: bgId, refresh: true});
+  assert.equal(open2.head.backgroundTasks[0].output, 'step 1\nstep 2');
+
+  // Even without refresh=true, periodic FOLLOW_FULL_MS polling refreshes an idle not_fully_idle conversation.
+  bgProgress = 'step 1\nstep 2\nstep 3';
+  const deadline = Date.now() + 2500;
+  let polledFrame: any;
+  while (Date.now() < deadline) {
+    polledFrame = frames.find(frame => frame.threadId === bgId && frame.head?.backgroundTasks?.[0]?.output?.includes('step 3'));
+    if (polledFrame) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(polledFrame, 'idle not_fully_idle conversation keeps polling Hub for background task progress');
+
+  bgRunning = false;
+  permissionPreset = undefined;
+  const open3 = await hub.open({service: 'antigravity', threadId: bgId, refresh: true});
+  assert.deepEqual(open3.head.backgroundTasks, []);
+  assert.equal(open3.head.permissionMode, undefined);
+
+  // BackgroundTasksBar uses the hollow background-dot ring matching the sidebar.
+  const barHtml = renderToStaticMarkup(createElement(BackgroundTasksBar, {tasks: open1.head.backgroundTasks, onOpen: () => {}}));
+  assert.match(barHtml, /dot background-dot/);
 });

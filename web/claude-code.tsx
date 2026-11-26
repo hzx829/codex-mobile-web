@@ -64,6 +64,8 @@ type Props={
   mobileHeaderRight?:ReactNode;
   /** Optional computer status badge rendered in the new-chat welcome view. */
   welcomeMeta?:ReactNode;
+  /** Reports this open conversation's live running/background state so the sidebar updates immediately. */
+  onLiveStatus?:(status:{id:string;running:boolean;background:number|boolean}|null)=>void;
 };
 const FIRST_MESSAGE='第一条消息不能改写。可以在会话菜单里“复制会话”，或新建会话';
 const userIds=(view:Json|null):string[]=>view?.turns?view.turns.flatMap((turn:TurnView)=>turn.items.filter(item=>item.role==='user').map(item=>item.id)):[];
@@ -290,6 +292,12 @@ export function ClaudeCodePanel(props:Props){
   const effectiveMode=view?.permissionMode||view?.defaultPermissionMode||defaultMode||'default';
   const queued:QueuedMessage[]=view?.queuedMessages||[];
   const backgroundTasks:{id:string;title:string}[]=Array.isArray(view?.backgroundTasks)?view.backgroundTasks:[];
+  const liveStatusRef=useRef(props.onLiveStatus);liveStatusRef.current=props.onLiveStatus;
+  const liveBgCount=backgroundTasks.length,liveKnown=!creating&&connected&&Boolean(view)&&!cached;
+  useEffect(()=>{
+    liveStatusRef.current?.(liveKnown?{id:conversationId,running,background:liveBgCount}:null);
+  },[conversationId,liveKnown,running,liveBgCount]);
+  useEffect(()=>()=>{liveStatusRef.current?.(null);},[]);
   // As in Codex: behind a running turn or waiting messages, a plain send waits on the computer until the turn ends.
   const queueNext=!creating&&(running||queued.length>0);
   function cleared(){edit('');setImages([]);setFiles([]);}

@@ -2,7 +2,7 @@ import {lazy,Suspense,startTransition,useEffect,useLayoutEffect,useMemo,useRef,u
 import {createRoot} from 'react-dom/client';
 import {Client,hashCredential,inviteCode,operationId} from './client';
 import {AntigravityPanel} from './antigravity';
-import {AntigravitySidebar} from './antigravity-sidebar';
+import {AntigravitySidebar,type LiveThreadStatus} from './antigravity-sidebar';
 import {ClaudeCodePanel} from './claude-code';
 import {ClaudeProjectEditor,GuestProjectForm} from './claude-projects';
 import {ProjectCreateSheet} from './project-create';
@@ -113,6 +113,7 @@ function App(){
   const [drawerOpen,setDrawerOpen]=useState(false);
   const [isMobile,setIsMobile]=useState(()=>typeof window!=='undefined'&&window.matchMedia('(max-width: 760px)').matches);
   const [remoteListRevision,refreshRemoteList]=useState(0);
+  const [remoteLiveStatus,setRemoteLiveStatus]=useState<{service:Service;machine:string;status:LiveThreadStatus}|null>(null);
   const service=serviceOf(route),codexActive=service==='codex';
   const lastCodex=useRef({machine,route:newChatRoute('codex')});
   if(codexActive)lastCodex.current={machine,route};
@@ -1067,9 +1068,18 @@ function App(){
       archive:async()=>{await claudeChange('claude.archive',{conversationId:thread.id});if(thread.id===id)open('');},
       duplicate:async()=>{forked((await claudeChange('claude.fork',{conversationId:thread.id})).conversationId);},
     });
+    const liveThread=remoteLiveStatus&&remoteLiveStatus.service===service&&remoteLiveStatus.machine===machine&&remoteLiveStatus.status.id===id?remoteLiveStatus.status:null;
+    const reportLiveStatus=(status:LiveThreadStatus|null)=>{
+      setRemoteLiveStatus(old=>{
+        if(!status)return old&&old.service===service&&old.machine===machine?null:old;
+        if(old&&old.service===service&&old.machine===machine&&old.status.id===status.id&&old.status.running===status.running&&old.status.background===status.background)return old;
+        return {service,machine,status};
+      });
+    };
     return <SenderRoot me={me?.id}><div className={`shell has-session${drawerOpen?' drawer-open':''}`} onTouchStart={onShellTouchStart} onTouchEnd={onShellTouchEnd}>
       <AntigravitySidebar key={`${service}:${machine}`} service={service} inert={sidebarInert} selected={id} machine={machine} machineName={machineName}
         copyText={copyText} threadActions={service==='claude'?claudeActions:undefined} connected={connected} relayOnline={status==='online'}
+        liveThread={liveThread}
         footer={sidebarFooter} mobileSettings={mobileSettings}
         projectsCollapsed={projectsCollapsed} onToggleProjects={toggleProjects} collapsedGroups={collapsedGroups} onToggleGroup={toggleGroup} me={me} roster={roster} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter}
         claimOwner={isTeamAdmin(me)?(threadId,userId)=>claimOwner(machine,service,threadId,userId):undefined}
@@ -1093,6 +1103,7 @@ function App(){
         openSidebar={()=>setDrawerOpen(true)} onNewChat={()=>navigate(newChatRoute('claude'))}
         mobileHeaderCenter={mobileHeaderCenter} mobileHeaderRight={mobileSettings} welcomeMeta={welcomeMeta}
         machineName={machineName} connected={connected} conversationId={id} call={call} go={open} sync={connectorHas(activeMachine,'sync.claude')?syncLink:undefined}
+        onLiveStatus={reportLiveStatus}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>:
         <AntigravityPanel key={JSON.stringify([machine,service,id])} inert={mainInert} openFile={markdownOpenFile} openPreview={markdownOpenPreview} previewError={error}
         machine={machine} machineName={machineName} connected={connected} conversationId={id} call={call} go={open} newProject={creatingAntigravity?route.project:null} created={created} voiceMode={voiceMode} chooseVoice={()=>setSheet('voice')}
@@ -1103,6 +1114,7 @@ function App(){
         showImage={(url,title)=>showPreview({kind:'image',url,title})}
         openSidebar={()=>setDrawerOpen(true)} onNewChat={()=>navigate(newChatRoute('antigravity'))}
         mobileHeaderCenter={mobileHeaderCenter} mobileHeaderRight={mobileSettings} welcomeMeta={welcomeMeta}
+        onLiveStatus={reportLiveStatus}
         showFiles={()=>{setFilePath('');setSheet('file');}} copyText={copyText} clearPreviewError={()=>setError('')}/>}
       {sheet==='settings'&&<SheetPanel title="设置" close={()=>setSheet(null)}>{settingsSheet}</SheetPanel>}
       {sheet==='voice'&&<SheetPanel title={`语音输入 · ${serviceLabel(service)}`} close={()=>setSheet(null)}>{voiceOptions}</SheetPanel>}

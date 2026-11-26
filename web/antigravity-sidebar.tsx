@@ -12,8 +12,9 @@ import {projectPathKey} from '../src/shared/project-paths';
 import type {Json,RequestAction} from '../src/shared/types';
 
 type Project={id:string;path:string;name?:string;projectId?:string;owner?:{id:string;name:string}|null};
-type Thread={id:string;title:string;updatedAt:number;running:boolean;cwd?:string;owner?:{id:string;name:string}|null};
-type ProjectPage={items:Thread[];offset:number;hasMore:boolean;loading:boolean;error:string};
+type Thread={id:string;title:string;updatedAt:number;running:boolean;background?:number|boolean;cwd?:string;owner?:{id:string;name:string}|null};
+type ProjectPage={items:Thread[];offset:number;hasMore:boolean;loading:boolean;error:string;fetchedAt?:number};
+export type LiveThreadStatus={id:string;running:boolean;background?:number|boolean};
 
 /** Session actions an app supports beyond pinning and copying the ID, which every app gets. */
 export type ThreadActions={rename?:(name:string)=>Promise<void>;archive?:()=>Promise<void>;duplicate?:()=>Promise<void>};
@@ -44,6 +45,8 @@ type Props={
   copyText:(text:string)=>Promise<void>;threadActions?:(thread:Json)=>ThreadActions;
   /** Narrows the shown sessions, such as to those the signed-in team member started. */
   filter?:(threads:Json[])=>Json[];
+  /** Live status of the currently open conversation, reflected in the sidebar immediately without waiting for the next poll. */
+  liveThread?:LiveThreadStatus|null;
   call:(action:RequestAction,payload?:Json)=>Promise<any>;open:(id:string)=>void;chooseComputer:()=>void;
 };
 
@@ -54,15 +57,38 @@ export function refreshedPage<T extends {id:string}>(loaded:T[],first:T[]):T[]{
   return [...first,...loaded.filter(item=>!fresh.has(item.id))];
 }
 
+/**
+ * Reconciles live running/background status across the recent list, expanded project lists, and the currently
+ * open conversation so duplicate rows never fight over `thread-run-state`, and offline / unrefreshed caches stay unknown.
+ */
+export function reconcileSidebarStatus(
+  connected:boolean,
+  sources:readonly {items:readonly {id:string;running?:boolean;background?:number|boolean}[];fetchedAt?:number}[],
+  liveThread?:LiveThreadStatus|null,
+):Map<string,{running:boolean;background?:number|boolean;at:number}>{
+  const map=new Map<string,{running:boolean;background?:number|boolean;at:number}>();
+  if(!connected)return map;
+  for(const source of sources){
+    const at=source.fetchedAt||0;
+    if(!at)continue;
+    for(const item of source.items){
+      const prev=map.get(item.id);
+      if(!prev||at>=prev.at)map.set(item.id,{running:Boolean(item.running),background:item.background,at});
+    }
+  }
+  if(liveThread)map.set(liveThread.id,{running:liveThread.running,background:liveThread.background,at:Number.MAX_SAFE_INTEGER});
+  return map;
+}
+
 export function AntigravitySidebar({
-  service,listAction='antigravity.list',appName='Antigravity',filter,
+  service,listAction='antigravity.list',appName='Antigravity',filter,liveThread=null,
   projectsCollapsed=false,onToggleProjects,collapsedGroups=[],onToggleGroup,me=null,roster=[],ownerFilter='all',onOwnerFilterChange,claimOwner,
   onNew,onCreateProject,onEditProject,onClaudeSettings,onRemoveProject,canManageProjects=false,autoExpandKey='',
   selected,machine,machineName,connected,relayOnline,inert,revision,switcher,footer,mobileSettings,
   copyText,threadActions,call,open,chooseComputer,
 }:Props){
   const [search,setSearch]=useState(''),[query,setQuery]=useState(''),[projects,setProjects]=useState<Project[]>([]);
-  const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean}|null>(null);
+  const [page,setPage]=useState<{key:string;items:Thread[];offset:number;hasMore:boolean;fetchedAt:number}|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const loader=useRef(new SessionListLoader());
 
@@ -140,6 +166,7 @@ export function AntigravitySidebar({
     });
     void call(listAction,{project:project.id||project.path,offset}).then((result:Page)=>{
       if(projectReqSeq.current[project.key]!==seq)return;
+      const fetchedAt=Date.now();
       if(!offset)rememberList(cache,result.data);
       setPreferences(old=>{
         const base=old.key===storage?old.values:loadPreferences(storage);
@@ -150,16 +177,16 @@ export function AntigravitySidebar({
       setProjectPages(old=>{
         const existing=old[project.key];
         if(quiet&&existing&&existing.offset>result.data.length)
-          return {...old,[project.key]:{...existing,items:refreshedPage(existing.items,result.data),error:''}};
+          return {...old,[project.key]:{...existing,items:refreshedPage(existing.items,result.data),error:'',fetchedAt}};
         const prior=offset?existing?.items||[]:[];
         const merged=offset?[...new Map([...prior,...result.data].map(item=>[item.id,item])).values()]:result.data;
-        return {...old,[project.key]:{items:merged,offset:offset+result.data.length,hasMore:Boolean(result.hasMore),loading:false,error:''}};
+        return {...old,[project.key]:{items:merged,offset:offset+result.data.length,hasMore:Boolean(result.hasMore),loading:false,error:'',fetchedAt}};
       });
     }).catch((failure:any)=>{
       if(projectReqSeq.current[project.key]!==seq||quiet)return;
       setProjectPages(old=>{
         const existing=old[project.key];
-        return {...old,[project.key]:{items:existing?.items||[],offset:existing?.offset||0,hasMore:existing?.hasMore||false,loading:false,error:failure?.message||'读取项目会话失败'}};
+        return {...old,[project.key]:{items:existing?.items||[],offset:existing?.offset||0,hasMore:existing?.hasMore||false,loading:false,error:failure?.message||'读取项目会话失败',fetchedAt:existing?.fetchedAt}};
       });
     });
   });
@@ -177,17 +204,20 @@ export function AntigravitySidebar({
     void loader.current.load(key,():Promise<Page>=>call(listAction,{project:'',search:query,offset}),{
       start:()=>{if(!quiet){setBusy(true);setError('');setNotice('');}},
       result:result=>{
-        if(quiet&&current&&current.offset>result.data.length){
-          if(result.projects){setProjects(result.projects);rememberList(projectsCache,result.projects);}
-          setPage({...current,items:refreshedPage(current.items,result.data)});
-          return;
-        }
+        const fetchedAt=Date.now();
         if(result.projects){setProjects(result.projects);rememberList(projectsCache,result.projects);}
         if(!offset&&!query)rememberList(listCache,result.data);
         setPreferences(old=>{const base=old.key===storage?old.values:loadPreferences(storage),values=rememberThreads(base,result.data,false);if(values!==base)savePreferences(storage,values);return {key:storage,values};});
-        setNotice(result.notice||'');
-        setPage({key,items:offset?[...new Map([...items,...result.data].map(item=>[item.id,item])).values()]:result.data,
-          offset:offset+result.data.length,hasMore:result.hasMore});
+        setPage(old=>{
+          const existing=old?.key===key?old:null;
+          if(quiet&&existing&&existing.offset>result.data.length){
+            return {...existing,items:refreshedPage(existing.items,result.data),fetchedAt};
+          }
+          const prior=offset?existing?.items||[]:[];
+          const merged=offset?[...new Map([...prior,...result.data].map(item=>[item.id,item])).values()]:result.data;
+          return {key,items:merged,offset:offset+result.data.length,hasMore:result.hasMore,fetchedAt};
+        });
+        if(!quiet)setNotice(result.notice||'');
       },
       error:failure=>{if(!quiet)setError((failure as {message?:string})?.message||'读取会话失败');},
       finish:()=>{if(!quiet)setBusy(false);},
@@ -196,7 +226,21 @@ export function AntigravitySidebar({
 
   useEffect(()=>{const timer=setTimeout(()=>setQuery(search.trim()),250);return()=>clearTimeout(timer);},[search]);
   useEffect(()=>{
-    if(connected){load();refreshExpanded();}else setBusy(false);
+    if(connected){load();refreshExpanded();}
+    else{
+      setBusy(false);
+      // Mark loaded lists stale while offline so reconnecting does not treat old rows as fresh before the first fetch.
+      setPage(old=>old?{...old,fetchedAt:0}:null);
+      setProjectPages(old=>{
+        let changed=false;
+        const next:Record<string,ProjectPage>={};
+        for(const [k,v] of Object.entries(old)){
+          if(v.fetchedAt){next[k]={...v,fetchedAt:0};changed=true;}
+          else next[k]=v;
+        }
+        return changed?next:old;
+      });
+    }
     const activeLoader=loader.current;
     return()=>activeLoader.invalidate();
   },[connected,key,revision,load]);
@@ -253,6 +297,26 @@ export function AntigravitySidebar({
     }
   }
 
+  const liveStatus=useMemo(()=>reconcileSidebarStatus(
+    connected,
+    [...(current?[current]:[]),...Object.values(projectPages)],
+    liveThread,
+  ),[connected,current,projectPages,liveThread]);
+
+  const isThreadActive=(thread:Json):boolean|null=>{
+    const status=liveStatus.get(String(thread.id));
+    return status?status.running:null;
+  };
+  const decorateThread=(item:Thread)=>{
+    const status=liveStatus.get(item.id);
+    return {
+      ...item,
+      running:status?status.running:false,
+      background:status?status.background:undefined,
+      status:status?.running?{type:'active'}:undefined,
+    };
+  };
+
   const projectThreadsMap=useMemo<Record<string,ProjectThreadsState>>(()=>{
     const map:Record<string,ProjectThreadsState>={};
     for(const item of projectItems){
@@ -265,14 +329,14 @@ export function AntigravitySidebar({
       const merged=visibleThreads(rawItems,preferences,item.path,false,'') as Thread[];
       const filtered=(filter?filter(merged):merged) as Thread[];
       map[item.key]={
-        items:filtered.map(t=>({...t,status:t.running?{type:'active'}:undefined})),
+        items:filtered.map(decorateThread),
         loading:Boolean(entry?.loading),
         hasMore:Boolean(entry?.hasMore),
         error:entry?.error||'',
       };
     }
     return map;
-  },[projectItems,effectiveExpanded,projectPages,listAction,machine,service,items,preferences,filter]);
+  },[projectItems,effectiveExpanded,projectPages,listAction,machine,service,items,preferences,filter,liveStatus]);
 
   const refreshAll=()=>{load();refreshExpanded();};
   const heading=query?'搜索结果':'最近';
@@ -298,7 +362,7 @@ export function AntigravitySidebar({
         onLoadMore={project=>loadProject(project,true)}
         selectedThread={selected}
         threadPreferences={preferences}
-        isThreadActive={thread=>Boolean(thread.running||thread.status?.type==='active')}
+        isThreadActive={isThreadActive}
         onOpenThread={thread=>open(thread.id)}
         onThreadMenu={(thread,point)=>setMenu({thread,point})}
         onNewChat={onNew?project=>onNew(project.id||project.path):undefined}
@@ -318,9 +382,9 @@ export function AntigravitySidebar({
       <section className="recent-section">
         {!groups.length&&<GroupHeading label={heading} collapsed={recentCollapsed} onToggle={toggleGroup('recent')} action={filterControl}/>}
         {groups.map((group,index)=>{const folded=foldable&&collapsedGroups.includes(group.key);return <div className="thread-group" key={group.key}><GroupHeading label={group.label} collapsed={folded} onToggle={toggleGroup(group.key)} action={index===0?filterControl:undefined}/>{!folded&&<nav aria-label={group.label}>{group.threads.map(item=>{
-          const thread={...item,status:item.running?{type:'active'}:undefined};
+          const thread=decorateThread(item as Thread);
           return <ThreadRow key={item.id} thread={thread} selected={selected===item.id} preference={preferences[item.id]}
-            time={relativeTime(item.updatedAt)} open={()=>open(item.id)} menu={point=>setMenu({thread,point})}/>;})}</nav>}</div>;})}
+            time={relativeTime(item.updatedAt)} active={isThreadActive(thread)} open={()=>open(item.id)} menu={point=>setMenu({thread,point})}/>;})}</nav>}</div>;})}
         {recentCollapsed?null:busy&&!visible.length?<div className="list-skeleton" role="status" aria-label="正在读取会话"><div/><div/><div/></div>:
           !visible.length&&!error&&<p className="empty-list">{!connected?'连接电脑后，会话会出现在这里。':ownerFiltered?<>当前仅显示「{ownerFilterLabel(ownerFilter,me,members)}」的会话，已加载列表中没有匹配项。{onOwnerFilterChange&&<button type="button" className="empty-list-action" onClick={()=>onOwnerFilterChange('all')}>显示全部</button>}</>:query?'没有找到匹配的会话。':`还没有 ${appName} 会话。`}</p>}
         {error&&<p className="error" role="alert">{error} {connected&&<button type="button" onClick={refreshAll}>重试</button>}</p>}

@@ -305,6 +305,13 @@ function interactionDetail(step: Json, branch: string): string {
   return '';
 }
 
+function stepIndexOf(step: Json, fallback: number): number {
+  if (Number.isSafeInteger(step?.stepIndex)) return step.stepIndex;
+  const sourceIdx = step?.metadata?.sourceTrajectoryStepInfo?.stepIndex;
+  if (Number.isSafeInteger(sourceIdx)) return sourceIdx;
+  return fallback;
+}
+
 /** Extracts waiting-for-user steps into the same `ApprovalRequest` shape Claude Code uses. */
 export function extractAntigravityRequests(steps: Json[], stepOffset: number): ApprovalRequest[] {
   const requests: ApprovalRequest[] = [];
@@ -313,7 +320,7 @@ export function extractAntigravityRequests(steps: Json[], stepOffset: number): A
     if (!step || step.status !== waitingStep) continue;
     const ri = step.requestedInteraction;
     if (!ri || typeof ri !== 'object') continue;
-    const stepIndex = Number.isSafeInteger(step.stepIndex) ? step.stepIndex : stepOffset + index;
+    const stepIndex = stepIndexOf(step, stepOffset + index);
     const id = String(stepIndex);
 
     if (ri.permission && typeof ri.permission === 'object') {
@@ -442,30 +449,23 @@ function stepTitleOf(step: Json): string {
   return '后台任务';
 }
 
-function stepIndexOf(step: Json, fallback: number): number {
-  if (Number.isSafeInteger(step?.stepIndex)) return step.stepIndex;
-  const sourceIdx = step?.metadata?.sourceTrajectoryStepInfo?.stepIndex;
-  if (Number.isSafeInteger(sourceIdx)) return sourceIdx;
-  return fallback;
-}
-
-function isBackgroundTaskStep(step: Json, conversationRunning: boolean): boolean {
+function isBackgroundTaskStep(step: Json, turnActive: boolean): boolean {
   if (!step || step.status !== runningStep) return false;
   const td = step.taskDetails && typeof step.taskDetails === 'object' ? step.taskDetails : null;
-  return Boolean(td && (td.movedToBackgroundAt || td.id || td.logUri)) || !conversationRunning;
+  return Boolean(td && (td.movedToBackgroundAt || td.id || td.logUri)) || !turnActive;
 }
 
 /** Extracts still-running background tasks (e.g. background commands) from Antigravity trajectory steps. */
 export function extractAntigravityBackgroundTasks(
   steps: Json[],
   stepOffset: number,
-  conversationRunning = false,
+  turnActive = false,
 ): AntigravityBackgroundTask[] {
   const tasks: AntigravityBackgroundTask[] = [];
   const seen = new Set<string>();
   for (let index = 0; index < steps.length; index++) {
     const step = steps[index];
-    if (!isBackgroundTaskStep(step, conversationRunning)) continue;
+    if (!isBackgroundTaskStep(step, turnActive)) continue;
     const td = step.taskDetails && typeof step.taskDetails === 'object' ? step.taskDetails : null;
     const stepIndex = stepIndexOf(step, stepOffset + index);
     const id = typeof td?.id === 'string' && td.id ? td.id : String(stepIndex);
@@ -502,15 +502,15 @@ export function extractAntigravityBackgroundTasks(
   return tasks;
 }
 
-function extractTaskLogPaths(steps: Json[], conversationRunning: boolean): Map<string, string> {
+function extractTaskLogPaths(steps: Json[], stepOffset: number, turnActive: boolean): Map<string, string> {
   const paths = new Map<string, string>();
   for (let index = 0; index < steps.length; index++) {
     const step = steps[index];
-    if (!isBackgroundTaskStep(step, conversationRunning)) continue;
+    if (!isBackgroundTaskStep(step, turnActive)) continue;
     const td = step.taskDetails && typeof step.taskDetails === 'object' ? step.taskDetails : null;
     const path = localWorkspace(td?.logUri);
     if (!path) continue;
-    const stepIndex = stepIndexOf(step, index);
+    const stepIndex = stepIndexOf(step, stepOffset + index);
     const id = typeof td?.id === 'string' && td.id ? td.id : String(stepIndex);
     paths.set(id, path);
   }
@@ -926,7 +926,7 @@ async function transcript(path: string, knownStat?: {mtimeNs: bigint; size: bigi
 }
 
 /** Checks of a followed conversation; see AntigravityBridge.followedSnapshot. */
-const FOLLOW_CHECK_MS = 200, FOLLOW_FULL_MS = 1300;
+const FOLLOW_CHECK_MS = 200, FOLLOW_FULL_MS = 1300, FOLLOW_STALE_MS = 30_000;
 const PENDING_CREATED_TTL_MS = 60_000, PENDING_CREATED_LIMIT = 32;
 const MODEL_CATALOG_TTL_MS = 30_000;
 const PERMISSION_SETTINGS_TTL_MS = 15_000;
@@ -1012,7 +1012,7 @@ export class AntigravityBridge {
   private queueVersions = new Map<string, number>();
   private queueListeners: ((id: string) => void)[] = [];
   /** Conversations a phone follows (src/connector/thread-hub.ts): their last snapshot, as the watch loop below keeps it. */
-  private followed = new Map<string, {snapshot: Snapshot; checkedAt: number; fullAt: number; stale: boolean}>();
+  private followed = new Map<string, {snapshot: Snapshot; checkedAt: number; fullAt: number; stale: boolean; forceFull?: boolean}>();
   private views = new Map<string, {revision: string; value: Promise<{head: Json; entries: Json[]}>}>();
   /** Conversations just created from web before Antigravity flushes them to `conversation_summaries.db` and transcript logs. */
   private pendingCreated = new Map<string, PendingCreated>();
@@ -1031,6 +1031,7 @@ export class AntigravityBridge {
   private olderScanEmpty = new Map<string, number>();
   /** Active fs.watch handles for followed conversations (closed on idle expiry or bridge.close). */
   private logWatchers = new Map<string, {watcher: FSWatcher; dir: string; until: number; timer?: NodeJS.Timeout}>();
+  private taskWatchers = new Map<string, {watcher: FSWatcher; dir: string; until: number; timer?: NodeJS.Timeout}>();
   private rootWatcher: {watcher: FSWatcher; timer?: NodeJS.Timeout} | null = null;
   private queueTimer: NodeJS.Timeout;
   private closed = false;
@@ -1080,6 +1081,11 @@ export class AntigravityBridge {
       try { entry.watcher.close(); } catch {}
     }
     this.logWatchers.clear();
+    for (const entry of this.taskWatchers.values()) {
+      clearTimeout(entry.timer);
+      try { entry.watcher.close(); } catch {}
+    }
+    this.taskWatchers.clear();
     if (this.rootWatcher) {
       clearTimeout(this.rootWatcher.timer);
       try { this.rootWatcher.watcher.close(); } catch {}
@@ -1097,50 +1103,60 @@ export class AntigravityBridge {
     this.pokeConversation(id);
   }
   private pruneWatchers(now = Date.now()) {
-    for (const [id, entry] of this.logWatchers) {
-      if (entry.until >= now) continue;
-      clearTimeout(entry.timer);
-      try { entry.watcher.close(); } catch {}
-      this.logWatchers.delete(id);
+    for (const map of [this.logWatchers, this.taskWatchers]) {
+      for (const [id, entry] of map) {
+        if (entry.until >= now) continue;
+        clearTimeout(entry.timer);
+        try { entry.watcher.close(); } catch {}
+        map.delete(id);
+      }
     }
-    if (!this.logWatchers.size && this.rootWatcher) {
+    if (!this.logWatchers.size && !this.taskWatchers.size && this.rootWatcher) {
       clearTimeout(this.rootWatcher.timer);
       try { this.rootWatcher.watcher.close(); } catch {}
       this.rootWatcher = null;
     }
   }
+  private watchDir(
+    map: Map<string, {watcher: FSWatcher; dir: string; until: number; timer?: NodeJS.Timeout}>,
+    id: string,
+    dir: string,
+    now: number,
+  ) {
+    const existing = map.get(id);
+    if (existing) {
+      existing.until = now + FS_WATCH_TTL_MS;
+      return;
+    }
+    try {
+      const entry: {watcher: FSWatcher; dir: string; until: number; timer?: NodeJS.Timeout} = {
+        watcher: watch(dir, {persistent: false}, () => {
+          if (this.closed) return;
+          if (entry.timer) return;
+          entry.timer = setTimeout(() => {
+            entry.timer = undefined;
+            if (!this.closed) this.pokeConversation(id);
+          }, 25);
+          entry.timer.unref?.();
+        }),
+        dir,
+        until: now + FS_WATCH_TTL_MS,
+      };
+      entry.watcher.on('error', () => {
+        clearTimeout(entry.timer);
+        try { entry.watcher.close(); } catch {}
+        if (map.get(id) === entry) map.delete(id);
+      });
+      entry.watcher.unref?.();
+      map.set(id, entry);
+    } catch { /* Directory may not exist yet for a conversation. */ }
+  }
   private ensureWatchers(id: string) {
     if (this.closed || !this.queueListeners.length) return;
     const now = Date.now();
     this.pruneWatchers(now);
-    const logsDir = join(this.root, 'brain', id, '.system_generated', 'logs');
-    const existing = this.logWatchers.get(id);
-    if (existing) {
-      existing.until = now + FS_WATCH_TTL_MS;
-    } else {
-      try {
-        const entry: {watcher: FSWatcher; dir: string; until: number; timer?: NodeJS.Timeout} = {
-          watcher: watch(logsDir, {persistent: false}, () => {
-            if (this.closed) return;
-            if (entry.timer) return;
-            entry.timer = setTimeout(() => {
-              entry.timer = undefined;
-              if (!this.closed) this.pokeConversation(id);
-            }, 25);
-            entry.timer.unref?.();
-          }),
-          dir: logsDir,
-          until: now + FS_WATCH_TTL_MS,
-        };
-        entry.watcher.on('error', () => {
-          clearTimeout(entry.timer);
-          try { entry.watcher.close(); } catch {}
-          if (this.logWatchers.get(id) === entry) this.logWatchers.delete(id);
-        });
-        entry.watcher.unref?.();
-        this.logWatchers.set(id, entry);
-      } catch { /* Logs directory may not exist yet for a newly created conversation. */ }
-    }
+    this.watchDir(this.logWatchers, id, join(this.root, 'brain', id, '.system_generated', 'logs'), now);
+    this.watchDir(this.taskWatchers, id, join(this.root, 'brain', id, '.system_generated', 'tasks'), now);
     if (!this.rootWatcher) {
       try {
         const rootEntry: {watcher: FSWatcher; timer?: NodeJS.Timeout} = {
@@ -1563,12 +1579,16 @@ export class AntigravityBridge {
     return this.permissionInflight;
   }
 
-  private rememberConversationMeta(id: string, meta: {trajectoryId?: string; permissionMode?: AntigravityPermissionMode}) {
+  private rememberConversationMeta(
+    id: string,
+    meta: {trajectoryId?: string; permissionMode?: AntigravityPermissionMode},
+    replace = false,
+  ) {
     const prev = this.conversationMetaCache.get(id);
     this.conversationMetaCache.delete(id);
     this.conversationMetaCache.set(id, {
-      trajectoryId: meta.trajectoryId ?? prev?.trajectoryId,
-      permissionMode: meta.permissionMode ?? prev?.permissionMode,
+      trajectoryId: meta.trajectoryId ?? (replace ? undefined : prev?.trajectoryId),
+      permissionMode: replace ? meta.permissionMode : (meta.permissionMode ?? prev?.permissionMode),
       at: Date.now(),
     });
     while (this.conversationMetaCache.size > 64) {
@@ -1618,7 +1638,7 @@ export class AntigravityBridge {
     const summaries = await this.allTrajectories(force);
     const entry = summaries?.[id];
     const meta = trajectoryMetaOf(entry && typeof entry === 'object' ? entry : null);
-    this.rememberConversationMeta(id, meta);
+    if (summaries) this.rememberConversationMeta(id, meta, true);
     return meta;
   }
 
@@ -1644,8 +1664,8 @@ export class AntigravityBridge {
     summary: Summary,
     opts?: {scanOlder?: boolean; previousBackgroundTasks?: AntigravityBackgroundTask[]; previousLogPaths?: string[]},
   ): Promise<{requests: ApprovalRequest[]; backgroundTasks: AntigravityBackgroundTask[]; taskLogPaths: string[]; hubIssue: HubIssueState}> {
-    const activeOrWaiting = summary.status === active || Boolean(summary.notIdle);
-    const conversationRunning = summary.status === active;
+    const activeOrWaiting = summary.status !== idle || Boolean(summary.notIdle);
+    const turnActive = summary.status !== idle;
     const tailOffset = Math.max(0, summary.steps - WAITING_STEP_WINDOW);
     const tail = await this.fetchSteps(id, tailOffset);
     const hubIssue = extractAntigravityIssue(tail, tailOffset);
@@ -1653,28 +1673,41 @@ export class AntigravityBridge {
       return {requests: [], backgroundTasks: [], taskLogPaths: [], hubIssue};
     }
     let requests = extractAntigravityRequests(tail, tailOffset);
-    let backgroundTasks = extractAntigravityBackgroundTasks(tail, tailOffset, conversationRunning);
-    let logPathMap = extractTaskLogPaths(tail, conversationRunning);
+    let backgroundTasks = extractAntigravityBackgroundTasks(tail, tailOffset, turnActive);
+    let logPathMap = extractTaskLogPaths(tail, tailOffset, turnActive);
+    let keptUncheckedOlder = false;
 
     if (summary.notIdle && tailOffset > 0) {
+      const olderPrev = (opts?.previousBackgroundTasks || []).filter(task => task.stepIndex < tailOffset);
       if (opts?.scanOlder === false) {
-        const seen = new Set(backgroundTasks.map(task => task.id));
-        const keptOlder = (opts.previousBackgroundTasks || []).filter(task => task.stepIndex < tailOffset && !seen.has(task.id));
-        backgroundTasks = [...keptOlder, ...backgroundTasks];
+        if (olderPrev.length) {
+          const minPrev = Math.min(...olderPrev.map(task => task.stepIndex));
+          const wider = await this.fetchSteps(id, minPrev);
+          if (wider.length) {
+            requests = extractAntigravityRequests(wider, minPrev);
+            backgroundTasks = extractAntigravityBackgroundTasks(wider, minPrev, turnActive);
+            logPathMap = extractTaskLogPaths(wider, minPrev, turnActive);
+          } else {
+            const seen = new Set(backgroundTasks.map(task => task.id));
+            backgroundTasks = [...olderPrev.filter(task => !seen.has(task.id)), ...backgroundTasks];
+            keptUncheckedOlder = true;
+          }
+        }
       } else {
         const olderTaskSteps = (await this.taskDirOffsets(id)).filter(idx => idx < tailOffset);
-        const alreadyScannedEmpty = !olderTaskSteps.length && this.olderScanEmpty.get(id) === summary.steps;
-        const olderOffset = olderTaskSteps.length
-          ? olderTaskSteps[0]
-          : (!conversationRunning && !backgroundTasks.length && !requests.length && !alreadyScannedEmpty ? 0 : null);
+        const knownOlder = [...olderTaskSteps, ...olderPrev.map(task => task.stepIndex)].sort((a, b) => a - b);
+        const alreadyScannedEmpty = !knownOlder.length && this.olderScanEmpty.get(id) === summary.steps;
+        const olderOffset = knownOlder.length
+          ? knownOlder[0]
+          : (!turnActive && !backgroundTasks.length && !requests.length && !alreadyScannedEmpty ? 0 : null);
         if (olderOffset !== null) {
           const wider = await this.fetchSteps(id, olderOffset);
           if (wider.length) {
             requests = extractAntigravityRequests(wider, olderOffset);
-            backgroundTasks = extractAntigravityBackgroundTasks(wider, olderOffset, conversationRunning);
-            logPathMap = extractTaskLogPaths(wider, conversationRunning);
+            backgroundTasks = extractAntigravityBackgroundTasks(wider, olderOffset, turnActive);
+            logPathMap = extractTaskLogPaths(wider, olderOffset, turnActive);
           }
-          if (olderOffset === 0) {
+          if (olderOffset === 0 && wider.length) {
             if (!backgroundTasks.length && !requests.length) this.olderScanEmpty.set(id, summary.steps);
             else this.olderScanEmpty.delete(id);
           }
@@ -1684,7 +1717,7 @@ export class AntigravityBridge {
       this.olderScanEmpty.delete(id);
     }
 
-    const taskLogPaths = new Set<string>(opts?.scanOlder === false ? (opts.previousLogPaths || []) : []);
+    const taskLogPaths = new Set<string>(keptUncheckedOlder ? (opts?.previousLogPaths || []) : []);
     const tasksDir = join(this.root, 'brain', id, '.system_generated', 'tasks');
     backgroundTasks = await Promise.all(backgroundTasks.map(async task => {
       const logPath = logPathMap.get(task.id) || join(tasksDir, `task-${task.stepIndex}.log`);
@@ -1775,7 +1808,7 @@ export class AntigravityBridge {
           this.hub(this.daemonDir(), 'GetCascadeTrajectorySteps', {cascadeId: id, stepOffset: stepIndex}),
         ]);
         const steps = Array.isArray(stepRes?.steps) ? stepRes.steps : [];
-        const step = steps.find((item: Json, idx: number) => (Number.isSafeInteger(item?.stepIndex) ? item.stepIndex : stepIndex + idx) === stepIndex);
+        const step = steps.find((item: Json, idx: number) => stepIndexOf(item, stepIndex + idx) === stepIndex);
         if (!step || step.status !== waitingStep) {
           throw new BridgeError('changed', '该确认请求已在桌面处理或已过期，请刷新查看');
         }
@@ -1923,7 +1956,7 @@ export class AntigravityBridge {
     }
     const fileStat = file ? {mtimeNs: file.mtimeNs, size: file.size} : null;
     const cwd = singleWorkspace(summary.workspaces);
-    const activeOrWaiting = summary.status === active || Boolean(summary.notIdle);
+    const activeOrWaiting = summary.status !== idle || Boolean(summary.notIdle);
     let resolved = live;
     if (!resolved) {
       const skipMeta = opts?.refreshMeta === false && Boolean(opts.previousLive);
@@ -1961,7 +1994,7 @@ export class AntigravityBridge {
     const revision = JSON.stringify([baseRevision, permissionMode || '', defaultPermissionMode || '', requestFingerprint, taskFingerprint, issueFingerprint]);
     return {
       path, fileStat, revision, baseRevision, live: resolved, turn: turnKey(summary), title: summary.title || '未命名对话', cwd,
-      running: summary.status === active, canSend: canSend(summary) && !requests.length,
+      running: summary.status === active, canceling: summary.status === canceling, canSend: canSend(summary) && !requests.length,
       notIdle: Boolean(summary.notIdle),
       supportsModelSelection: true, supportsImages: true, supportsQueue: true,
       ...(permissionMode ? {permissionMode} : {}),
@@ -2003,7 +2036,7 @@ export class AntigravityBridge {
     let current;
     if (known && previous && previous.revision === known) {
       const local = await this.snapshot(id, previous.live);
-      current = local.baseRevision === previous.baseRevision && !local.running && local.canSend
+      current = local.baseRevision === previous.baseRevision && !local.running && local.canSend && !local.notIdle
         ? local
         : await this.snapshot(id);
     } else {
@@ -2020,12 +2053,13 @@ export class AntigravityBridge {
           ticks++;
           const wasRunning = current.running;
           const nextLocal = await this.snapshot(id, current.live);
-          const activeOrWaiting = nextLocal.running || !nextLocal.canSend;
+          const activeOrWaiting = nextLocal.running || !nextLocal.canSend || nextLocal.notIdle;
           if (nextLocal.baseRevision !== current.baseRevision) {
             current = await this.snapshot(id);
           } else if (activeOrWaiting && ticks % 2 === 0) {
+            const turnActive = nextLocal.running || nextLocal.canceling;
             current = await this.snapshot(id, undefined, {
-              scanOlder: false,
+              scanOlder: !turnActive,
               refreshMeta: false,
               previousLive: current.live,
               previousBackgroundTasks: current.live.backgroundTasks,
@@ -2067,15 +2101,18 @@ export class AntigravityBridge {
   private async followedSnapshot(id: string): Promise<Snapshot> {
     this.ensureWatchers(id);
     const now = Date.now(), previous = this.followed.get(id);
-    if (previous && !previous.stale && now - previous.checkedAt < FOLLOW_CHECK_MS) return previous.snapshot;
+    if (previous && !previous.stale && !previous.forceFull && now - previous.checkedAt < FOLLOW_CHECK_MS) return previous.snapshot;
     let current: Snapshot, fullAt = previous?.fullAt ?? now;
-    if (!previous) current = await this.snapshot(id);
-    else {
+    if (!previous || previous.forceFull || now - previous.checkedAt >= FOLLOW_STALE_MS) {
+      current = await this.snapshot(id);
+      fullAt = now;
+    } else {
       const local = await this.snapshot(id, previous.snapshot.live);
       if (local.baseRevision !== previous.snapshot.baseRevision) {current = await this.snapshot(id);fullAt = now;}
-      else if ((local.running || !local.canSend) && now - previous.fullAt >= FOLLOW_FULL_MS) {
+      else if ((local.running || !local.canSend || local.notIdle) && now - previous.fullAt >= FOLLOW_FULL_MS) {
+        const turnActive = local.running || local.canceling;
         current = await this.snapshot(id, undefined, {
-          scanOlder: false,
+          scanOlder: !turnActive,
           refreshMeta: false,
           previousLive: previous.snapshot.live,
           previousBackgroundTasks: previous.snapshot.live.backgroundTasks,
@@ -2086,7 +2123,7 @@ export class AntigravityBridge {
       // A turn that just ended sends the next queued message at once, as watching did.
       if (previous.snapshot.running && !current.running && current.canSend && this.queue.queued(id).length) this.drainSoon(id);
     }
-    this.followed.set(id, {snapshot: current, checkedAt: now, fullAt, stale: false});
+    this.followed.set(id, {snapshot: current, checkedAt: now, fullAt, stale: false, forceFull: false});
     if (this.followed.size > 16) this.followed.delete(this.followed.keys().next().value!);
     return current;
   }
@@ -2114,6 +2151,13 @@ export class AntigravityBridge {
     version: async id => (await this.followedSnapshot(id)).revision,
     state: async id => this.followedView(id, await this.followedSnapshot(id)),
     watch: poke => {this.queueListeners.push(poke);},
+    refresh: id => {
+      this.conversationMetaCache.delete(id);
+      this.olderScanEmpty.delete(id);
+      this.trajectoriesCache = undefined;
+      const entry = this.followed.get(id);
+      if (entry) { entry.stale = true; entry.forceFull = true; }
+    },
   };
 
   async handle(action: string, p: Json): Promise<Json> {
@@ -2164,7 +2208,7 @@ export class AntigravityBridge {
       };
       try {
         return this.index(db=>{
-          const rows=db.prepare(`SELECT conversation_id AS id, title, status, last_modified_time AS modified FROM conversation_summaries
+          const rows=db.prepare(`SELECT conversation_id AS id, title, status, not_fully_idle AS notIdle, last_modified_time AS modified FROM conversation_summaries
             WHERE (? IS NULL OR EXISTS (SELECT 1 FROM ${workspaceEntries} AS workspace WHERE workspace.value=?))
             AND (? IS NULL OR instr(lower(coalesce(nullif(title,''),'未命名对话')),lower(?))>0)
             ORDER BY last_modified_time DESC, conversation_id LIMIT 51 OFFSET ?`).all(project,project,search,search,offset);
@@ -2172,7 +2216,7 @@ export class AntigravityBridge {
             db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text' ORDER BY uri`).all().map(({uri})=>uri),
           ):undefined;
           const seenIds = new Set(rows.map(row => String(row.id)));
-          const extra: {id: string; title: string; running: boolean; updatedAt: number}[] = [];
+          const extra: {id: string; title: string; running: boolean; background?: number | boolean; updatedAt: number}[] = [];
           for (const pendingId of [...this.pendingCreated.keys()]) {
             const pending = this.pendingEntry(pendingId);
             if (!pending) continue;
@@ -2187,15 +2231,35 @@ export class AntigravityBridge {
             extra.push({
               id: pendingId,
               title,
-              running: pending.summary.status === active,
+              running: pending.summary.status === active || pending.summary.status === canceling,
               updatedAt: Date.parse(pending.summary.modified) || pending.createdAt,
             });
           }
           extra.sort((a, b) => b.updatedAt - a.updatedAt);
+          const backgroundFor = (rowId: string, rowRunning: boolean, notIdle: unknown): number | boolean | undefined => {
+            if (rowRunning || !notIdle) return undefined;
+            const snap = this.followed.get(rowId)?.snapshot;
+            const live = snap && !snap.running && !snap.canceling && snap.notIdle ? snap.live : undefined;
+            if (live) {
+              if (live.backgroundTasks.length > 0) return live.backgroundTasks.length;
+              if (live.requests.length > 0) return undefined;
+            }
+            return true;
+          };
           const listed = [
             ...extra,
-            ...rows.map(row => ({id: row.id, title: row.title || '未命名对话',
-              running: row.status === active, updatedAt: Date.parse(String(row.modified)) || 0})),
+            ...rows.map(row => {
+              const rowId = String(row.id);
+              const rowRunning = row.status === active || row.status === canceling;
+              const background = backgroundFor(rowId, rowRunning, row.notIdle);
+              return {
+                id: row.id,
+                title: row.title || '未命名对话',
+                running: rowRunning,
+                ...(background !== undefined ? {background} : {}),
+                updatedAt: Date.parse(String(row.modified)) || 0,
+              };
+            }),
           ];
           return {
             data: listed.slice(0, 50),

@@ -103,6 +103,8 @@ type Props={
   mobileHeaderRight?:ReactNode;
   /** Optional computer status badge rendered in the new-chat welcome view. */
   welcomeMeta?:ReactNode;
+  /** Reports this open conversation's live running/background state so the sidebar updates immediately. */
+  onLiveStatus?:(status:{id:string;running:boolean;background:number|boolean}|null)=>void;
 };
 
 function headerPoint(element:HTMLElement):MenuPoint{const rect=element.getBoundingClientRect();return {x:rect.right,y:rect.bottom+8,align:'end'};}
@@ -112,7 +114,7 @@ export function BackgroundTasksBar({tasks,onOpen}:{tasks:AntigravityBackgroundTa
   const label=count?`${count} 个后台任务运行中`:'后台任务运行中';
   const title=tasks[0]?.title||'';
   return <button type="button" className="bg-tasks-bar" onClick={onOpen} aria-label={count?`查看 ${count} 个运行中的后台任务`:'查看运行中的后台任务'}>
-    <i className="dot online" aria-hidden="true"/>
+    <i className="dot background-dot" aria-hidden="true"/>
     <span className="bg-tasks-count">{label}</span>
     {title&&<span className="bg-tasks-title">{title}</span>}
     <span className="bg-tasks-open">查看<Icon name="chevron" size={14}/></span>
@@ -271,7 +273,7 @@ export function AntigravityPanel(props:Props){
   },[hidingMissing,connected,synced.view]);
   async function refresh(quiet=false){
     if(!connected||creating)return;
-    if(synced.engine.current){if(!quiet)setError('');await synced.engine.current.open();return;}
+    if(synced.engine.current){if(!quiet)setError('');await synced.engine.current.open(!quiet);return;}
     if(lock.current)return;lock.current=true;setBusy(true);
     try{
       const value=await request.current('antigravity.read',{conversationId});
@@ -337,6 +339,9 @@ export function AntigravityPanel(props:Props){
             if(!next.base)return next;
             return {
               ...current,...next,
+              permissionMode:next.permissionMode,
+              defaultPermissionMode:next.defaultPermissionMode,
+              canceling:Boolean(next.canceling),
               requests:next.requests||[],
               backgroundTasks:next.backgroundTasks||[],
               queuedMessages:next.queuedMessages||[],
@@ -416,8 +421,15 @@ export function AntigravityPanel(props:Props){
     }
     finally{lock.current=false;if(alive.current){setBusy(false);setSubmitting(false);}}
   }
+  const canceling=Boolean(view?.canceling);
   const backgroundTasks:AntigravityBackgroundTask[]=Array.isArray(view?.backgroundTasks)?view.backgroundTasks:[];
-  const hasBackgroundTasks=backgroundTasks.length>0||Boolean(!view?.running&&view?.notIdle);
+  const hasBackgroundTasks=backgroundTasks.length>0||Boolean(!view?.running&&!canceling&&view?.canSend&&view?.notIdle);
+  const liveStatusRef=useRef(props.onLiveStatus);liveStatusRef.current=props.onLiveStatus;
+  const liveBgCount=backgroundTasks.length,liveHasBg=hasBackgroundTasks,liveRunning=Boolean(view?.running||canceling),liveKnown=!creating&&connected&&Boolean(view)&&!cached;
+  useEffect(()=>{
+    liveStatusRef.current?.(liveKnown?{id:conversationId,running:liveRunning,background:liveBgCount||(liveHasBg?true:0)}:null);
+  },[conversationId,liveKnown,liveRunning,liveBgCount,liveHasBg]);
+  useEffect(()=>()=>{liveStatusRef.current?.(null);},[]);
   const supportsQueue=Boolean(view?.supportsQueue);
   const queued:QueuedMessage[]=Array.isArray(view?.queuedMessages)?view.queuedMessages:[];
   async function mutate(action:'send'|'stop',options?:{killBackgroundTasks?:boolean}){
@@ -527,11 +539,14 @@ export function AntigravityPanel(props:Props){
   const requests:ApprovalRequest[]=view?.requests||[];
   const pendingShown=outgoing&&!optimisticFlatDelivered(outgoing,view?.messages)?outgoing:null;
   const senders=useMemo(()=>view?.messages?view.messages.map((message:{sender?:{id:string;name:string}})=>message.sender):[],[view?.messages]);
-  useTurnNotice(key,view&&!cached?Boolean(view.running):undefined,requests.length,()=>({service:'Antigravity',title:view?.title,
-    reply:view?.messages?.filter((message:Json)=>message.role==='assistant'&&message.text).at(-1)?.text}));
+  useTurnNotice(key,view&&!cached?Boolean(view.running||canceling):undefined,requests.length,()=>({
+    service:'Antigravity',title:view?.title,
+    ...(view?.issue?.kind==='error'?{status:'failed',error:antigravityIssueText(view.issue,true)}:view?.issue?.kind==='interrupted'?{status:'interrupted'}:{}),
+    reply:view?.messages?.filter((message:Json)=>message.role==='assistant'&&message.text).at(-1)?.text,
+  }));
   const antigravityStatus=(
     !connected?(cached?'与电脑的连接中断，以下是上次打开时的内容。':connectionLost):watchError||
-    (pending&&busy&&!pendingShown?'正在等待电脑确认…':cached?'正在同步最新内容…':issue&&issue.kind!=='error'?antigravityIssueText(issue,view!.canSend):
+    (pending&&busy&&!pendingShown?'正在等待电脑确认…':cached?'正在同步最新内容…':canceling?'正在停止…':issue&&issue.kind!=='error'?antigravityIssueText(issue,view!.canSend):
       view&&!view.running&&!view.canSend&&!requests.length?'正在等待 Antigravity…':'')
   );
   useLayoutEffect(()=>{if(stick.current&&scroll.current)scroll.current.scrollTop=scroll.current.scrollHeight;},[view,pendingShown,antigravityStatus]);

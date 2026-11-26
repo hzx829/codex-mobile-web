@@ -66,6 +66,7 @@ export class ThreadSync {
   private seq=-1;
   private opening:Promise<void>|null=null;
   private again=false;
+  private forceRefresh=false;
   private buffered:SyncFrame[]=[];
   private listeners=new Set<(view:SyncView)=>void>();
   private stops:(()=>void)[]=[];
@@ -112,18 +113,20 @@ export class ThreadSync {
   }
 
   /** Asks for what this view lacks. Calls during one ask make one more after it. */
-  open():Promise<void> {
+  open(refresh=false):Promise<void> {
     if(this.closed||!this.link.online())return Promise.resolve();
+    if(refresh)this.forceRefresh=true;
     if(this.opening){this.again=true;return this.opening;}
     const run=(async()=>{
       do{
         this.again=false;
+        const force=this.forceRefresh;this.forceRefresh=false;
         // Frames that arrive while asking wait for the answer, which says where they continue from.
         this.epoch='';this.seq=-1;
         const have:Record<string,string>={};
         for(const [id,entry] of this.entries)if(entry.rev)have[id]=entry.rev;
         try{
-          const snapshot:SyncSnapshot=await this.link.request('sync.open',{service:this.service,threadId:this.threadId,have,...this.order.length?{from:this.order[0]}:{}});
+          const snapshot:SyncSnapshot=await this.link.request('sync.open',{service:this.service,threadId:this.threadId,have,...this.order.length?{from:this.order[0]}:{},...force?{refresh:true}:{}});
           if(this.closed)return;
           this.applySnapshot(snapshot);
         }catch(error){

@@ -18,6 +18,8 @@ export interface ThreadSource {
   state(threadId: string): Promise<ThreadState>;
   /** Lets the source say a thread changed, so an open one is checked before the next poll. */
   watch?(poke: (threadId: string) => void): void;
+  /** Called when a client explicitly requests a fresh read via `sync.open({refresh: true})`. */
+  refresh?(threadId: string): void;
   /** How many of the newest entries a phone is sent and frames are compared over; turns default to 60. */
   window?: number;
   /** Entries before `before`, for sources whose state holds only the newest; the hub pages the state otherwise. */
@@ -97,6 +99,7 @@ export class ThreadHub {
     const thread = this.thread(payload, true);
     thread.until = this.now() + WATCH_MS;
     this.startPolling();
+    if (payload.refresh === true) this.source(thread.service).refresh?.(thread.id);
     // Phones already following get what changed first, so this answer and their frames agree on the frame number.
     await this.refresh(thread);
     const state = thread.state!, all = state.entries;
