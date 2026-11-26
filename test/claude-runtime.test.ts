@@ -260,6 +260,50 @@ test('the connector default permission mode: skip prompts by default, and switch
   }
 });
 
+test('a session with background work keeps its process past the idle period, so the work can report back', async () => {
+  let finish!: () => void;
+  const finished = new Promise<void>(resolve => {finish = resolve;});
+  const query: QueryFn = ({prompt}) => {
+    const id = randomUUID();
+    async function* run(): AsyncGenerator<any> {
+      yield {type: 'system', subtype: 'init', session_id: id};
+      for await (const input of prompt) {
+        void input;
+        yield {type: 'system', subtype: 'session_state_changed', state: 'running', session_id: id};
+        yield {type: 'system', subtype: 'background_tasks_changed', session_id: id,
+          tasks: [{task_id: 'deploy', task_type: 'local_bash', description: 'Deploy'}, {task_id: 'watch', task_type: 'local_bash', description: 'Watch', ambient: true}]};
+        yield {type: 'result', subtype: 'success', session_id: id, errors: []};
+        yield {type: 'system', subtype: 'session_state_changed', state: 'idle', session_id: id};
+        // The deploy ends after the turn did; its notice starts a turn of its own, as Claude Code does.
+        await finished;
+        yield {type: 'system', subtype: 'background_tasks_changed', session_id: id, tasks: [{task_id: 'watch', task_type: 'local_bash', description: 'Watch', ambient: true}]};
+        yield {type: 'system', subtype: 'session_state_changed', state: 'running', session_id: id};
+        yield {type: 'result', subtype: 'success', session_id: id, errors: []};
+        yield {type: 'system', subtype: 'session_state_changed', state: 'idle', session_id: id};
+      }
+    }
+    const generator = run() as any;
+    generator.close = () => {};
+    return generator;
+  };
+  const runtime = new ClaudeRuntime(async () => query, () => undefined, 30);
+  try {
+    const session = await runtime.start({cwd: tmpdir()});
+    await runtime.waitForId(session);
+    runtime.send(session, 'deploy in the background', []);
+    await until(() => session.background.size, size => size === 1);
+    await until(() => session.running, running => !running);
+    runtime.release(session);
+    await wait(150);
+    assert.equal(session.closed, false, 'neither the idle timer nor a release ends a process with background work');
+    assert.equal(session.inbox.closed, false);
+    finish();
+    await until(() => session.background.size, size => size === 0);
+    await until(() => session.closed, Boolean);
+    assert.equal(session.inbox.closed, true, 'released once only ambient work is left and the quiet period passes');
+  } finally {runtime.close();}
+});
+
 test('Claude Code executable and messages', () => {
   assert.equal(findClaude({CLAUDE_CODE_BIN: 'C:/tools/claude.exe'}, () => false, 'win32'), 'C:/tools/claude.exe');
   assert.equal(findClaude({PATH: 'C:\\a;C:\\b', USERPROFILE: 'C:\\Users\\me'}, path => path === join('C:\\b', 'claude.exe'), 'win32'), join('C:\\b', 'claude.exe'));

@@ -110,6 +110,12 @@ export class LiveSession {
   error = '';
   requests = new Map<string, Pending>();
   idleTimer?: NodeJS.Timeout;
+  /**
+   * Background work (shell commands, Monitors, subagents) still live in this process, by task ID. Its
+   * completion notice wakes the session for another turn, and only this process can deliver it, so the
+   * process is kept while any remains.
+   */
+  background = new Set<string>();
   closed = false;
   interrupting = false;
   hint = '';
@@ -169,7 +175,7 @@ export function userMessage(text: string, images: string[], priority?: 'now' | '
 
 /**
  * Runs Claude Code sessions for the phone through the Agent SDK. One process per controlled session;
- * it is released after a quiet period so the terminal or IDE can resume the same session.
+ * it is released after a quiet period with no background work left, so the terminal or IDE can resume the same session.
  */
 export class ClaudeRuntime extends EventEmitter {
   private live = new Map<string, LiveSession>();
@@ -192,7 +198,7 @@ export class ClaudeRuntime extends EventEmitter {
   private touch(session: LiveSession) {
     session.version++;
     clearTimeout(session.idleTimer);
-    if (!session.running && !session.requests.size && !session.inbox.size && !session.closed) {
+    if (!session.running && !session.requests.size && !session.inbox.size && !session.background.size && !session.closed) {
       session.idleTimer = setTimeout(() => this.release(session), this.idleMs);
       session.idleTimer.unref?.();
     }
@@ -281,6 +287,9 @@ export class ClaudeRuntime extends EventEmitter {
           if (PERMISSION_MODES.includes(m.permissionMode)) session.permissionMode = m.permissionMode;
         } else if (m.type === 'system' && m.subtype === 'session_state_changed') {
           session.running = m.state !== 'idle' || session.inbox.size > 0;
+        } else if (m.type === 'system' && m.subtype === 'background_tasks_changed' && Array.isArray(m.tasks)) {
+          // The full live set each time; ambient ones (watchers) are not work anyone waits on.
+          session.background = new Set(m.tasks.filter((task: Json) => !task?.ambient).map((task: Json) => String(task?.task_id)));
         } else if (m.type === 'result') {
           // Each result ends a turn; 'turn' listeners record its tokens against the sender of the turn.
           const opId = session.turnOpId;session.turnOpId = session.nowOpId;session.nowOpId = undefined;
@@ -343,7 +352,7 @@ export class ClaudeRuntime extends EventEmitter {
   }
 
   release(session: LiveSession) {
-    if (session.running || session.requests.size || session.inbox.size) return;
+    if (session.running || session.requests.size || session.inbox.size || session.background.size) return;
     session.inbox.close();
     setTimeout(() => {if (!session.closed) {try {session.query.close();} catch {}this.closeSession(session);}}, 10_000).unref?.();
   }
