@@ -108,9 +108,19 @@ function DiffCard({diff,open}:{diff:string;open:()=>void}){
 }
 function UserMessage({sender,text,editReason,disabled,blocked,copy,resend,children}:{sender?:TeamMember;text:string;editReason:string;disabled:boolean;blocked:(reason:string)=>void;copy:()=>void;resend:(text:string)=>Promise<void>;children:ReactNode}){
   const [editing,setEditing]=useState(false),[draft,setDraft]=useState(text);
-  const submitting=useRef(false);
-  return <div className="user-entry">{editing?<form className="edit-message" onSubmit={e=>{e.preventDefault();if(!draft.trim()||submitting.current)return;submitting.current=true;void resend(draft).finally(()=>{submitting.current=false;});}}>
-    <textarea aria-label="编辑消息" autoFocus value={draft} onChange={e=>setDraft(e.target.value)} disabled={disabled} rows={4}/>
+  const submitting=useRef(false),form=useRef<HTMLFormElement>(null),area=useRef<HTMLTextAreaElement>(null);
+  // Focusing the textarea only scrolls the textarea itself into view, which leaves 重发 below
+  // the fold. Show the whole form, and again once the phone keyboard has shrunk the viewport.
+  useEffect(()=>{
+    if(!editing)return;
+    const box=area.current;box?.focus({preventScroll:true});box?.setSelectionRange(box.value.length,box.value.length);
+    const reveal=()=>form.current?.scrollIntoView({block:'nearest'});reveal();
+    const viewport=window.visualViewport,until=Date.now()+1000,resized=()=>{if(Date.now()<until)requestAnimationFrame(reveal);};
+    viewport?.addEventListener('resize',resized);
+    return()=>viewport?.removeEventListener('resize',resized);
+  },[editing]);
+  return <div className="user-entry">{editing?<form ref={form} className="edit-message" onSubmit={e=>{e.preventDefault();if(!draft.trim()||submitting.current)return;submitting.current=true;void resend(draft).finally(()=>{submitting.current=false;});}}>
+    <textarea ref={area} aria-label="编辑消息" value={draft} onChange={e=>setDraft(e.target.value)} disabled={disabled} rows={4}/>
     <p>将覆盖这条消息及后续聊天；原附件会保留，文件改动不会撤销。</p>
     <div><button type="button" disabled={disabled} onClick={()=>setEditing(false)}>取消</button><button className="primary" disabled={disabled||!draft.trim()}>重发</button></div>
   </form>:<>
