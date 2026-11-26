@@ -164,6 +164,8 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .dot.unread-dot { background: var(--link); }
 .session-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; color: var(--fg); }
 .session-name .dot { margin: 0 7px 2px 0; width: 6px; height: 6px; }
+.session-name .dot.running-dot { animation: pulse-dot 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .session-name .dot.running-dot { animation: none; } }
 .session-row time { font-size: 12px; color: var(--fg-3); flex-shrink: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .empty-list { color: var(--fg-3); font-size: 13px; padding: 8px 8px 24px; line-height: 1.8; }
 /* On wide screens search and new chat sit at the top of the sidebar, like Codex desktop. */

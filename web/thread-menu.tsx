@@ -4,6 +4,7 @@ import type {Json} from '../src/shared/types';
 import type {ThreadPreference} from './thread-preferences';
 import {Popover,type MenuPoint} from './popover';
 import {OwnerBadge,type TeamMemberRef} from './team';
+import {clearRunDone,useRunMark} from './thread-run-state';
 
 export function relativeTime(value:number){
   if(!value)return '';
@@ -11,17 +12,18 @@ export function relativeTime(value:number){
   return minutes<1?'刚刚':minutes<60?`${minutes}分钟`:minutes<1440?`${Math.floor(minutes/60)}小时`:`${Math.floor(minutes/1440)}天`;
 }
 
-export function ThreadRow({thread,selected,disabled=false,preference={},time,active=thread.status?.type==='active',open,menu}:{thread:Json;selected:boolean;disabled?:boolean;preference?:ThreadPreference;time:string;active?:boolean;open:()=>void;menu?:(point:MenuPoint)=>void}){
+export function ThreadRow({thread,selected,disabled=false,preference={},time,active=thread.status?.type==='active',open,menu}:{thread:Json;selected:boolean;disabled?:boolean;preference?:ThreadPreference;time:string;active?:boolean|null;open:()=>void;menu?:(point:MenuPoint)=>void}){
   const timer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined),start=useRef<MenuPoint|null>(null),held=useRef(false);
   const cancel=()=>{clearTimeout(timer.current);start.current=null;};
   useEffect(()=>cancel,[]);
-  return <button className={`session-row${selected?' selected':''}${preference.unread?' unread':''}`} disabled={disabled} aria-haspopup={menu?'dialog':undefined} aria-current={selected||undefined} onClick={()=>{if(!held.current)open();}}
+  const run=useRunMark(thread.id,active,selected);
+  return <button className={`session-row${selected?' selected':''}${preference.unread?' unread':''}`} disabled={disabled} aria-haspopup={menu?'dialog':undefined} aria-current={selected||undefined} onClick={()=>{if(!held.current){clearRunDone(thread.id);open();}}}
     onContextMenu={menu?e=>{e.preventDefault();cancel();if(!held.current){held.current=true;menu({x:e.clientX,y:e.clientY});}}:undefined}
     onPointerDown={menu?e=>{held.current=false;cancel();if(e.pointerType==='mouse'||!e.isPrimary)return;const point={x:e.clientX,y:e.clientY};start.current=point;timer.current=setTimeout(()=>{held.current=true;menu(point);},500);}:undefined}
     onPointerMove={e=>{if(start.current&&Math.hypot(e.clientX-start.current.x,e.clientY-start.current.y)>10)cancel();}}
     onPointerUp={cancel} onPointerCancel={cancel} onPointerLeave={cancel}
     onKeyDown={menu?e=>{if(e.key==='Enter'||e.key===' ')held.current=false;if(e.key==='ContextMenu'||e.key==='F10'&&e.shiftKey){e.preventDefault();const rect=e.currentTarget.getBoundingClientRect();menu({x:rect.left+16,y:rect.bottom});}}:undefined}>
-    <span className="session-name">{active&&<i className="dot online"/>}{preference.unread&&<i className="dot unread-dot"/>}{thread.title}</span>
+    <span className="session-name">{run&&<i className={`dot online${run==='running'?' running-dot':''}`} title={run==='running'?'正在运行':'已完成'}/>}{preference.unread&&<i className="dot unread-dot"/>}{thread.title}</span>
     <span className="session-meta">{preference.pinned&&<Icon name="pin" size={14}/>}<time>{time}</time><OwnerBadge owner={thread.owner}/></span>
   </button>;
 }

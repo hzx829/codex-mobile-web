@@ -1122,7 +1122,8 @@ function App(){
   const codexFoldable=!searchQuery&&!archived,codexRecentCollapsed=codexFoldable&&collapsedGroups.includes('recent');
   const codexFilterControl=me?<OwnerFilterControl me={me} value={ownerFilter} members={codexMembers} change={setOwnerFilter}/>:null;
   const codexCanManage=canManageProjects&&Boolean(info?.projectApi);
-  const isCodexActive=(s:Json)=>connected&&(view&&s.id===selected&&view.id===s.id&&!cachedShown?Boolean(view.running):s.status?.type==='active');
+  // Unknown (null) while offline, so a stale list neither shows a run nor marks one finished.
+  const isCodexActive=(s:Json)=>!connected?null:(view&&s.id===selected&&view.id===s.id&&!cachedShown?Boolean(view.running):s.status?.type==='active');
   const codexOverlayInert=Boolean(sheet||threadMenu||statusPanel||modelPoint||permissionPoint||compactPreview&&preview);
   const codexSidebarInert=codexOverlayInert||Boolean(isMobile&&!drawerOpen);
   const codexMainInert=codexOverlayInert||Boolean(isMobile&&drawerOpen);

@@ -62,7 +62,7 @@ type ProjectTreeProps={
   onLoadMore:(project:ProjectItem)=>void;
   selectedThread:string;
   threadPreferences:ThreadPreferences;
-  isThreadActive:(thread:Json)=>boolean;
+  isThreadActive:(thread:Json)=>boolean|null;
   onOpenThread:(thread:Json)=>void;
   onThreadMenu:(thread:Json,point:MenuPoint)=>void;
   onNewChat?:(project:ProjectItem)=>void;
