@@ -18,6 +18,8 @@ const digest=(value:Buffer)=>createHash('sha256').update(value).digest('hex');
 const [packageArg,sourceArg]=process.argv.slice(2);
 if(!packageArg){console.error('用法：npm run deploy:package-connector -- <安装包文件夹> [connector.mjs]');process.exit(2);}
 const source=resolve(sourceArg||'build/connector.mjs');
+const repoStartScript=resolve('scripts/windows/start.ps1');
+const repoSessionCli=resolve('build/session-cli.mjs');
 await access(resolve(packageArg,'.local/config.json')).catch(()=>{console.error('这个文件夹不是已配置的安装包（缺少 .local/config.json）');process.exit(2);});
 // bridgeRequest and the start/stop scripts work on the current folder, so everything below runs inside the package.
 process.chdir(resolve(packageArg));
@@ -42,7 +44,11 @@ let receipt:Json={at:new Date().toISOString(),status:'failed',package:process.cw
 try{
   const next=await readFile(source),nextHash=digest(next);
   const before=await info();
-  if(before.runtime?.bundleHash===nextHash){receipt={...receipt,status:'unchanged',runtime:before.runtime};}
+  if(before.runtime?.bundleHash===nextHash){
+    await copyFile(repoStartScript,resolve('scripts/windows/start.ps1')).catch(()=>{});
+    await copyFile(repoSessionCli,resolve('build/session-cli.mjs')).catch(()=>{});
+    receipt={...receipt,status:'unchanged',runtime:before.runtime};
+  }
   else{
     const current=await readFile(target),currentHash=digest(current);
     if(currentHash!==before.runtime?.bundleHash)throw Error('包里的 connector.mjs 和正在运行的构建不一致');
@@ -54,6 +60,8 @@ try{
     await ps('stop.ps1',['-Mode','connector','-ExpectedPid',String(previousPid)]);
     try{
       await copyFile(source,target);
+      await copyFile(repoStartScript,resolve('scripts/windows/start.ps1')).catch(()=>{});
+      await copyFile(repoSessionCli,resolve('build/session-cli.mjs')).catch(()=>{});
       await ps('start.ps1',['-Mode','connector','-NoOpen']);
       const after=await info();
       if(after.runtime?.bundleHash!==nextHash)throw Error('新连接器构建未生效');

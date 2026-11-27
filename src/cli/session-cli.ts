@@ -320,17 +320,44 @@ async function ensureSpawnedDaemon(homeDir: string, env: NodeJS.ProcessEnv): Pro
     if (probe !== null) return;
   }
   const scriptPath = fileURLToPath(import.meta.url);
-  const child = spawn(
-    process.execPath,
-    [...process.execArgv, '--disable-warning=ExperimentalWarning', scriptPath, '--daemon', '--home-dir', homeDir],
-    {
+  const daemonArgs = [...process.execArgv, '--disable-warning=ExperimentalWarning', scriptPath, '--daemon', '--home-dir', homeDir];
+  let spawnedViaWmi = false;
+  if (process.platform === 'win32') {
+    try {
+      const cmdLine = [process.execPath, ...daemonArgs]
+        .map(part => `"${String(part).replace(/"/g, '\\"')}"`)
+        .join(' ');
+      const psScript = `
+        $ErrorActionPreference = 'Stop'
+        $envBlock = [string[]]@(Get-ChildItem env: | Where-Object { $_.Name -and $_.Name -notlike '=*' -and $null -ne $_.Value } | ForEach-Object { "$($_.Name)=$($_.Value)" })
+        $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0; EnvironmentVariables = $envBlock }
+        $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $env:CMW_DAEMON_CMD; CurrentDirectory = $env:CMW_DAEMON_CWD; ProcessStartupInformation = $startup }
+        if (-not $r -or $r.ReturnValue -ne 0) { exit 1 }
+      `;
+      const psExe = join(process.env.SystemRoot || 'C:\\Windows', 'System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+      await new Promise<void>((resolveSpawn, rejectSpawn) => {
+        const helper = spawn(psExe, ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+          windowsHide: true,
+          stdio: 'ignore',
+          env: {...env, CMW_DAEMON_CMD: cmdLine, CMW_DAEMON_CWD: homeDir},
+        });
+        helper.on('error', rejectSpawn);
+        helper.on('exit', code => (code === 0 ? resolveSpawn() : rejectSpawn(new Error(`WMI exit ${code}`))));
+      });
+      spawnedViaWmi = true;
+    } catch {
+      spawnedViaWmi = false;
+    }
+  }
+  if (!spawnedViaWmi) {
+    const child = spawn(process.execPath, daemonArgs, {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
       env: {...env},
-    },
-  );
-  child.unref();
+    });
+    child.unref();
+  }
 
   const deadline = Date.now() + 6_000;
   while (Date.now() < deadline) {
