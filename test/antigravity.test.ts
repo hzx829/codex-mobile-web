@@ -64,7 +64,7 @@ test('consecutive Antigravity tools share a Codex activity group without swallow
   assert.deepEqual(groups[0].map(item=>item.text),['read_file','run_command','read_file']);
   const html=renderToStaticMarkup(createElement(AntigravityMessages,{messages,running:true,openFile:()=>{},openPreview:()=>{},onFollowup:()=>{}}));
   assert.equal(html.match(/class="activity-group"/g)?.length,3);
-  assert.match(html,/运行记录 · 3 项/);assert.match(html,/正在处理 · 1 项/);assert.match(html,/<strong>完成<\/strong>/);
+  assert.match(html,/已使用 3 个工具/);assert.match(html,/正在处理 · 1 项/);assert.match(html,/<strong>完成<\/strong>/);
   assert.doesNotMatch(html,/read_file|class="activity-list"/);
 });
 

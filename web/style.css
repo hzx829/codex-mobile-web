@@ -292,6 +292,7 @@ small, .muted { color: var(--fg-3); font-size: 13px; line-height: 1.6; }
 .activity-group { margin: 2px 0 12px; }
 .activity-group > summary { padding: 4px 0; }
 .activity-label { flex-shrink: 0; color: var(--fg-2); }
+.activity-label.activity-done { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-group:not([open]) > summary { overflow: hidden; white-space: nowrap; }
 .activity-list { border-left: 1px solid var(--line-strong); margin: 4px 0 4px 5px; padding: 2px 0 2px 14px; }
 .activity-excerpt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-3); }

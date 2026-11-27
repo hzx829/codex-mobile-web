@@ -39,7 +39,7 @@ export const ConversationTurn=memo(function ConversationTurn({turn,running,sourc
   const lastReply=turn.items.filter(item=>item.role==='assistant').at(-1);
   const editReason=editBlocked||(running?'请等当前任务结束后再改写':!turnFinished(turn.status)?'此轮状态尚未同步，请刷新后重试':source==='history'?'当前会话只读，请先在这里继续':turn.items.filter(item=>item.role==='user').length!==1?'这一轮有多条用户消息，暂不能改写':source==='desktop'&&!latestUser?'桌面会话目前只能改写最近一条用户消息':'');
   return <section className="turn">
-    {groups.map((group,index)=>group[0].role==='activity'?<ActivityGroup key={`activity-${index}`} items={group} running={turn.status==='inProgress'} openFile={openFile}/>:group.map(item=>{
+    {groups.map((group,index)=>group[0].role==='activity'?<ActivityGroup key={`activity-${index}`} items={group} running={turn.status==='inProgress'&&index===groups.length-1} openFile={openFile}/>:group.map(item=>{
       if(item.role==='status')return <ConversationStatus key={item.id}>{item.text}</ConversationStatus>;
       // Only the reply still being written is paced; everything else paints as it is.
       const text=item.role==='assistant'&&item===lastReply&&turn.status==='inProgress'
@@ -94,9 +94,24 @@ export function RunningStep({turn,waiting}:{turn?:TurnView;waiting?:string}){
   return <div className="running-step" role="status"><span className="running-step-mark" aria-hidden="true"/><span className="running-step-text shimmer">{label}</span>
     {Number.isFinite(since)&&<span className="running-step-time" aria-hidden="true">{elapsedLabel(now-since)}</span>}</div>;
 }
+/** What each kind of call did, once done, as Claude's own app words it: count → "已运行 2 个命令". */
+const doneLabel:Record<string,(n:number)=>string>={commandExecution:n=>`已运行 ${n} 个命令`,fileChange:n=>`已编辑 ${n} 个文件`,fileRead:n=>`已读取 ${n} 个文件`,codeSearch:()=>'已搜索代码',webSearch:()=>'已搜索网页',mcpToolCall:n=>`已使用 ${n} 个工具`,toolCall:n=>`已使用 ${n} 个工具`,reasoning:()=>'已思考',contextCompaction:()=>'已整理上下文',plan:()=>'已更新计划',subagent:n=>`已运行 ${n} 个子任务`};
+/** A finished group's summary: each kind of call in the order it first ran, files counted once each. */
+export function activitySummary(items:MessageItem[]){
+  const counts=new Map<string,Set<string>>();
+  for(const item of items){
+    const key=doneLabel[item.type]?(item.type==='toolCall'?'mcpToolCall':item.type):'other';
+    const seen=counts.get(key)||new Set<string>();counts.set(key,seen);
+    for(const entry of (item.type==='fileChange'||item.type==='fileRead')&&item.files?.length?item.files:[item.id])seen.add(entry);
+  }
+  return [...counts].map(([key,seen])=>key==='other'?`${seen.size} 项其他活动`:doneLabel[key](seen.size)).join('，');
+}
+/** Only the group still being added to is "正在处理"; once anything follows it, it says what it did. */
 export function ActivityGroup({items,running,openFile}:{items:MessageItem[];running:boolean;openFile:(path:string)=>void}){
   const [open,setOpen]=useState(false);
-  return <details className="activity-group" onToggle={e=>setOpen(e.currentTarget.open)}><summary><span className={running?'activity-label shimmer':'activity-label'}>{running?'正在处理':'运行记录'} · {items.length} 项</span><span className="activity-excerpt">{activityLabel[items.at(-1)!.type]||'任务活动'}</span><Icon name="chevron" size={14}/></summary>{open&&<div className="activity-list">{items.map(item=><ActivityItem key={item.id} item={item} openFile={openFile}/>)}</div>}</details>;
+  return <details className="activity-group" onToggle={e=>setOpen(e.currentTarget.open)}><summary>{running
+    ?<><span className="activity-label shimmer">正在处理 · {items.length} 项</span><span className="activity-excerpt">{activityLabel[items.at(-1)!.type]||'任务活动'}</span></>
+    :<span className="activity-label activity-done">{activitySummary(items)}</span>}<Icon name="chevron" size={14}/></summary>{open&&<div className="activity-list">{items.map(item=><ActivityItem key={item.id} item={item} openFile={openFile}/>)}</div>}</details>;
 }
 const ActivityItem=memo(function ActivityItem({item,openFile}:{item:MessageItem;openFile:(path:string)=>void}){
   const [open,setOpen]=useState(false);
