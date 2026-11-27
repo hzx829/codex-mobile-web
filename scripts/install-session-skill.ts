@@ -4,7 +4,8 @@ import {join, resolve} from 'node:path';
 
 const repoRoot = resolve(import.meta.dirname, '..');
 const bundlePath = join(repoRoot, 'build', 'session-cli.mjs');
-const skillSrc = join(repoRoot, 'skills', 'cross-app-session', 'SKILL.md');
+const claudeToAgSkillSrc = join(repoRoot, 'skills', 'cross-app-session', 'SKILL.md');
+const agToClaudeSkillSrc = join(repoRoot, 'skills', 'antigravity-to-claude', 'SKILL.md');
 
 const bundleStat = await stat(bundlePath).catch(() => null);
 if (!bundleStat?.isFile()) {
@@ -14,9 +15,15 @@ if (!bundleStat?.isFile()) {
 const home = homedir();
 const binDir = join(home, '.local', 'bin');
 const claudeSkillDir = join(home, '.claude', 'skills', 'antigravity');
+const agGlobalConfigSkillDir = join(home, '.gemini', 'config', 'skills', 'claude-code');
+const agLegacySkillDir = join(home, '.gemini', 'antigravity', 'skills', 'claude-code');
 
-await mkdir(binDir, {recursive: true});
-await mkdir(claudeSkillDir, {recursive: true});
+await Promise.all([
+  mkdir(binDir, {recursive: true}),
+  mkdir(claudeSkillDir, {recursive: true}),
+  mkdir(agGlobalConfigSkillDir, {recursive: true}),
+  mkdir(agLegacySkillDir, {recursive: true}),
+]);
 
 const posixBundle = bundlePath.replace(/\\/g, '/');
 
@@ -32,7 +39,11 @@ if (process.platform !== 'win32') {
   await chmod(shPath, 0o755);
 }
 
-await copyFile(skillSrc, join(claudeSkillDir, 'SKILL.md'));
+await Promise.all([
+  copyFile(claudeToAgSkillSrc, join(claudeSkillDir, 'SKILL.md')),
+  copyFile(agToClaudeSkillSrc, join(agGlobalConfigSkillDir, 'SKILL.md')),
+  copyFile(agToClaudeSkillSrc, join(agLegacySkillDir, 'SKILL.md')),
+]);
 
 console.log(JSON.stringify({
   installed: true,
@@ -40,4 +51,8 @@ console.log(JSON.stringify({
   cliSh: shPath,
   bundle: bundlePath,
   claudeSkill: join(claudeSkillDir, 'SKILL.md'),
+  antigravitySkills: [
+    join(agGlobalConfigSkillDir, 'SKILL.md'),
+    join(agLegacySkillDir, 'SKILL.md'),
+  ],
 }, null, 2));

@@ -1,14 +1,23 @@
+import {spawn} from 'node:child_process';
 import {mkdirSync} from 'node:fs';
 import {readFile} from 'node:fs/promises';
 import {homedir} from 'node:os';
 import {join, resolve} from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 import {fileURLToPath} from 'node:url';
 import {AntigravityBridge} from '../connector/antigravity.js';
 import {ClaudeCodeBridge, sdkQuery} from '../connector/claude-code.js';
 import {ClaudeRuntime} from '../connector/claude-runtime.js';
 import {Control} from '../connector/control.js';
 import {Ledger, actorOf, requestActor} from '../connector/ledger.js';
-import {discoverAndRequest, globalControlDir} from '../connector/local-control.js';
+import {
+  LocalControlServer,
+  SESSION_DAEMON_FILE,
+  discoverAndRequest,
+  globalControlDir,
+  postControlRequest,
+  readLocalControl,
+} from '../connector/local-control.js';
 import {
   AntigravitySessionDriver,
   ClaudeSessionDriver,
@@ -33,29 +42,34 @@ export interface CliIo {
   stdinText?: () => Promise<string>;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
+  spawnDaemon?: boolean;
 }
 
-const HELP_TEXT = `cmw-session — 跨原生应用（Antigravity / Codex / Claude Code）统一会话控制 CLI
+const DEFAULT_DAEMON_IDLE_MS = 10 * 60_000;
+
+const HELP_TEXT = `cmw-session — 跨原生应用（Antigravity / Claude Code / Codex）统一双向会话控制 CLI
 
 用法：
-  cmw-session start [--to antigravity|codex|claude] [--cwd <目录>] [--prompt <文本> | --prompt-file <路径> | --stdin]
+  cmw-session start [--to antigravity|claude|codex] [--cwd <目录>] [--prompt <文本> | --prompt-file <路径> | --stdin]
                     [--autonomy turbo|auto|default|review] [--model <模型>] [--wait] [--until turn_end|fully_idle]
                     [--timeout <秒>] [--actor <发起方名称>] [--json]
-  cmw-session wait <sessionId> [--to antigravity|codex|claude] [--until turn_end|fully_idle]
+  cmw-session wait <sessionId> [--to antigravity|claude|codex] [--until turn_end|fully_idle]
                    [--timeout <秒>] [--after-send] [--after-assistant <消息ID>] [--json]
-  cmw-session get <sessionId> [--to antigravity|codex|claude] [--json]
-  cmw-session send <sessionId> [--to antigravity|codex|claude] [--mode queue|steer|now]
+  cmw-session get <sessionId> [--to antigravity|claude|codex] [--json]
+  cmw-session send <sessionId> [--to antigravity|claude|codex] [--mode queue|steer|now]
                    [--prompt <文本> | --prompt-file <路径> | --stdin] [--autonomy turbo|auto|default|review]
                    [--wait] [--timeout <秒>] [--json]
-  cmw-session respond <sessionId> <requestId> <allow|allowSession|deny> [--to antigravity|codex|claude]
+  cmw-session respond <sessionId> <requestId> <allow|allowSession|deny> [--to antigravity|claude|codex]
                       [--answer "<问题>=<答案>"] [--json]
-  cmw-session stop <sessionId> [--to antigravity|codex|claude] [--kill-background] [--json]
-  cmw-session list [--to antigravity|codex|claude|all] [--cwd <目录>] [--search <关键词>] [--limit <数量>] [--json]
+  cmw-session stop <sessionId> [--to antigravity|claude|codex] [--kill-background] [--json]
+  cmw-session list [--to antigravity|claude|codex|all] [--cwd <目录>] [--search <关键词>] [--limit <数量>] [--json]
+  cmw-session daemon-stop [--json]
 
 默认行为：
-  • --to 默认为 antigravity
+  • --to 默认为 antigravity（传 --to claude 即投递给本机 Claude Code，--to codex 投递给 Codex）
   • start 的 --cwd 默认为当前工作目录，--autonomy 默认为 turbo（最高自动权限，尽量不打断）
-  • 优先连接正在运行的 codex-mobile-web 本机连接器（共享手机与桌面实时状态）；若连接器未启动则自动在进程内直连目标应用
+  • 自动识别调用方身份（Antigravity / Claude Code / Codex），优先通过运行中的连接器共享状态；
+    连接器未启动或版本较旧时，Antigravity 直连本机 Hub，Claude Code / Codex 自动拉起空闲自退出的本机守护进程保持会话存活
 `;
 
 interface ParsedArgs {
@@ -65,7 +79,7 @@ interface ParsedArgs {
 }
 
 const BOOLEAN_FLAGS = new Set([
-  'help', 'h', 'json', 'wait', 'stdin', 'after-send', 'kill-background',
+  'help', 'h', 'json', 'wait', 'stdin', 'after-send', 'kill-background', 'daemon', 'no-daemon',
 ]);
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -117,6 +131,15 @@ function flagLast(parsed: ParsedArgs, name: string): string | undefined {
   return values?.length ? values[values.length - 1] : undefined;
 }
 
+/** Detects which native agent app invoked `cmw-session` from standard environment markers. */
+export function detectDefaultActorName(env: NodeJS.ProcessEnv, targetService?: string): string {
+  if (env.CMW_ACTOR_NAME?.trim()) return env.CMW_ACTOR_NAME.trim();
+  if (env.ANTIGRAVITY_CONVERSATION_ID || env.ANTIGRAVITY_LS_ADDRESS) return 'Antigravity';
+  if (env.CLAUDECODE || env.CLAUDE_CODE_ENTRYPOINT || env.CLAUDE_CODE_SESSION_ID) return 'Claude Code';
+  if (env.CODEX_THREAD_ID || env.CODEX_SANDBOX || env.CODEX_CI) return 'Codex';
+  return targetService === 'claude' ? 'Antigravity' : 'Claude Code';
+}
+
 async function defaultReadStdin(): Promise<string> {
   if (process.stdin.isTTY) return '';
   const chunks: Buffer[] = [];
@@ -157,6 +180,172 @@ function parseAnswers(rawList: string[] | undefined): Record<string, string> | u
     out[entry.slice(0, idx).trim()] = entry.slice(idx + 1).trim();
   }
   return out;
+}
+
+function needsPersistentRuntime(action: string, payload: Json): boolean {
+  const svc = payload.service || 'antigravity';
+  if (svc !== 'claude' && svc !== 'codex') return false;
+  return action === 'agent.session.start'
+    || action === 'agent.session.send'
+    || action === 'agent.session.wait'
+    || action === 'agent.session.respond'
+    || action === 'agent.session.stop';
+}
+
+/**
+ * Starts a lightweight loopback `LocalControlServer` (`~/.codex-mobile-web/session-daemon.json`) that keeps
+ * `ClaudeRuntime` / `Control` child processes alive across separate CLI invocations (`start` -> `wait` -> `send`)
+ * when no full `codex-mobile-web` connector with `agent.session.*` is running. Exits automatically once idle.
+ */
+export async function startInProcessSessionDaemon(options: {
+  homeDir: string;
+  env?: NodeJS.ProcessEnv;
+  idleTimeoutMs?: number;
+  queryLoader?: () => Promise<any>;
+}): Promise<{close: () => void; port: number}> {
+  const env = options.env || process.env;
+  const controlDir = globalControlDir(options.homeDir);
+  mkdirSync(controlDir, {recursive: true});
+  const ledger = new Ledger(join(controlDir, 'cli-operations.sqlite'));
+  const safety = {home: options.homeDir, dataDir: controlDir, env};
+
+  const agRoot = env.CMW_ANTIGRAVITY_HOME || join(options.homeDir, '.gemini', 'antigravity');
+  const agBridge = new AntigravityBridge(agRoot, ledger);
+
+  const claudeRuntime = new ClaudeRuntime(options.queryLoader ?? sdkQuery, undefined, undefined, undefined, 'bypassPermissions');
+  const claudeBridge = new ClaudeCodeBridge(
+    ledger,
+    env.CLAUDE_CONFIG_DIR || join(options.homeDir, '.claude'),
+    undefined,
+    undefined,
+    claudeRuntime,
+  );
+
+  let codexControl: Control | undefined;
+  let codexStarting: Promise<Control> | undefined;
+  const ensureCodex = async (): Promise<Control> => {
+    if (codexControl) return codexControl;
+    if (!codexStarting) {
+      codexStarting = (async () => {
+        const ctrl = new Control(ledger);
+        await ctrl.start().catch(() => {});
+        codexControl = ctrl;
+        hub.register(new CodexSessionDriver(ctrl, safety));
+        return ctrl;
+      })();
+    }
+    return codexStarting;
+  };
+
+  const hub = new SessionHub([
+    new AntigravitySessionDriver(agBridge, safety),
+    new ClaudeSessionDriver(claudeBridge, safety),
+  ]);
+
+  let inFlight = 0;
+  let lastActivityAt = Date.now();
+  let closed = false;
+
+  const shutdown = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(idleTimer);
+    server.close();
+    try {agBridge.close();} catch {}
+    try {claudeBridge.close();} catch {}
+    try {codexControl?.close();} catch {}
+    try {ledger.close();} catch {}
+  };
+
+  const server = new LocalControlServer({
+    dataDir: controlDir,
+    fileName: SESSION_DAEMON_FILE,
+    getStatus: async () => ({
+      relay: 'unreachable',
+      connector: 'offline',
+      teamMode: false,
+      ownToken: false,
+      machineId: 'session-daemon',
+      machineName: 'SessionDaemon',
+      services: ['antigravity', 'claude', 'codex'],
+      activeTasks: [
+        ...claudeBridge.activeTasks(),
+        ...agBridge.activeTasks(),
+        ...(codexControl?.activeTasks() || []),
+      ],
+      pendingUsage: 0,
+    }),
+    handleRequest: async (action, payload, actor) => {
+      if (action === 'daemon.shutdown') {
+        setImmediate(shutdown);
+        return {stopped: true};
+      }
+      inFlight++;
+      lastActivityAt = Date.now();
+      try {
+        if (payload?.service === 'codex' || payload?.service === 'all') {
+          await ensureCodex();
+        }
+        return await requestActor.run(actorOf(actor), () => hub.handle(action, payload));
+      } finally {
+        inFlight--;
+        lastActivityAt = Date.now();
+      }
+    },
+  });
+
+  const record = await server.start();
+  const idleLimit = options.idleTimeoutMs ?? DEFAULT_DAEMON_IDLE_MS;
+  const checkInterval = Math.min(30_000, Math.max(250, Math.floor(idleLimit / 4)));
+  const idleTimer = setInterval(() => {
+    if (closed || inFlight > 0) return;
+    if (claudeBridge.busy || claudeRuntime.hasBackground || agBridge.busy || (codexControl?.activeTasks().length || 0) > 0) {
+      lastActivityAt = Date.now();
+      return;
+    }
+    if (Date.now() - lastActivityAt >= idleLimit) {
+      shutdown();
+    }
+  }, checkInterval);
+  idleTimer.unref?.();
+
+  return {close: shutdown, port: record.port};
+}
+
+async function ensureSpawnedDaemon(homeDir: string, env: NodeJS.ProcessEnv): Promise<void> {
+  const controlDir = globalControlDir(homeDir);
+  const existing = await readLocalControl(controlDir, SESSION_DAEMON_FILE);
+  if (existing) {
+    const probe = await postControlRequest(existing, 'agent.session.list', {service: 'antigravity', limit: 1}, {timeoutMs: 1500}).catch(() => null);
+    if (probe !== null) return;
+  }
+  const scriptPath = fileURLToPath(import.meta.url);
+  const child = spawn(
+    process.execPath,
+    [...process.execArgv, '--disable-warning=ExperimentalWarning', scriptPath, '--daemon', '--home-dir', homeDir],
+    {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: {...env},
+    },
+  );
+  child.unref();
+
+  const deadline = Date.now() + 6_000;
+  while (Date.now() < deadline) {
+    await delay(80);
+    const rec = await readLocalControl(controlDir, SESSION_DAEMON_FILE);
+    if (!rec) continue;
+    try {
+      const res = await fetch(`http://127.0.0.1:${rec.port}/status`, {
+        headers: {Authorization: `Bearer ${rec.secret}`},
+        signal: AbortSignal.timeout(1000),
+      });
+      if (res.ok) return;
+    } catch {}
+  }
+  throw new BridgeError('unavailable', '未能启动本机会话守护进程，请检查 Node 环境后重试');
 }
 
 async function executeFallbackAction(
@@ -203,8 +392,16 @@ async function executeFallbackAction(
 export async function dispatchSessionAction(
   action: string,
   payload: Json,
-  opts: {dataDir?: string; homeDir: string; env: NodeJS.ProcessEnv; timeoutMs: number; actor: Json},
+  opts: {
+    dataDir?: string;
+    homeDir: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs: number;
+    actor: Json;
+    spawnDaemon?: boolean;
+  },
 ): Promise<Json> {
+  // 1. Prefer the full running `codex-mobile-web` Connector when reachable and up-to-date.
   try {
     const viaConnector = await discoverAndRequest(action, payload, {
       dataDir: opts.dataDir,
@@ -218,8 +415,33 @@ export async function dispatchSessionAction(
     if (!(error instanceof BridgeError) || error.code !== 'unsupported') {
       throw error;
     }
-    // Older running connector predating `agent.session.*`: seamlessly fall through to in-process SessionHub.
   }
+
+  // 2. Check if a standalone `session-daemon` is already active for this user.
+  const controlDir = globalControlDir(opts.homeDir);
+  const existingDaemon = await readLocalControl(controlDir, SESSION_DAEMON_FILE);
+  if (existingDaemon) {
+    const viaDaemon = await postControlRequest(existingDaemon, action, payload, {
+      timeoutMs: opts.timeoutMs,
+      actor: opts.actor,
+    });
+    if (viaDaemon !== null) return viaDaemon;
+  }
+
+  // 3. If targeting Claude Code or Codex (whose SDK/app-server processes must outlive `start`), auto-spawn `session-daemon`.
+  if (opts.spawnDaemon !== false && needsPersistentRuntime(action, payload)) {
+    await ensureSpawnedDaemon(opts.homeDir, opts.env);
+    const spawnedRecord = await readLocalControl(controlDir, SESSION_DAEMON_FILE);
+    if (spawnedRecord) {
+      const viaSpawned = await postControlRequest(spawnedRecord, action, payload, {
+        timeoutMs: opts.timeoutMs,
+        actor: opts.actor,
+      });
+      if (viaSpawned !== null) return viaSpawned;
+    }
+  }
+
+  // 4. Direct in-process execution (used for Antigravity Hub RPCs and read-only `list`/`get` calls).
   return executeFallbackAction(action, payload, opts);
 }
 
@@ -281,30 +503,58 @@ export async function runSessionCli(argv: string[], io: CliIo = {}): Promise<num
   const out = io.stdout ?? ((text: string) => process.stdout.write(text + '\n'));
   const err = io.stderr ?? ((text: string) => process.stderr.write(text + '\n'));
   const env = io.env ?? process.env;
-  const homeDir = io.homeDir ?? homedir();
-  const baseCwd = io.cwd ?? process.cwd();
   const readStdin = io.stdinText ?? defaultReadStdin;
 
   let jsonMode = false;
   try {
     const parsed = parseArgs(argv);
     jsonMode = parsed.booleans.has('json');
+    const homeDir = flagLast(parsed, 'home-dir') || io.homeDir || homedir();
+    const baseCwd = io.cwd ?? process.cwd();
+
+    if (parsed.booleans.has('daemon')) {
+      const idleSec = Number(flagLast(parsed, 'idle-sec') || 600);
+      await startInProcessSessionDaemon({
+        homeDir,
+        env,
+        idleTimeoutMs: Math.max(1000, Math.floor(idleSec * 1000)),
+      });
+      return 0;
+    }
+
     const cmd = parsed.positionals[0];
     if (!cmd || cmd === 'help' || parsed.booleans.has('help')) {
       out(HELP_TEXT.trimEnd());
       return 0;
     }
 
+    if (cmd === 'daemon-stop') {
+      const rec = await readLocalControl(globalControlDir(homeDir), SESSION_DAEMON_FILE);
+      if (rec) {
+        await postControlRequest(rec, 'daemon.shutdown', {}, {timeoutMs: 3000}).catch(() => null);
+      }
+      out(jsonMode ? JSON.stringify({stopped: Boolean(rec)}) : `[DAEMON STOPPED: ${Boolean(rec)}]`);
+      return 0;
+    }
+
     const service = flagLast(parsed, 'to') || flagLast(parsed, 'service') || 'antigravity';
     const dataDir = flagLast(parsed, 'data-dir');
-    const actorName = flagLast(parsed, 'actor') || env.CMW_ACTOR_NAME || 'Claude Code';
+    const actorName = flagLast(parsed, 'actor') || detectDefaultActorName(env, service);
     const actorId = `agent:${actorName.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'caller'}`;
     const actor = {userId: actorId, name: actorName};
     const timeoutSec = Number(flagLast(parsed, 'timeout') || (cmd === 'wait' || parsed.booleans.has('wait') ? 1800 : 45));
     const timeoutMs = Math.max(1000, Math.floor((Number.isFinite(timeoutSec) && timeoutSec > 0 ? timeoutSec : 60) * 1000));
+    const spawnDaemon = io.spawnDaemon !== false && !parsed.booleans.has('no-daemon');
 
     const call = (action: string, payload: Json) =>
-      dispatchSessionAction(action, payload, {dataDir, homeDir, env, timeoutMs: timeoutMs + 5_000, actor});
+      dispatchSessionAction(action, payload, {
+        dataDir,
+        homeDir,
+        env,
+        timeoutMs: timeoutMs + 5_000,
+        actor,
+        spawnDaemon,
+      });
 
     if (cmd === 'list') {
       const cwd = flagLast(parsed, 'cwd');

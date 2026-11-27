@@ -7,13 +7,17 @@ import {appendFile, mkdir, mkdtemp, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {removeTestTemp} from '../scripts/test-temp.js';
-import {runSessionCli} from '../src/cli/session-cli.js';
+import {
+  detectDefaultActorName,
+  runSessionCli,
+  startInProcessSessionDaemon,
+} from '../src/cli/session-cli.js';
 import {AntigravityBridge, toAntigravityFileUri} from '../src/connector/antigravity.js';
 import {ClaudeCodeBridge, type ClaudeSessions} from '../src/connector/claude-code.js';
 import {ClaudeRuntime, type QueryFn} from '../src/connector/claude-runtime.js';
 import {Control} from '../src/connector/control.js';
 import {Ledger, actorOf, requestActor} from '../src/connector/ledger.js';
-import {LocalControlServer} from '../src/connector/local-control.js';
+import {LocalControlServer, SESSION_DAEMON_FILE, globalControlDir, readLocalControl} from '../src/connector/local-control.js';
 import {
   AntigravitySessionDriver,
   ClaudeSessionDriver,
@@ -552,4 +556,139 @@ test('cmw-session CLI routes via published LocalControlServer and falls back in-
   assert.equal(parsedList.sessions.length, 1);
   assert.equal(parsedList.sessions[0].sessionId, fallbackId);
   assert.equal(parsedList.sessions[0].title, '本地直连会话');
+});
+
+test('Antigravity -> Claude Code keeps ClaudeRuntime alive via session-daemon across separate start and wait CLI calls', async t => {
+  assert.equal(detectDefaultActorName({ANTIGRAVITY_CONVERSATION_ID: '0d47a0ee'}), 'Antigravity');
+  assert.equal(detectDefaultActorName({CLAUDECODE: '1'}), 'Claude Code');
+  assert.equal(detectDefaultActorName({CODEX_THREAD_ID: 't1'}), 'Codex');
+
+  const root = await mkdtemp(join(tmpdir(), 'cmw-ag-to-claude-'));
+  const home = join(root, 'home');
+  const projectDir = join(home, 'Projects', 'backend-service');
+  const claudeDir = join(home, '.claude');
+  await mkdir(projectDir, {recursive: true});
+  await mkdir(join(claudeDir, 'projects', 'backend-service'), {recursive: true});
+
+  const claudeSessionId = '33333333-4444-4555-8666-777777777777';
+  const transcriptPath = join(claudeDir, 'projects', 'backend-service', `${claudeSessionId}.jsonl`);
+  const prevClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = claudeDir;
+  let finishTurn!: () => void;
+  const turnGate = new Promise<void>(resolveGate => { finishTurn = resolveGate; });
+
+  const query: QueryFn = ({prompt, options}) => {
+    assert.equal(options?.permissionMode, 'bypassPermissions');
+    async function* run(): AsyncGenerator<any> {
+      yield {type: 'system', subtype: 'init', session_id: claudeSessionId};
+      for await (const msg of prompt) {
+        const promptText = Array.isArray(msg.message.content)
+          ? msg.message.content.map((c: any) => c.text || '').join('')
+          : String(msg.message.content || '');
+        const baseEntry = {
+          sessionId: claudeSessionId,
+          cwd: projectDir,
+          version: '2.1.0',
+          gitBranch: 'main',
+          userType: 'external',
+          isSidechain: false,
+        };
+        await writeFile(transcriptPath, JSON.stringify({
+          ...baseEntry,
+          type: 'user',
+          uuid: '00000000-0000-4000-8000-000000000001',
+          parentUuid: null,
+          timestamp: '2026-11-27T07:00:00.000Z',
+          message: {role: 'user', content: promptText},
+        }) + '\n');
+        await turnGate;
+        await appendFile(transcriptPath, JSON.stringify({
+          ...baseEntry,
+          type: 'assistant',
+          uuid: '00000000-0000-4000-8000-000000000002',
+          parentUuid: '00000000-0000-4000-8000-000000000001',
+          timestamp: '2026-11-27T07:00:01.000Z',
+          message: {id: 'msg-ag-1', role: 'assistant', content: [{type: 'text', text: 'Claude Code 已完成接口实现与回归测试。'}]},
+        }) + '\n');
+        yield {type: 'result', subtype: 'success', session_id: claudeSessionId, errors: []};
+      }
+    }
+    const gen = run() as any;
+    gen.close = () => {};
+    gen.interrupt = async () => {};
+    return gen;
+  };
+
+  const env = {
+    ANTIGRAVITY_CONVERSATION_ID: '0d47a0ee-0975-44b0-be86-ca32c1fb724a',
+    CLAUDE_CONFIG_DIR: claudeDir,
+    CMW_ANTIGRAVITY_HOME: join(home, '.gemini', 'antigravity'),
+  };
+  const daemon = await startInProcessSessionDaemon({
+    homeDir: home,
+    env,
+    idleTimeoutMs: 60_000,
+    queryLoader: async () => query,
+  });
+  t.after(async () => {
+    daemon.close();
+    if (prevClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prevClaudeConfig;
+    await removeTestTemp(root);
+  });
+
+  // Step 1: Antigravity runs foreground `cmw-session start --to claude` -> returns immediately while turn is still running!
+  const startOut: string[] = [];
+  const startErr: string[] = [];
+  const startCode = await runSessionCli(
+    ['start', '--to', 'claude', '--cwd', projectDir, '--stdin'],
+    {
+      homeDir: home,
+      env,
+      spawnDaemon: false,
+      stdinText: async () => '实现 /api/health 接口并补齐单元测试',
+      stdout: text => startOut.push(text),
+      stderr: text => startErr.push(text),
+    },
+  );
+  assert.equal(startCode, 0, startErr.join('\n'));
+  assert.match(startOut[0], /\[SESSION STARTED\]/);
+  assert.match(startOut[0], /service: claude/);
+  assert.match(startOut[0], new RegExp(`session_id: ${claudeSessionId}`));
+  assert.match(startOut[0], /phase: running/);
+  assert.match(startOut[0], /autonomy: turbo/);
+
+  // Step 2: Antigravity runs background `cmw-session wait <id> --to claude --after-send` -> wakes up when Claude completes!
+  const waitOut: string[] = [];
+  const waitErr: string[] = [];
+  const waitPromise = runSessionCli(
+    ['wait', claudeSessionId, '--to', 'claude', '--after-send', '--timeout', '10'],
+    {
+      homeDir: home,
+      env,
+      spawnDaemon: false,
+      stdout: text => waitOut.push(text),
+      stderr: text => waitErr.push(text),
+    },
+  );
+
+  setTimeout(() => finishTurn(), 80);
+  const waitCode = await waitPromise;
+  assert.equal(waitCode, 0, waitErr.join('\n'));
+  assert.match(waitOut[0], /\[SESSION WAIT: COMPLETED\]/);
+  assert.match(waitOut[0], /Claude Code 已完成接口实现与回归测试。/);
+
+  // Step 3: Verify sender was recorded as "Antigravity", then stop daemon cleanly.
+  const stopCode = await runSessionCli(['daemon-stop'], {homeDir: home, env});
+  assert.equal(stopCode, 0);
+  await new Promise(resolveWait => setTimeout(resolveWait, 30));
+  assert.equal(await readLocalControl(globalControlDir(home), SESSION_DAEMON_FILE), null);
+
+  const checkLedger = new Ledger(join(globalControlDir(home), 'cli-operations.sqlite'));
+  try {
+    const senders = checkLedger.senders('claude', claudeSessionId);
+    assert.equal(senders[0]?.sender.name, 'Antigravity');
+  } finally {
+    checkLedger.close();
+  }
 });

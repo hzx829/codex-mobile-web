@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {stat} from 'node:fs/promises';
+import {basename} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {
   isSessionAutonomy,
@@ -484,6 +485,10 @@ export class ClaudeSessionDriver implements SessionDriver {
     autonomy: SessionAutonomy;
   }) {
     const cwd = await ensureExistingSafeCwd(input.cwd, this.safety);
+    await this.bridge.registerProject(deriveSubOpId(opId, 'claude-project'), {
+      name: (basename(cwd) || 'Project').slice(0, 80),
+      path: cwd,
+    }).catch(() => {});
     const permissionMode = autonomyToClaude(input.autonomy);
     const raw = unwrapLedgerResult(await this.bridge.handle('claude.create', {
       opId,

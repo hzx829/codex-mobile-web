@@ -7,6 +7,7 @@ import {join, resolve} from 'node:path';
 import {BridgeError, type Json} from '../shared/types.js';
 
 export const LOCAL_CONTROL_FILE = 'local-control.json';
+export const SESSION_DAEMON_FILE = 'session-daemon.json';
 export const GLOBAL_CONTROL_DIRNAME = '.codex-mobile-web';
 const MAX_BODY_BYTES = 512 * 1024;
 
@@ -108,14 +109,16 @@ export class LocalControlServer {
 
   constructor(private readonly options: {
     dataDir: string;
+    fileName?: string;
     publishGlobal?: boolean;
     homeDir?: string;
     getStatus: () => Promise<LocalControlStatus>;
     handleRequest: (action: string, payload: Json, actor?: Json) => Promise<Json>;
   }) {
-    this.filePath = join(options.dataDir, LOCAL_CONTROL_FILE);
+    const recordName = options.fileName || LOCAL_CONTROL_FILE;
+    this.filePath = join(options.dataDir, recordName);
     this.globalFilePath = options.publishGlobal
-      ? join(globalControlDir(options.homeDir), LOCAL_CONTROL_FILE)
+      ? join(globalControlDir(options.homeDir), recordName)
       : null;
     this.server = createServer((req, res) => {void this.dispatch(req, res);});
     // Allow long-running `agent.session.wait` calls over loopback without hitting Node's 5-minute default timeout.
@@ -189,9 +192,9 @@ export class LocalControlServer {
   }
 }
 
-export async function readLocalControl(dataDir: string): Promise<LocalControlRecord | null> {
+export async function readLocalControl(dataDir: string, fileName = LOCAL_CONTROL_FILE): Promise<LocalControlRecord | null> {
   try {
-    const raw = JSON.parse(await readFile(join(dataDir, LOCAL_CONTROL_FILE), 'utf8')) as Partial<LocalControlRecord>;
+    const raw = JSON.parse(await readFile(join(dataDir, fileName), 'utf8')) as Partial<LocalControlRecord>;
     if (!Number.isInteger(raw?.port) || raw.port! <= 0 || typeof raw?.secret !== 'string' || !raw.secret) return null;
     return {
       pid: Number(raw.pid) || 0,
