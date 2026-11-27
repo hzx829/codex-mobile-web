@@ -20,6 +20,7 @@ import { GUEST_ENTRYPOINT, NoDesktop, preflight, returnLogins, useGuestHomes } f
 import { checkClaude, checkCodex, type CheckResult, type ClaudeLoader } from './guest-checks.js';
 import { setWorkspace } from './project.js';
 import { WorkspaceManager, createProjectsHandler, defaultProjectRoot } from './workspace.js';
+import { AntigravitySessionDriver, ClaudeSessionDriver, CodexSessionDriver, SessionHub, type SessionDriver } from './session-hub.js';
 import { recordClaudeTurn } from './usage-meter.js';
 import { ClaudeVoiceAuth, ClaudeVoiceStreams } from './claude-voice.js';
 import { traced } from './trace.js';
@@ -121,6 +122,20 @@ if(!guest){
 }
 const useCodex=available.includes('codex');
 if(useCodex)hub.register('codex',control.syncSource);
+const sessionSafety={dataDir:config.dataDir};
+const sessionDrivers:SessionDriver[]=[
+  ...(useCodex?[new CodexSessionDriver(control,sessionSafety)]:[]),
+  ...(claudeCodeBridge?[new ClaudeSessionDriver(claudeCodeBridge,sessionSafety)]:[]),
+  ...(antigravityBridge?[new AntigravitySessionDriver(antigravityBridge,sessionSafety)]:[]),
+];
+const sessionHub=new SessionHub(sessionDrivers);
+if(!guest){
+  bridges.push({
+    prefix:'agent',
+    handle:(action,payload)=>sessionHub.handle(action,payload),
+    mutations:['agent.session.start','agent.session.send','agent.session.respond','agent.session.stop'],
+  });
+}
 const workspace=new WorkspaceManager({projectRoots:config.projectRoots,dataDir:config.dataDir});
 const handleProjects=createProjectsHandler({
   workspace,
@@ -290,6 +305,7 @@ control.on('change',(id:string|null)=>{
 });
 const localControl=new LocalControlServer({
   dataDir:config.dataDir,
+  publishGlobal:!guest,
   getStatus:async()=>{
     const info=useCodex?await Promise.race([services.handle({id:'local-status',action:'info',payload:{}}).catch(()=>null),new Promise<null>(r=>setTimeout(()=>r(null),2500))]):null;
     const claudeCheck=claudeCodeBridge?.artifacts?await Promise.race([claudeCodeBridge.handle('claude.artifact.login',{op:'check'}).catch(()=>null),new Promise<null>(r=>setTimeout(()=>r(null),2000))]):null;
@@ -317,7 +333,7 @@ const localControl=new LocalControlServer({
       defaultProjectRoot:defaultProjectRoot(),
     };
   },
-  handleRequest:(action,payload)=>services.handle({id:'local',action:action as BridgeRequest['action'],payload}),
+  handleRequest:(action,payload,actor)=>requestActor.run(actorOf(actor),()=>services.handle({id:'local',action:action as BridgeRequest['action'],payload})),
 });
 void localControl.start().catch(error=>console.error('本机控制通道未能启动：',error instanceof Error?error.message:error));
 connect();

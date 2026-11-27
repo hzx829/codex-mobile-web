@@ -18,6 +18,8 @@
     "relay": "tsx src/server/main.ts",
     "connector": "tsx src/connector/main.ts",
     "setup": "tsx scripts/setup.ts",
+    "session": "tsx src/cli/session-cli.ts",
+    "install:session-skill": "tsx scripts/install-session-skill.ts",
     "probe": "tsx scripts/probe.ts",
     "test": "tsx --test test/*.test.ts",
     "check": "tsc --noEmit && npm test && npm run test:native",

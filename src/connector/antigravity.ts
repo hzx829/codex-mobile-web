@@ -2,7 +2,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {createHash} from 'node:crypto';
 import {watch, type FSWatcher} from 'node:fs';
 import {open, readFile, readdir, stat} from 'node:fs/promises';
-import {dirname, isAbsolute, join} from 'node:path';
+import {basename, dirname, isAbsolute, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {projectPathKey} from '../shared/project-paths.js';
 import {readProjectFile, downloadProjectFile, openProjectDownload} from './project.js';
@@ -1184,6 +1184,39 @@ export class AntigravityBridge {
     }
   }
   private drainSoon(id: string) { if (!this.closed) setImmediate(() => { this.drain(id).catch(() => {}); }); }
+
+  /** True while a newly sent message has not yet advanced the conversation's SQLite turn key. */
+  isTurnAwaitingDispatch(id: string): boolean {
+    const summary = this.summaryOrNull(id);
+    return summary ? this.isAwaitingDispatch(id, summary) : false;
+  }
+
+  /** Ensures `folderPath` is associated with an active Antigravity Desktop project so new conversations do not fall into `outside-of-project`. */
+  async ensureProject(opId: string, folderPath: string): Promise<{projectId?: string; uri: string; created: boolean}> {
+    const uri = toAntigravityFileUri(folderPath);
+    const desktop = await this.desktopProjects();
+    const activeMatch = desktop.find(item => !item.archived && sameFolder(item.path, folderPath));
+    if (activeMatch) {
+      return {projectId: activeMatch.id, uri: activeMatch.uri, created: false};
+    }
+    const archivedMatch = desktop.find(item => item.archived && sameFolder(item.path, folderPath));
+    if (archivedMatch) {
+      await this.hub(this.daemonDir(), 'UpdateProject', {project: {id: archivedMatch.id, archived: false}, rename: false}).catch(() => {});
+      this.ledger.unhideProject('antigravity', archivedMatch.path);
+      this.projectsCache = undefined;
+      return {projectId: archivedMatch.id, uri: archivedMatch.uri, created: false};
+    }
+    const defaultName = (basename(folderPath) || 'Project').slice(0, 80);
+    try {
+      const registered = await this.registerProject(opId, {name: defaultName, path: folderPath});
+      return {projectId: registered.project.projectId, uri: registered.project.uri, created: true};
+    } catch (error) {
+      if (error instanceof BridgeError && error.code === 'incompatible') {
+        return {uri, created: false};
+      }
+      throw error;
+    }
+  }
 
   private isAwaitingDispatch(id: string, summary: Summary): boolean {
     const pending = this.dispatchedTurn.get(id);
