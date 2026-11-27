@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
-import {stat} from 'node:fs/promises';
-import {basename} from 'node:path';
+import {lstat, stat} from 'node:fs/promises';
+import {basename, dirname, join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {
   isSessionAutonomy,
@@ -33,7 +33,7 @@ import {type AntigravityBridge, deterministicProjectUuid, toAntigravityFileUri} 
 import type {ClaudeCodeBridge} from './claude-code.js';
 import type {PermissionMode as ClaudePermissionMode} from './claude-runtime.js';
 import type {Control} from './control.js';
-import {assertSafeProjectPath, type SafetyOptions} from './workspace.js';
+import {assertSafeProjectPath, isInsideOrEqual, type SafetyOptions} from './workspace.js';
 
 const DEFAULT_WAIT_TIMEOUT_MS = 300_000;
 const MAX_WAIT_TIMEOUT_MS = 2 * 3600_000;
@@ -147,6 +147,88 @@ async function ensureExistingSafeCwd(rawCwd: string, safety?: SafetyOptions): Pr
   return canonical;
 }
 
+/** Finds the nearest enclosing Git root (`.git` directory or worktree `.git` file) at or above `canonicalCwd`. */
+export async function findEnclosingGitRoot(canonicalCwd: string): Promise<string | undefined> {
+  let cursor = canonicalCwd;
+  while (true) {
+    const gitEntry = await lstat(join(cursor, '.git')).catch(() => null);
+    if (gitEntry) return cursor;
+    const parent = dirname(cursor);
+    if (parent === cursor) return undefined;
+    cursor = parent;
+  }
+}
+
+/**
+ * Aligns a requested `cwd` (e.g. `<repo>/web` after `cd web`) back to its owning project root unless `exactCwd === true`:
+ * 1. Exact match on a registered target project or a `.git` root keeps `cwd`.
+ * 2. Caller's active project root (e.g. `ANTIGRAVITY_PROJECT_ID`) containing `cwd` within the Git boundary wins next.
+ * 3. Deepest registered project in the target service containing `cwd` (bounded by any enclosing `.git` root) wins next.
+ * 4. Otherwise, if `cwd` is inside a Git repository, snaps to that `.git` root so new projects are never created on subfolders.
+ */
+export async function resolveAlignedProjectCwd(
+  rawCwd: string,
+  opts: {
+    exactCwd?: boolean;
+    safety?: SafetyOptions;
+    callerProjectRoots?: string[];
+    targetProjectPaths?: string[];
+  } = {},
+): Promise<{cwd: string; alignedFrom?: string}> {
+  const canonical = await ensureExistingSafeCwd(rawCwd, opts.safety);
+  if (opts.exactCwd) return {cwd: canonical};
+
+  const targetByKey = new Map<string, string>();
+  for (const p of opts.targetProjectPaths || []) {
+    if (p) targetByKey.set(projectPathKey(p), p);
+  }
+  const canonicalKey = projectPathKey(canonical);
+  if (targetByKey.has(canonicalKey)) return {cwd: canonical};
+
+  const gitRoot = await findEnclosingGitRoot(canonical);
+  if (gitRoot && projectPathKey(gitRoot) === canonicalKey) return {cwd: canonical};
+
+  const withinBoundary = (ancestor: string) =>
+    isInsideOrEqual(canonical, ancestor) &&
+    (!gitRoot || isInsideOrEqual(ancestor, gitRoot));
+
+  const pickDeepest = (candidates: string[]): string | undefined => {
+    const valid = candidates.filter(Boolean).filter(withinBoundary);
+    if (!valid.length) return undefined;
+    valid.sort((a, b) => b.length - a.length);
+    return valid[0];
+  };
+
+  const fromCaller = pickDeepest(opts.callerProjectRoots || []);
+  if (fromCaller) {
+    const safeCaller = await ensureExistingSafeCwd(fromCaller, opts.safety).catch(() => undefined);
+    if (safeCaller) {
+      return projectPathKey(safeCaller) === canonicalKey
+        ? {cwd: canonical}
+        : {cwd: safeCaller, alignedFrom: canonical};
+    }
+  }
+
+  const fromTarget = pickDeepest([...targetByKey.values()]);
+  if (fromTarget) {
+    const safeTarget = await ensureExistingSafeCwd(fromTarget, opts.safety).catch(() => undefined);
+    if (safeTarget) {
+      return projectPathKey(safeTarget) === canonicalKey
+        ? {cwd: canonical}
+        : {cwd: safeTarget, alignedFrom: canonical};
+    }
+  }
+
+  if (gitRoot) {
+    const safeGit = await ensureExistingSafeCwd(gitRoot, opts.safety).catch(() => undefined);
+    if (safeGit && projectPathKey(safeGit) !== canonicalKey) {
+      return {cwd: safeGit, alignedFrom: canonical};
+    }
+  }
+
+  return {cwd: canonical};
+}
+
 function flattenTurns(turns: TurnView[]): {
   recentMessages: SessionTurnMessage[];
   lastUserMessage?: string;
@@ -189,15 +271,18 @@ function baselineOfSnapshot(snapshot: UnifiedSessionSnapshot, now = Date.now()):
 
 export interface SessionDriver {
   readonly service: BridgeService;
-  list(opts: {cwd?: string; search?: string; limit: number}): Promise<UnifiedSessionSummary[]>;
+  resolveCallerProjectRoots?(callerProjectId: string): Promise<string[]>;
+  list(opts: {cwd?: string; exactCwd?: boolean; callerProjectRoots?: string[]; search?: string; limit: number}): Promise<UnifiedSessionSummary[]>;
   get(sessionId: string): Promise<UnifiedSessionSnapshot>;
   start(opId: string, input: {
     cwd: string;
+    exactCwd?: boolean;
+    callerProjectRoots?: string[];
     prompt: string;
     model?: string;
     effort?: string;
     autonomy: SessionAutonomy;
-  }): Promise<{sessionId: string; cwd: string; projectCreated?: boolean; submitted: boolean; uncertain?: boolean}>;
+  }): Promise<{sessionId: string; cwd: string; alignedFrom?: string; projectCreated?: boolean; submitted: boolean; uncertain?: boolean}>;
   send(opId: string, input: {
     sessionId: string;
     prompt: string;
@@ -232,8 +317,25 @@ export class AntigravitySessionDriver implements SessionDriver {
     this.bridge.syncSource.refresh?.(sessionId);
   }
 
-  async list(opts: {cwd?: string; search?: string; limit: number}): Promise<UnifiedSessionSummary[]> {
-    const canonicalCwd = opts.cwd ? await ensureExistingSafeCwd(opts.cwd, this.safety).catch(() => opts.cwd!) : undefined;
+  resolveCallerProjectRoots(callerProjectId: string): Promise<string[]> {
+    return this.bridge.projectFoldersById(callerProjectId);
+  }
+
+  private async alignCwd(rawCwd: string, exactCwd?: boolean, callerProjectRoots?: string[]) {
+    const targetProjectPaths = exactCwd ? undefined : await this.bridge.knownProjectPaths().catch(() => []);
+    return resolveAlignedProjectCwd(rawCwd, {
+      exactCwd,
+      safety: this.safety,
+      callerProjectRoots,
+      targetProjectPaths,
+    });
+  }
+
+  async list(opts: {cwd?: string; exactCwd?: boolean; callerProjectRoots?: string[]; search?: string; limit: number}): Promise<UnifiedSessionSummary[]> {
+    const aligned = opts.cwd
+      ? await this.alignCwd(opts.cwd, opts.exactCwd, opts.callerProjectRoots).catch(() => ({cwd: opts.cwd!}))
+      : undefined;
+    const canonicalCwd = aligned?.cwd;
     const projectUri = canonicalCwd ? toAntigravityFileUri(canonicalCwd) : undefined;
     const res = await this.bridge.handle('antigravity.list', {
       ...(projectUri ? {project: projectUri} : {}),
@@ -326,12 +428,14 @@ export class AntigravitySessionDriver implements SessionDriver {
 
   async start(opId: string, input: {
     cwd: string;
+    exactCwd?: boolean;
+    callerProjectRoots?: string[];
     prompt: string;
     model?: string;
     effort?: string;
     autonomy: SessionAutonomy;
   }) {
-    const cwd = await ensureExistingSafeCwd(input.cwd, this.safety);
+    const {cwd, alignedFrom} = await this.alignCwd(input.cwd, input.exactCwd, input.callerProjectRoots);
     const ensured = await this.bridge.ensureProject(deriveSubOpId(opId, 'ag-project'), cwd);
     const raw = unwrapLedgerResult(await this.bridge.handle('antigravity.create', {
       opId,
@@ -345,6 +449,7 @@ export class AntigravitySessionDriver implements SessionDriver {
     return {
       sessionId,
       cwd,
+      ...(alignedFrom ? {alignedFrom} : {}),
       ...(ensured.created ? {projectCreated: true} : {}),
       submitted: raw.submitted !== false,
       ...(raw.uncertain ? {uncertain: true} : {}),
@@ -413,8 +518,21 @@ export class ClaudeSessionDriver implements SessionDriver {
     this.bridge.syncSource.watch?.(listener);
   }
 
-  async list(opts: {cwd?: string; search?: string; limit: number}): Promise<UnifiedSessionSummary[]> {
-    const canonicalCwd = opts.cwd ? await ensureExistingSafeCwd(opts.cwd, this.safety).catch(() => opts.cwd!) : undefined;
+  private async alignCwd(rawCwd: string, exactCwd?: boolean, callerProjectRoots?: string[]) {
+    const targetProjectPaths = exactCwd ? undefined : await this.bridge.knownProjectPaths().catch(() => []);
+    return resolveAlignedProjectCwd(rawCwd, {
+      exactCwd,
+      safety: this.safety,
+      callerProjectRoots,
+      targetProjectPaths,
+    });
+  }
+
+  async list(opts: {cwd?: string; exactCwd?: boolean; callerProjectRoots?: string[]; search?: string; limit: number}): Promise<UnifiedSessionSummary[]> {
+    const aligned = opts.cwd
+      ? await this.alignCwd(opts.cwd, opts.exactCwd, opts.callerProjectRoots).catch(() => ({cwd: opts.cwd!}))
+      : undefined;
+    const canonicalCwd = aligned?.cwd;
     const res = await this.bridge.handle('claude.list', {
       ...(canonicalCwd ? {project: canonicalCwd} : {}),
       ...(opts.search ? {search: opts.search} : {}),
@@ -479,12 +597,14 @@ export class ClaudeSessionDriver implements SessionDriver {
 
   async start(opId: string, input: {
     cwd: string;
+    exactCwd?: boolean;
+    callerProjectRoots?: string[];
     prompt: string;
     model?: string;
     effort?: string;
     autonomy: SessionAutonomy;
   }) {
-    const cwd = await ensureExistingSafeCwd(input.cwd, this.safety);
+    const {cwd, alignedFrom} = await this.alignCwd(input.cwd, input.exactCwd, input.callerProjectRoots);
     await this.bridge.registerProject(deriveSubOpId(opId, 'claude-project'), {
       name: (basename(cwd) || 'Project').slice(0, 80),
       path: cwd,
@@ -499,7 +619,7 @@ export class ClaudeSessionDriver implements SessionDriver {
       ...(permissionMode ? {permissionMode} : {}),
     }));
     const sessionId = textRequired(raw.conversationId, 'Claude Code 会话 ID', 64);
-    return {sessionId, cwd, submitted: true};
+    return {sessionId, cwd, ...(alignedFrom ? {alignedFrom} : {}), submitted: true};
   }
 
   async send(opId: string, input: {
@@ -656,8 +776,21 @@ export class CodexSessionDriver implements SessionDriver {
     this.control.syncSource.watch?.(listener);
   }
 
-  async list(opts: {cwd?: string; search?: string; limit: number}): Promise<UnifiedSessionSummary[]> {
-    const canonicalCwd = opts.cwd ? await ensureExistingSafeCwd(opts.cwd, this.safety).catch(() => opts.cwd!) : undefined;
+  private async alignCwd(rawCwd: string, exactCwd?: boolean, callerProjectRoots?: string[]) {
+    const targetProjectPaths = exactCwd ? undefined : await this.control.knownProjectPaths().catch(() => []);
+    return resolveAlignedProjectCwd(rawCwd, {
+      exactCwd,
+      safety: this.safety,
+      callerProjectRoots,
+      targetProjectPaths,
+    });
+  }
+
+  async list(opts: {cwd?: string; exactCwd?: boolean; callerProjectRoots?: string[]; search?: string; limit: number}): Promise<UnifiedSessionSummary[]> {
+    const aligned = opts.cwd
+      ? await this.alignCwd(opts.cwd, opts.exactCwd, opts.callerProjectRoots).catch(() => ({cwd: opts.cwd!}))
+      : undefined;
+    const canonicalCwd = aligned?.cwd;
     const res = await this.control.handle({
       id: randomUUID(),
       action: 'sessions.list',
@@ -720,12 +853,33 @@ export class CodexSessionDriver implements SessionDriver {
 
   async start(opId: string, input: {
     cwd: string;
+    exactCwd?: boolean;
+    callerProjectRoots?: string[];
     prompt: string;
     model?: string;
     effort?: string;
     autonomy: SessionAutonomy;
   }) {
-    const cwd = await ensureExistingSafeCwd(input.cwd, this.safety);
+    const knownBefore = await this.control.knownProjectPaths().catch(() => []);
+    const {cwd, alignedFrom} = await resolveAlignedProjectCwd(input.cwd, {
+      exactCwd: input.exactCwd,
+      safety: this.safety,
+      callerProjectRoots: input.callerProjectRoots,
+      targetProjectPaths: input.exactCwd ? undefined : knownBefore,
+    });
+    let projectCreated = false;
+    let registeredProjectId: string | undefined;
+    const targetKey = projectPathKey(cwd);
+    if (!knownBefore.some(p => projectPathKey(p) === targetKey)) {
+      const reg = await this.control.registerProject(deriveSubOpId(opId, 'codex-project'), {
+        name: (basename(cwd) || 'Project').slice(0, 80),
+        path: cwd,
+      }).catch(() => undefined);
+      if (reg?.project?.id && reg.project.id !== cwd) {
+        projectCreated = true;
+        registeredProjectId = reg.project.id;
+      }
+    }
     const approvalPolicy = autonomyToCodex(input.autonomy);
     const createOpId = deriveSubOpId(opId, 'codex-create');
     const sendOpId = deriveSubOpId(opId, 'codex-send');
@@ -735,6 +889,7 @@ export class CodexSessionDriver implements SessionDriver {
       payload: {
         opId: createOpId,
         cwd,
+        ...(registeredProjectId ? {projectId: registeredProjectId} : {}),
         ...(input.model ? {model: input.model} : {}),
         ...(approvalPolicy ? {approvalPolicy} : {}),
       },
@@ -755,7 +910,13 @@ export class CodexSessionDriver implements SessionDriver {
         ...(approvalPolicy ? {approvalPolicy} : {}),
       },
     }));
-    return {sessionId: threadId, cwd, submitted: true};
+    return {
+      sessionId: threadId,
+      cwd,
+      ...(alignedFrom ? {alignedFrom} : {}),
+      ...(projectCreated ? {projectCreated: true} : {}),
+      submitted: true,
+    };
   }
 
   async send(opId: string, input: {
@@ -1028,20 +1189,34 @@ export class SessionHub {
     }
   }
 
+  private async resolveCallerRoots(callerProjectId: unknown): Promise<string[] | undefined> {
+    if (typeof callerProjectId !== 'string' || !callerProjectId.trim()) return undefined;
+    const id = callerProjectId.trim();
+    for (const drv of this.drivers.values()) {
+      if (drv.resolveCallerProjectRoots) {
+        const roots = await drv.resolveCallerProjectRoots(id).catch(() => []);
+        if (roots.length) return roots;
+      }
+    }
+    return undefined;
+  }
+
   async handle(action: string, p: Json = {}): Promise<Json> {
     if (action === 'agent.session.list') {
       const limit = Math.min(100, Math.max(1, Math.floor(Number(p.limit) || 25)));
       const cwd = typeof p.cwd === 'string' && p.cwd.trim() ? p.cwd.trim() : undefined;
+      const exactCwd = p.exactCwd === true;
+      const callerProjectRoots = cwd && !exactCwd ? await this.resolveCallerRoots(p.callerProjectId) : undefined;
       const search = typeof p.search === 'string' && p.search.trim() ? p.search.trim() : undefined;
       if (p.service !== undefined && p.service !== '' && p.service !== 'all') {
         const driver = this.driver(p.service);
-        const sessions = await driver.list({cwd, search, limit});
+        const sessions = await driver.list({cwd, exactCwd, callerProjectRoots, search, limit});
         return {sessions, results: {[driver.service]: {ok: true, count: sessions.length}}};
       }
       const results: Record<string, {ok: boolean; count: number; error?: string}> = {};
       const batches = await Promise.all([...this.drivers.values()].map(async drv => {
         try {
-          const items = await drv.list({cwd, search, limit});
+          const items = await drv.list({cwd, exactCwd, callerProjectRoots, search, limit});
           results[drv.service] = {ok: true, count: items.length};
           return items;
         } catch (error) {
@@ -1062,19 +1237,22 @@ export class SessionHub {
     if (action === 'agent.session.start') {
       const driver = this.driver(p.service);
       const cwd = textRequired(p.cwd, '项目目录', 4096);
+      const exactCwd = p.exactCwd === true;
+      const callerProjectRoots = !exactCwd ? await this.resolveCallerRoots(p.callerProjectId) : undefined;
       const prompt = textRequired(p.prompt, '任务内容', 100_000);
       const autonomy = parseAutonomy(p.autonomy, 'turbo')!;
       const model = typeof p.model === 'string' && p.model.trim() ? textRequired(p.model, '模型', 200) : undefined;
       const effort = typeof p.effort === 'string' && p.effort.trim() ? textRequired(p.effort, '思考程度', 40) : undefined;
       const opId = resolveOpId(p.opId, this.now());
       const baseline: SessionWaitBaseline = {userCount: 0, startedAt: this.now()};
-      const started = await driver.start(opId, {cwd, prompt, model, effort, autonomy});
+      const started = await driver.start(opId, {cwd, exactCwd, callerProjectRoots, prompt, model, effort, autonomy});
       this.rememberBaseline(driver.service, started.sessionId, baseline);
       const session = await driver.get(started.sessionId);
       const out: SessionStartResult = {
         service: driver.service,
         sessionId: started.sessionId,
         cwd: started.cwd,
+        ...(started.alignedFrom ? {alignedFrom: started.alignedFrom} : {}),
         autonomy,
         ...(started.projectCreated ? {projectCreated: true} : {}),
         submitted: started.submitted,

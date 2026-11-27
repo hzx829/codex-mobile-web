@@ -191,7 +191,7 @@ export class Control extends EventEmitter {
         return startUpload(this.ledger,threadId,session.cwd,p);
       });
     }
-    if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','turn.send','turn.cancelQueued','turn.withdrawQueued','turn.steerQueued','turn.edit','turn.stop','request.respond'].includes(req.action)) {
+    if(['session.create','session.fork','session.resume','session.rename','session.archive','session.unarchive','session.move','turn.send','turn.cancelQueued','turn.withdrawQueued','turn.steerQueued','turn.edit','turn.stop','request.respond'].includes(req.action)) {
       const opId=textRequired(p.opId,'操作标识',100),key=p.threadId||'new';
       return this.ledger.run(opId,{action:req.action,...p},()=>this.exclusive(key,async()=>{
         try {
@@ -232,11 +232,13 @@ export class Control extends EventEmitter {
       const search=p.search?.trim()?textRequired(p.search,'搜索内容',200):undefined;
       if(p.refresh===true)await this.runtime.rpc('thread/list',{limit:1,useStateDbOnly:false},3000).catch(()=>{});
       // The desktop-owned thread can block app-server thread/list; the state index remains readable.
-      const page=this.listSessions({cwd,...(projectId?{projectId}:{}),...(roots?.length?{roots}:{}),archived:Boolean(p.archived),search,cursor:p.cursor});
-      const threads=guestWorkspace()?await Promise.all(page.data.map(async thread=>{
+      const moved=this.ledger.movedSessions('codex');
+      const page=this.listSessions({cwd,...(projectId?{projectId}:{}),...(roots?.length?{roots}:{}),...(moved.size?{moved}:{}),archived:Boolean(p.archived),search,cursor:p.cursor});
+      const pageRows=moved.size?page.data.map(thread=>{const m=moved.get(thread.id);return m?{...thread,cwd:m.cwd}:thread;}):page.data;
+      const threads=guestWorkspace()?await Promise.all(pageRows.map(async thread=>{
         const path=await projectDirectory(thread.cwd).catch(()=>undefined);
         return path?{...thread,cwd:path}:null;
-      })):page.data;
+      })):pageRows;
       const data=await Promise.all(threads.filter(thread=>thread!==null).map(async thread=>{
         const id=thread.id;
         if(this.loaded.has(id))return {...thread,status:this.runtimeActive.has(id)||this.starting.has(id)||this.live.has(id)?{type:'active'}:undefined};
@@ -315,6 +317,8 @@ export class Control extends EventEmitter {
         else if(!managed)view.notice=guestWorkspace()?'这条会话的历史格式暂不支持继续。':notice||(resumeUnavailable?'当前运行端未接入。此分页会话可查看历史，暂不能在这里继续；请在 Codex 桌面操作。':'当前运行端未接入，只能查看历史。确认电脑上的任务已结束后，可在这里继续。');
       }
     }
+    const moved=this.ledger.movedSession('codex',id);
+    if(moved)view.cwd=moved.cwd;
     if(guestWorkspace())view.cwd=await projectDirectory(view.cwd);
     view.nextCursor=view.hasMore&&view.turns.length?{before:view.turns[0].id,...nativeCursor?{native:nativeCursor}:{}}:null;
     const starting=this.starting.get(id);
@@ -511,6 +515,29 @@ export class Control extends EventEmitter {
     if(!replaced)input.unshift({type:'text',text,text_elements:[]});
     return {input,numTurns:turns.length-index};
   }
+  /** Known local project folders in Codex (app-server projects + state DB session paths). */
+  async knownProjectPaths(): Promise<string[]> {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const add = (p: string) => {
+      if (!p) return;
+      const key = projectPathKey(p);
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(p);
+    };
+    if (!guestWorkspace()) {
+      const list = await runtimeProjects((method, params, timeoutMs) => this.runtime.rpc(method, params, timeoutMs)).catch(() => [] as Project[]);
+      for (const item of list) {
+        add(item.path);
+        for (const root of item.roots || []) add(root);
+      }
+    }
+    try {
+      for (const p of indexedProjectPaths()) add(p);
+    } catch {}
+    return out;
+  }
   /** Registers a project in Codex via app-server `project/create` (or returns the folder directly in guest mode). */
   async registerProject(opId:string,input:{name:string;path:string}):Promise<{project:{id:string;name:string;path:string;roots:string[]};notice?:string}> {
     const path=await projectDirectory(input.path);
@@ -665,7 +692,52 @@ export class Control extends EventEmitter {
       await this.runtime.rpc('thread/unarchive',{threadId:id});
       this.emit('change',id);return {threadId:id,archived:false};
     }
-    const session=await this.read(id,action==='turn.send'?1:undefined);
+    const session=await this.read(id,action==='turn.send'||action==='session.move'?1:undefined);
+    if(action==='session.move') {
+      if(session.running||session.activeTurnId||session.requests.length)throw new BridgeError('active','请等当前任务结束后再移动会话');
+      if(this.ledger.queued(id).length)throw new BridgeError('active','请先处理排队消息再移动会话');
+      const cwd=await projectDirectory(textRequired(p.cwd,'项目目录'));
+      let projectId=typeof p.projectId==='string'&&p.projectId.trim()?p.projectId.trim():undefined;
+      if(session.cwd&&projectPathKey(session.cwd)===projectPathKey(cwd)&&!projectId){
+        return {threadId:id,cwd};
+      }
+      if(!guestWorkspace()){
+        if(!projectId){
+          const list=await runtimeProjects((method,params,timeoutMs)=>this.runtime.rpc(method,params,timeoutMs)).catch(()=>null);
+          if(list){
+            const key=projectPathKey(cwd);
+            projectId=list.find(item=>item.id&&(projectPathKey(item.path)===key||(item.roots||[]).some(r=>projectPathKey(r)===key)))?.id;
+            if(!projectId){
+              const fallbackName=(cwd.split(/[\\/]/).filter(Boolean).at(-1)||'Project').slice(0,80);
+              const created=await this.registerProject(`${p.opId}:move`,{name:fallbackName,path:cwd}).catch(()=>null);
+              projectId=created?.project.id;
+            }
+          }
+        }
+        if(projectId){
+          await this.runtime.rpc('thread/metadata/update',{threadId:id,projectId}).catch(error=>{
+            if(error instanceof BridgeError&&/unknown|not found|method not found|unsupported/i.test(error.message)&&!/thread not found/i.test(error.message))return;
+            throw error;
+          });
+        }
+      }
+      if(this.loaded.has(id)){
+        await this.runtime.rpc('thread/settings/update',{threadId:id,cwd}).catch(()=>{});
+        this.rememberSettings(id,{cwd});
+      }
+      const pendingNew=this.newThreads.get(id);
+      if(pendingNew)this.newThreads.set(id,{...pendingNew,cwd,...(projectId?{projectId}:{})});
+      if(session.source==='desktop'){
+        const desktopCtx={conversationId:id,hostId:this.desktop.states.get(id)?.hostId||'local'};
+        await this.desktop.request('thread-owner-discovery',desktopCtx,1500)
+          .then(()=>this.desktop.request('thread-follower-update-thread-settings',{...desktopCtx,threadSettings:{cwd}}))
+          .catch(()=>{});
+      }
+      this.ledger.setMovedSession('codex',id,cwd,projectId??null);
+      void this.refreshDesktop(id);
+      this.emit('change',id);this.emit('change',null);
+      return {threadId:id,cwd,...(projectId?{projectId}:{})};
+    }
     if(action==='session.archive') {
       if(session.running)throw new BridgeError('active','请等当前任务结束后再归档');
       if(this.ledger.queued(id).length)throw new BridgeError('active','请先处理排队消息再归档');
@@ -677,8 +749,8 @@ export class Control extends EventEmitter {
       if(session.source!=='history')throw new BridgeError('already_connected','会话已经接入，请刷新后直接发送');
       if(session.resumeUnavailable)throw new BridgeError('unsupported','此分页会话暂不能在连接器中继续，请在 Codex 桌面操作');
       if(!p.confirmIdle||session.running)throw new BridgeError('active','请先在电脑结束原任务，再继续会话');
-      const r=await this.runtime.rpc('thread/resume',{threadId:id});
-      this.loaded.add(id);this.ledger.claim(id);this.settings.set(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy,sessionId:r.thread?.sessionId||id});this.emit('change',id);return {threadId:id,model:r.model,provider:r.modelProvider};
+      const r=await this.runtime.rpc('thread/resume',{threadId:id,...this.movedCwdParams(id)});
+      this.loaded.add(id);this.ledger.claim(id);this.settings.set(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy,sessionId:r.thread?.sessionId||id,...this.movedCwdSetting(id)});this.emit('change',id);return {threadId:id,model:r.model,provider:r.modelProvider};
     }
     if(p.generation!==this.generation||p.source!==session.source)throw new BridgeError('changed','连接状态已改变，请刷新任务后重试');
     if(action==='turn.send'&&p.mode==='queue') {
@@ -691,8 +763,8 @@ export class Control extends EventEmitter {
     if(!session.canControl)throw new BridgeError('read_only',session.notice||'当前会话暂不能操作');
     if(session.source==='connector'&&!this.loaded.has(id)&&(action==='turn.send'||action==='turn.edit')) {
       // Resume by ID: app-server's native ownership lock rejects another application's active thread.
-      const r=await this.runtime.rpc('thread/resume',{threadId:id});
-      this.loaded.add(id);this.rememberSettings(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy});
+      const r=await this.runtime.rpc('thread/resume',{threadId:id,...this.movedCwdParams(id)});
+      this.loaded.add(id);this.rememberSettings(id,{model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy,...this.movedCwdSetting(id)});
       const connected=await this.read(id,1);
       if(connected.running||connected.activeTurnId!==session.activeTurnId)throw new BridgeError('changed','任务已发生变化，输入已保留，请刷新后发送');
     }
@@ -724,7 +796,7 @@ export class Control extends EventEmitter {
         this.loaded.add(id);
         this.contexts.delete(id);
         for(const turn of raw.turns.slice(-numTurns))this.diffs.delete(turn.id||turn.turnId);
-        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input,...settings});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);this.startTurn(id,result.turn.id,p.opId,false,settings.model||session.model);this.ledger.recordSender({service:'codex',threadId:id,opId:p.opId,kind:'start',turnId:result.turn.id});this.rememberSettings(id,settings);}
+        try {const result=await this.runtime.rpc('turn/start',{threadId:id,input,...settings,...this.movedCwdParams(id)});if(!result?.turn?.id)throw new Error('turn/start did not return a turn');this.starting.set(id,result.turn.id);this.startTurn(id,result.turn.id,p.opId,false,settings.model||session.model);this.ledger.recordSender({service:'codex',threadId:id,opId:p.opId,kind:'start',turnId:result.turn.id});this.rememberSettings(id,settings);}
         catch {this.emit('change',id);throw new BridgeError('partial','后续聊天已回退，但重发未获确认。请刷新会话核实后再发送。',true);}
       }
       this.emit('change',id);return {threadId:id,kind:'edited'};
@@ -748,7 +820,7 @@ export class Control extends EventEmitter {
         const restoreMessage={id:p.opId,text,cwd:session.cwd,createdAt:Date.now(),context:{prompt:text,workspaceRoots:session.cwd?[session.cwd]:[],textElements:[],imageAttachments:[],fileAttachments:[],pastedTextAttachments:[],addedFiles:[],commentAttachments:[],mcpAppModelContextAttachments:[]}};
         result=session.source==='desktop'?await this.desktop.request('thread-follower-steer-turn',{...context,...params,restoreMessage,clientUserMessageId:p.opId,attachments:[]}):await this.runtime.rpc('turn/steer',{threadId:id,...params});
       } else {
-        const request:Json={threadId:id,input,...settings};
+        const request:Json={threadId:id,input,...settings,...this.movedCwdParams(id)};
         if(session.source==='desktop')result=await this.startDesktopTurn(context,{...request,clientUserMessageId:p.opId});
         else result=await this.runtime.rpc('turn/start',request);
         const started=result?.result?.turn?.id||result?.turn?.id;
@@ -915,6 +987,14 @@ export class Control extends EventEmitter {
       }
     } finally {this.draining=false;}
   }
+  private movedCwdParams(id:string):Json {
+    const moved=this.ledger.movedSession('codex',id);
+    return moved?{cwd:moved.cwd,runtimeWorkspaceRoots:[moved.cwd]}:{};
+  }
+  private movedCwdSetting(id:string):Json {
+    const moved=this.ledger.movedSession('codex',id);
+    return moved?{cwd:moved.cwd}:{};
+  }
   private rememberSettings(id:string,settings:Json) {
     this.settings.set(id,{...this.settings.get(id),...settings,...(settings.effort?{reasoningEffort:settings.effort}:{})});
   }
@@ -930,8 +1010,8 @@ export class Control extends EventEmitter {
     let stopped=false,prepared=false;
     const restore=async()=>{
       for(const id of ids){
-        const r=await this.runtime.rpc('thread/resume',{threadId:id});
-        this.loaded.add(id);this.settings.set(id,{...savedSettings.get(id),model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy});
+        const r=await this.runtime.rpc('thread/resume',{threadId:id,...this.movedCwdParams(id)});
+        this.loaded.add(id);this.settings.set(id,{...savedSettings.get(id),model:r.model,modelProvider:r.modelProvider,serviceTier:r.serviceTier,approvalPolicy:r.approvalPolicy,...this.movedCwdSetting(id)});
       }
     };
     try {

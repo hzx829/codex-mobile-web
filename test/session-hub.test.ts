@@ -23,6 +23,7 @@ import {
   ClaudeSessionDriver,
   CodexSessionDriver,
   SessionHub,
+  resolveAlignedProjectCwd,
 } from '../src/connector/session-hub.js';
 import {BridgeError, type Json} from '../src/shared/types.js';
 
@@ -287,6 +288,9 @@ test('SessionHub unifies Codex, Claude Code, and Antigravity under one cross-app
     async rpc(method: string, params: Json = {}): Promise<Json> {
       this.calls.push({method, params});
       if (method === 'project/list') return {projects: []};
+      if (method === 'project/create') {
+        return {project: {id: 'codex-proj-1', name: params.name, roots: params.roots}};
+      }
       if (method === 'thread/start') {
         return {thread: {id: 'codex-t1', cwd: params.cwd, title: 'Codex 任务', turns: []}, model: 'gpt-6-astra', modelProvider: 'openai', approvalPolicy: params.approvalPolicy};
       }
@@ -400,6 +404,8 @@ test('SessionHub unifies Codex, Claude Code, and Antigravity under one cross-app
     prompt: '跑单元测试',
   });
   assert.equal(codexStart.sessionId, 'codex-t1');
+  assert.equal(codexStart.projectCreated, true);
+  assert.equal(codexRuntime.calls.find(c => c.method === 'thread/start')?.params.projectId, 'codex-proj-1');
   assert.equal(codexRuntime.calls.find(c => c.method === 'thread/start')?.params.approvalPolicy, 'never');
 
   // Start Claude session via unified SessionHub with `wait: true` -> defaults to `bypassPermissions`
@@ -691,4 +697,108 @@ test('Antigravity -> Claude Code keeps ClaudeRuntime alive via session-daemon ac
   } finally {
     checkLedger.close();
   }
+});
+
+test('subdirectory invocations align to parent project or Git root without leaking across nested Git repos', {timeout: 8000}, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'cmw-align-'));
+  const home = join(root, 'home');
+  const safety = {home, dataDir: join(root, 'data')};
+
+  // 1. Subfolder inside an unregistered Git repo snaps to the Git root
+  const gitRepo = join(home, 'Projects', 'mono-repo');
+  const subPkg = join(gitRepo, 'packages', 'web', 'src');
+  await mkdir(join(gitRepo, '.git'), {recursive: true});
+  await mkdir(subPkg, {recursive: true});
+
+  const gitAligned = await resolveAlignedProjectCwd(subPkg, {safety});
+  assert.equal(gitAligned.cwd.toLowerCase(), gitRepo.toLowerCase());
+  assert.equal(gitAligned.alignedFrom?.toLowerCase(), subPkg.toLowerCase());
+
+  // `--exact-cwd` keeps the exact subfolder
+  const exact = await resolveAlignedProjectCwd(subPkg, {exactCwd: true, safety});
+  assert.equal(exact.cwd.toLowerCase(), subPkg.toLowerCase());
+  assert.equal(exact.alignedFrom, undefined);
+
+  // 2. Nested independent Git repo inside a registered catch-all parent NEVER leaks out to the catch-all parent
+  const outerWorkspace = join(home, 'Projects', 'workspace');
+  const nestedRepo = join(outerWorkspace, 'service-a');
+  const nestedSub = join(nestedRepo, 'cmd');
+  await mkdir(join(nestedRepo, '.git'), {recursive: true});
+  await mkdir(nestedSub, {recursive: true});
+
+  const nestedAligned = await resolveAlignedProjectCwd(nestedSub, {
+    safety,
+    targetProjectPaths: [outerWorkspace],
+    callerProjectRoots: [outerWorkspace],
+  });
+  assert.equal(nestedAligned.cwd.toLowerCase(), nestedRepo.toLowerCase());
+
+  // 3. End-to-end: Antigravity parent project (non-git) delegates from `plain-app/frontend` -> Claude Code & Antigravity both land in `plain-app`
+  const agDir = join(home, '.gemini', 'antigravity');
+  const projectsDir = join(home, '.gemini', 'config', 'projects');
+  const plainApp = join(home, 'Projects', 'plain-app');
+  const plainSub = join(plainApp, 'frontend');
+  await mkdir(agDir, {recursive: true});
+  await mkdir(projectsDir, {recursive: true});
+  await mkdir(plainSub, {recursive: true});
+
+  const parentAgProjectId = '6785bd6f-b28e-41b4-b49e-406a67f3bac6';
+  await writeFile(join(projectsDir, `${parentAgProjectId}.json`), JSON.stringify({
+    id: parentAgProjectId,
+    name: 'plain-app',
+    projectResources: {resources: [{folderUri: toAntigravityFileUri(plainApp)}]},
+  }));
+
+  const agDb = new DatabaseSync(join(agDir, 'conversation_summaries.db'));
+  agDb.exec('CREATE TABLE conversation_summaries(conversation_id TEXT,title TEXT,status TEXT,last_modified_time TEXT,step_count INTEGER,last_user_input_step_index INTEGER,last_user_input_time TEXT,not_fully_idle INTEGER,workspace_uris TEXT)');
+  const existingAgConv = randomUUID();
+  agDb.prepare('INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?,?,?,?)').run(
+    existingAgConv, '父项目对话', 'CASCADE_RUN_STATUS_IDLE', '2026-11-27T08:00:00.000Z', 2, 1, 'u1', 0, JSON.stringify([toAntigravityFileUri(plainApp)]),
+  );
+
+  const ledger = new Ledger(':memory:');
+  const startCascadePayloads: Json[] = [];
+  const agBridge = new AntigravityBridge(
+    agDir,
+    ledger,
+    async (_dir, method, body) => {
+      if (method === 'StartCascade') {
+        startCascadePayloads.push(body);
+        return {cascadeId: randomUUID()};
+      }
+      if (method === 'GetCascadeModelConfigData') {
+        return {clientModelConfigs: [{label: 'Pro', modelOrAlias: {model: 'M'}}], defaultOverrideModelConfig: {modelOrAlias: {model: 'M'}}};
+      }
+      return {};
+    },
+    projectsDir,
+    {queueIntervalMs: 60_000},
+  );
+  t.after(async () => {
+    agBridge.close();
+    agDb.close();
+    ledger.close();
+    await removeTestTemp(root);
+  });
+
+  const hub = new SessionHub([new AntigravitySessionDriver(agBridge, safety)]);
+
+  // Starting from subfolder `plain-app/frontend` aligns to `plain-app` and reuses `parentAgProjectId`!
+  const startedFromSub = await hub.handle('agent.session.start', {
+    service: 'antigravity',
+    cwd: plainSub,
+    callerProjectId: parentAgProjectId,
+    prompt: '在前端子目录发起但归属父项目',
+  });
+  assert.equal(startedFromSub.cwd.toLowerCase(), plainApp.toLowerCase());
+  assert.equal(startedFromSub.alignedFrom?.toLowerCase(), plainSub.toLowerCase());
+  assert.equal(startedFromSub.projectCreated, undefined);
+  assert.equal(startCascadePayloads[0]?.projectEnvConfig?.projectId, parentAgProjectId);
+
+  // Listing from subfolder `plain-app/frontend` also finds parent `plain-app` conversations!
+  const listedFromSub = await hub.handle('agent.session.list', {
+    service: 'antigravity',
+    cwd: plainSub,
+  });
+  assert.ok(listedFromSub.sessions.some((s: Json) => s.sessionId === existingAgConv));
 });

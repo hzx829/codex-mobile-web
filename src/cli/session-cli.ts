@@ -79,7 +79,7 @@ interface ParsedArgs {
 }
 
 const BOOLEAN_FLAGS = new Set([
-  'help', 'h', 'json', 'wait', 'stdin', 'after-send', 'kill-background', 'daemon', 'no-daemon',
+  'help', 'h', 'json', 'wait', 'stdin', 'after-send', 'kill-background', 'daemon', 'no-daemon', 'exact-cwd',
 ]);
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -361,7 +361,8 @@ async function executeFallbackAction(
   const closers: (() => void)[] = [];
   try {
     const drivers: SessionDriver[] = [];
-    if (targetService === 'antigravity' || targetService === 'all') {
+    const needAgForCaller = Boolean(opts.env.ANTIGRAVITY_PROJECT_ID || payload.callerProjectId);
+    if (targetService === 'antigravity' || targetService === 'all' || needAgForCaller) {
       const agRoot = opts.env.CMW_ANTIGRAVITY_HOME || join(opts.homeDir, '.gemini', 'antigravity');
       const ag = new AntigravityBridge(agRoot, ledger);
       closers.push(() => ag.close());
@@ -539,6 +540,8 @@ export async function runSessionCli(argv: string[], io: CliIo = {}): Promise<num
 
     const service = flagLast(parsed, 'to') || flagLast(parsed, 'service') || 'antigravity';
     const dataDir = flagLast(parsed, 'data-dir');
+    const exactCwd = parsed.booleans.has('exact-cwd');
+    const callerProjectId = !exactCwd && env.ANTIGRAVITY_PROJECT_ID?.trim() ? env.ANTIGRAVITY_PROJECT_ID.trim() : undefined;
     const actorName = flagLast(parsed, 'actor') || detectDefaultActorName(env, service);
     const actorId = `agent:${actorName.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'caller'}`;
     const actor = {userId: actorId, name: actorName};
@@ -563,6 +566,8 @@ export async function runSessionCli(argv: string[], io: CliIo = {}): Promise<num
       const res = await call('agent.session.list', {
         service,
         ...(cwd ? {cwd: resolve(baseCwd, cwd)} : {}),
+        ...(exactCwd ? {exactCwd: true} : {}),
+        ...(callerProjectId ? {callerProjectId} : {}),
         ...(search ? {search} : {}),
         limit,
       });
@@ -597,6 +602,8 @@ export async function runSessionCli(argv: string[], io: CliIo = {}): Promise<num
       const res = await call('agent.session.start', {
         service,
         cwd,
+        ...(exactCwd ? {exactCwd: true} : {}),
+        ...(callerProjectId ? {callerProjectId} : {}),
         prompt,
         autonomy,
         ...(model ? {model} : {}),
@@ -612,12 +619,16 @@ export async function runSessionCli(argv: string[], io: CliIo = {}): Promise<num
         out(formatSnapshot(
           `[SESSION START+WAIT: ${res.waitResult.stopReason.toUpperCase()}]`,
           res.waitResult.session,
-          [`elapsed_sec: ${(res.waitResult.elapsedMs / 1000).toFixed(1)}`],
+          [
+            ...(res.alignedFrom ? [`aligned_from: ${res.alignedFrom}`] : []),
+            `elapsed_sec: ${(res.waitResult.elapsedMs / 1000).toFixed(1)}`,
+          ],
         ));
         return 0;
       }
       const nextWait = `cmw-session wait ${res.sessionId} --to ${res.service} ${waitFlagsForBaseline(res.baseline)}`;
       out(formatSnapshot('[SESSION STARTED]', res.session, [
+        ...(res.alignedFrom ? [`aligned_from: ${res.alignedFrom}`] : []),
         ...(res.projectCreated ? ['project_registered: true'] : []),
         `next_wait_cmd: ${nextWait}`,
       ]));

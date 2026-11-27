@@ -80,6 +80,7 @@ export interface SessionStartResult {
   service: BridgeService;
   sessionId: string;
   cwd: string;
+  alignedFrom?: string;
   autonomy: SessionAutonomy;
   projectCreated?: boolean;
   submitted: boolean;

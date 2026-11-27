@@ -542,6 +542,14 @@ export class ClaudeCodeBridge {
     return {removed: true, notice: '已从 Claude Code 项目列表移除（文件夹与会话均已保留）'};
   }
 
+  /** Known local project folders in Claude Code (explicitly registered + existing session folders, excluding hidden ones). */
+  async knownProjectPaths(): Promise<string[]> {
+    const all = await this.all().catch(() => [] as SessionInfo[]);
+    const paths = [...new Set(all.map(info => info.cwd).filter((cwd): cwd is string => Boolean(cwd)))];
+    const listed = await this.listedProjects(paths);
+    return listed.map(item => item.path);
+  }
+
   private async listedProjects(sessionPaths: string[]): Promise<{id: string; path: string; name?: string}[]> {
     if (guestWorkspace()) {
       return (await workspaceProjects(sessionPaths)).map(item => ({...item, id: item.path}));

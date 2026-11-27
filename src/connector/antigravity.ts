@@ -1191,6 +1191,53 @@ export class AntigravityBridge {
     return summary ? this.isAwaitingDispatch(id, summary) : false;
   }
 
+  /** Local folder paths belonging to a specific Antigravity Desktop project UUID (supports multi-root projects). */
+  async projectFoldersById(projectId: string): Promise<string[]> {
+    if (!guid.test(projectId)) return [];
+    try {
+      const raw = JSON.parse(await readFile(join(this.projectsDir, `${projectId}.json`), 'utf8'));
+      if (raw?.archived === true) return [];
+      const resources: Json[] = Array.isArray(raw?.projectResources?.resources) ? raw.projectResources.resources : [];
+      return resources
+        .map(item => localWorkspace(item?.folderUri ?? item?.gitFolder?.folderUri))
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Known local project directories in Antigravity (active desktop projects + conversation workspace roots). */
+  async knownProjectPaths(): Promise<string[]> {
+    const hidden = this.ledger.hiddenProjects('antigravity');
+    const isHidden = (p: string) => hidden.has(projectPathKey(p));
+    const desktop = await this.desktopProjects();
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const add = (p: string) => {
+      if (!p || isHidden(p)) return;
+      const key = projectPathKey(p);
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(p);
+    };
+    for (const item of desktop) {
+      if (!item.archived) add(item.path);
+    }
+    try {
+      const uris = this.index(db =>
+        db.prepare(`SELECT DISTINCT workspace.value AS uri FROM conversation_summaries, ${workspaceEntries} AS workspace WHERE workspace.type='text'`).all()
+          .map((row: Json) => String(row.uri || '')),
+      );
+      for (const rawUri of uris) {
+        const local = localWorkspace(rawUri);
+        if (!local) continue;
+        const archivedDesktop = desktop.find(item => item.archived && sameFolder(item.path, local));
+        if (!archivedDesktop) add(local);
+      }
+    } catch {}
+    return out;
+  }
+
   /** Ensures `folderPath` is associated with an active Antigravity Desktop project so new conversations do not fall into `outside-of-project`. */
   async ensureProject(opId: string, folderPath: string): Promise<{projectId?: string; uri: string; created: boolean}> {
     const uri = toAntigravityFileUri(folderPath);
